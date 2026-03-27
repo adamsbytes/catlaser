@@ -1,0 +1,19 @@
+[package]
+name = "catlaser-vision"
+description = "Vision, tracking, targeting, and IPC daemon for the catlaser compute module"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+catlaser-common.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
+
+[lints]
+workspace = true

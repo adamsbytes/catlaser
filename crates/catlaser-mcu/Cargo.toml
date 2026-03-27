@@ -1,0 +1,12 @@
+[package]
+name = "catlaser-mcu"
+description = "RP2040 firmware — servo interpolation, laser control, watchdog, and safety"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+catlaser-common.workspace = true
+
+[lints]
+workspace = true

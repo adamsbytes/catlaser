@@ -1,0 +1,149 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/catlaser-common",
+    "crates/catlaser-mcu",
+    "crates/catlaser-vision",
+]
+default-members = [
+    "crates/catlaser-common",
+    "crates/catlaser-vision",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# internal
+catlaser-common = { path = "crates/catlaser-common" }
+
+# error handling
+thiserror = { version = "2", default-features = false }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+
+# observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# testing
+proptest = "1"
+insta = { version = "1", features = ["yaml"] }
+
+# Rust compiler lints
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unused_must_use = "deny"
+let_underscore_drop = "deny"
+
+# Clippy lints
+[workspace.lints.clippy]
+
+# --- lint groups ---
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# --- pedantic overrides (noise, not signal) ---
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+
+# --- panics, unwraps, incomplete code ---
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+panic_in_result_fn = "deny"
+missing_assert_message = "deny"
+
+# --- debug/dev leftovers ---
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+tests_outside_test_module = "deny"
+
+# --- unsafe discipline ---
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+
+# --- type safety + numerics ---
+as_conversions = "deny"
+default_numeric_fallback = "deny"
+lossy_float_literal = "deny"
+float_cmp_const = "deny"
+arithmetic_side_effects = "deny"
+integer_division = "deny"
+suspicious_xor_used_as_pow = "deny"
+fn_to_numeric_cast_any = "deny"
+
+# --- indexing ---
+indexing_slicing = "deny"
+
+# --- allocation + cloning ---
+clone_on_ref_ptr = "deny"
+rc_buffer = "deny"
+implicit_clone = "deny"
+
+# --- strings ---
+str_to_string = "deny"
+string_to_string = "deny"
+inefficient_to_string = "deny"
+format_push_string = "deny"
+string_add = "deny"
+string_lit_chars_any = "deny"
+
+# --- error handling ---
+error_impl_error = "deny"
+map_err_ignore = "deny"
+try_err = "deny"
+
+# --- control flow + patterns ---
+match_wildcard_for_single_variants = "deny"
+if_then_some_else_none = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+ref_patterns = "deny"
+unneeded_field_pattern = "deny"
+
+# --- memory ---
+mem_forget = "deny"
+
+# --- lint hygiene (force #[expect] over #[allow]) ---
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# --- code quality ---
+redundant_type_annotations = "deny"
+same_name_method = "deny"
+renamed_function_params = "deny"
+semicolon_outside_block = "deny"
+empty_structs_with_brackets = "deny"
+empty_drop = "deny"
+needless_raw_strings = "deny"
+unseparated_literal_suffix = "deny"
+unnecessary_self_imports = "deny"
+deref_by_slicing = "deny"
+verbose_file_reads = "deny"
+create_dir = "deny"
+suboptimal_flops = "deny"
+mixed_read_write_in_expression = "deny"
+mutex_atomic = "deny"
+wildcard_dependencies = "deny"
+
+# --- size + performance ---
+large_enum_variant = "deny"
+large_stack_frames = "deny"
+needless_pass_by_value = "deny"
+redundant_closure_for_method_calls = "deny"
+semicolon_if_nothing_returned = "deny"
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
