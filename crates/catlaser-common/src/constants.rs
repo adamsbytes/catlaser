@@ -38,6 +38,27 @@ pub const TILT_HORIZON_LIMIT_PERSON: i16 = 500_i16;
 /// dispenser door closed.
 pub const WATCHDOG_TIMEOUT_MS: u32 = 500_u32;
 
+/// Software watchdog check frequency.
+///
+/// The watchdog task checks command freshness at this rate and feeds the
+/// RP2040 hardware watchdog each tick. 100 Hz gives at most 10 ms of
+/// additional detection latency beyond the timeout window.
+pub const WATCHDOG_CHECK_HZ: u32 = 100_u32;
+
+/// Returns `true` if the compute module has not sent a valid command
+/// within the timeout window.
+///
+/// Stale in two cases:
+/// - `last_rx_ticks == 0`: no command has ever been received since boot
+/// - Elapsed time since `last_rx_ticks` exceeds `timeout_ticks`
+#[must_use]
+pub const fn is_command_stale(last_rx_ticks: u64, now_ticks: u64, timeout_ticks: u64) -> bool {
+    if last_rx_ticks == 0_u64 {
+        return true;
+    }
+    now_ticks.saturating_sub(last_rx_ticks) > timeout_ticks
+}
+
 // ---------------------------------------------------------------------------
 // Servo parameters
 // ---------------------------------------------------------------------------
@@ -260,6 +281,79 @@ pub const SUPERCAP_BUDGET_MS: u32 = 5000_u32;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // --- is_command_stale ---
+
+    #[test]
+    fn test_stale_no_command_ever_received() {
+        assert!(
+            is_command_stale(0_u64, 1_000_000_u64, 500_000_u64),
+            "zero last_rx (never received) must be stale"
+        );
+    }
+
+    #[test]
+    fn test_stale_no_command_at_boot() {
+        assert!(
+            is_command_stale(0_u64, 0_u64, 500_000_u64),
+            "zero last_rx must be stale even at time zero"
+        );
+    }
+
+    #[test]
+    fn test_fresh_just_received() {
+        assert!(
+            !is_command_stale(1000_u64, 1000_u64, 500_000_u64),
+            "command at current time must be fresh"
+        );
+    }
+
+    #[test]
+    fn test_fresh_within_timeout() {
+        // elapsed = 500_999 - 1000 = 499_999, within 500_000 timeout
+        assert!(
+            !is_command_stale(1000_u64, 500_999_u64, 500_000_u64),
+            "elapsed within timeout must be fresh"
+        );
+    }
+
+    #[test]
+    fn test_fresh_at_exact_timeout_boundary() {
+        // elapsed = 501_000 - 1000 = 500_000, exactly at timeout (> not >=)
+        assert!(
+            !is_command_stale(1000_u64, 501_000_u64, 500_000_u64),
+            "elapsed at exact timeout must be fresh (strict greater-than)"
+        );
+    }
+
+    #[test]
+    fn test_stale_one_tick_past_timeout() {
+        // elapsed = 501_001 - 1000 = 500_001, one tick past timeout
+        assert!(
+            is_command_stale(1000_u64, 501_001_u64, 500_000_u64),
+            "one tick past timeout must be stale"
+        );
+    }
+
+    #[test]
+    fn test_stale_well_past_timeout() {
+        assert!(
+            is_command_stale(1000_u64, 10_001_000_u64, 500_000_u64),
+            "well past timeout must be stale"
+        );
+    }
+
+    #[test]
+    fn test_fresh_now_before_last_rx_saturates_to_zero() {
+        // Degenerate case: now < last_rx. saturating_sub returns 0, which is <= timeout.
+        assert!(
+            !is_command_stale(1_000_000_u64, 500_u64, 500_000_u64),
+            "saturating_sub handles now < last_rx without underflow"
+        );
+    }
+
+    // --- dispense_rotations ---
 
     #[test]
     fn test_dispense_rotations_valid_tiers() {
@@ -312,5 +406,46 @@ mod tests {
             Some(r2),
             "function must match array at index 2"
         );
+    }
+
+    // --- is_command_stale proptest ---
+
+    proptest! {
+        #[test]
+        fn test_stale_never_received_always_stale(
+            now in any::<u64>(),
+            timeout in 1_u64..=4_000_000_000_u64,
+        ) {
+            prop_assert!(
+                is_command_stale(0_u64, now, timeout),
+                "zero last_rx must always be stale",
+            );
+        }
+
+        #[test]
+        fn test_stale_within_timeout_always_fresh(
+            last_rx in 1_u64..=4_000_000_000_u64,
+            elapsed in 0_u64..500_000_u64,
+        ) {
+            let now = last_rx.saturating_add(elapsed);
+            prop_assert!(
+                !is_command_stale(last_rx, now, 500_000_u64),
+                "elapsed {} within 500000 timeout must be fresh", elapsed,
+            );
+        }
+
+        #[test]
+        fn test_stale_past_timeout_always_stale(
+            last_rx in 1_u64..=4_000_000_000_u64,
+            overshoot in 1_u64..1_000_000_u64,
+        ) {
+            let now = last_rx
+                .saturating_add(500_000_u64)
+                .saturating_add(overshoot);
+            prop_assert!(
+                is_command_stale(last_rx, now, 500_000_u64),
+                "overshoot {} past timeout must be stale", overshoot,
+            );
+        }
     }
 }

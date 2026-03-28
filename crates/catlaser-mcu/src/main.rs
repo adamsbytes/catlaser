@@ -10,7 +10,7 @@
 //! - `control` — 200Hz loop: reads latest command, interpolates servo
 //!   positions, outputs PWM (future step)
 //! - `watchdog` — monitors command freshness, kills laser and homes servos
-//!   on timeout (future step)
+//!   on timeout
 //! - `power` — monitors VBUS via ADC, initiates shutdown on power loss
 //!   (future step)
 
@@ -18,6 +18,7 @@
 #![no_main]
 
 mod control;
+mod safety;
 mod state;
 mod uart;
 
@@ -25,6 +26,7 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::pwm::Pwm;
+use embassy_rp::watchdog::{ResetReason, Watchdog};
 use fixed::traits::ToFixed as _;
 
 use catlaser_common::constants::{PAN_HOME, PWM_DIVIDER, PWM_TOP, TILT_HOME, UART_BAUD};
@@ -42,6 +44,14 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(embassy_rp::config::Config::default());
 
     defmt::info!("catlaser-mcu: starting");
+
+    // --- Watchdog: check for previous reset reason ---
+    let watchdog = Watchdog::new(p.WATCHDOG);
+    match watchdog.reset_reason() {
+        Some(ResetReason::Forced) => defmt::warn!("boot: previous forced reset"),
+        Some(ResetReason::TimedOut) => defmt::warn!("boot: previous watchdog timeout"),
+        None => {}
+    }
 
     // --- UART RX: commands from compute module ---
     let mut uart_config = embassy_rp::uart::Config::default();
@@ -71,6 +81,14 @@ async fn main(spawner: Spawner) {
         spawner.spawn(token);
     } else {
         defmt::error!("catlaser-mcu: failed to spawn control task");
+        cortex_m::asm::udf();
+    }
+
+    // --- Watchdog: software timeout + hardware backstop ---
+    if let Ok(token) = safety::watchdog_task(watchdog) {
+        spawner.spawn(token);
+    } else {
+        defmt::error!("catlaser-mcu: failed to spawn watchdog task");
         cortex_m::asm::udf();
     }
 
