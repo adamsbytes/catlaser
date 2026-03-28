@@ -4,6 +4,7 @@ check:
     cargo test --release
     cargo doc --no-deps --document-private-items
     cargo deny check
+    just py-check
 
 check-mcu:
     cargo clippy -p catlaser-mcu --target thumbv6m-none-eabi
@@ -42,3 +43,15 @@ proto: proto-format proto-lint proto-generate
 
 clean-deps:
     cargo machete
+
+py-check:
+    cd python && ruff check .
+    cd python && ruff format --check .
+    cd python && pyright .
+
+py-fmt:
+    cd python && ruff check --fix .
+    cd python && ruff format .
+
+py-test:
+    cd python && python -m pytest
