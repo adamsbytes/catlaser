@@ -39,6 +39,15 @@ pub static LAST_RX_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0_u64));
 ///   dispenser task (aborts sequence on power loss)
 pub static POWER_LOST: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
 
+/// Debounced hopper empty state from the IR break-beam sensor.
+///
+/// `true` = hopper is empty (beam clear for [`HOPPER_DEBOUNCE_THRESHOLD`]
+/// consecutive readings). `false` = treats present (default).
+///
+/// - **Written by:** hopper task (on debounced state change)
+/// - **Read by:** any task needing hopper status (informational)
+pub static HOPPER_EMPTY: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
+
 // ---------------------------------------------------------------------------
 // Dispenser inter-task communication
 // ---------------------------------------------------------------------------

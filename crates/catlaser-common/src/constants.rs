@@ -229,6 +229,27 @@ const fn pulse_us_to_ticks(pulse_us: u16) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// Hopper sensor
+// ---------------------------------------------------------------------------
+
+/// Hopper IR break-beam sensor polling frequency.
+///
+/// 2 Hz = 500 ms interval. The hopper level changes only during dispense
+/// sequences (at most every few seconds), so high-frequency polling wastes
+/// cycles for no benefit.
+pub const HOPPER_POLL_HZ: u32 = 2_u32;
+
+/// Number of consecutive "empty" sensor readings required before the MCU
+/// reports the hopper as empty.
+///
+/// At [`HOPPER_POLL_HZ`] = 2 Hz, a threshold of 4 means 2 seconds of
+/// sustained empty readings before the state transitions. A single "present"
+/// reading immediately resets the counter. This asymmetry is deliberate:
+/// false-empty blocks autonomous sessions (bad), false-present only causes
+/// a dry dispense cycle (tolerable).
+pub const HOPPER_DEBOUNCE_THRESHOLD: u8 = 4_u8;
+
+// ---------------------------------------------------------------------------
 // UART protocol
 // ---------------------------------------------------------------------------
 
@@ -493,6 +514,19 @@ const _: () = assert!(
 const _: () = assert!(
     DISPENSE_JAM_TIMEOUT_MS > 0_u32,
     "jam timeout must be nonzero"
+);
+
+// ---------------------------------------------------------------------------
+// Compile-time hopper invariants
+// ---------------------------------------------------------------------------
+
+// Poll rate must be nonzero.
+const _: () = assert!(HOPPER_POLL_HZ > 0_u32, "hopper poll rate must be nonzero");
+
+// Debounce threshold must be nonzero (at least one reading required).
+const _: () = assert!(
+    HOPPER_DEBOUNCE_THRESHOLD > 0_u8,
+    "hopper debounce threshold must be nonzero"
 );
 
 #[cfg(test)]

@@ -15,12 +15,15 @@
 //!   on timeout
 //! - `power` — monitors VBUS via ADC at 10Hz, initiates shutdown on power
 //!   loss (laser off, servos home, signal compute module)
+//! - `hopper` — polls IR break-beam sensor at 2Hz, debounces readings,
+//!   drives status LED (solid = OK, blink = empty)
 
 #![no_std]
 #![no_main]
 
 mod control;
 mod dispenser;
+mod hopper;
 mod power;
 mod safety;
 mod state;
@@ -29,7 +32,7 @@ mod uart;
 use embassy_executor::Spawner;
 use embassy_rp::adc;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output, Pull};
+use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::pwm::Pwm;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use fixed::traits::ToFixed as _;
@@ -140,6 +143,17 @@ async fn main(spawner: Spawner) {
         spawner.spawn(token);
     } else {
         defmt::error!("catlaser-mcu: failed to spawn power_monitor task");
+        cortex_m::asm::udf();
+    }
+
+    // --- Hopper sensor (GPIO27) + status LED (GPIO25) ---
+    let hopper_sensor = Input::new(p.PIN_27, Pull::Up);
+    let status_led = Output::new(p.PIN_25, Level::Low);
+
+    if let Ok(token) = hopper::hopper_task(hopper_sensor, status_led) {
+        spawner.spawn(token);
+    } else {
+        defmt::error!("catlaser-mcu: failed to spawn hopper task");
         cortex_m::asm::udf();
     }
 

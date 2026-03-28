@@ -7,8 +7,10 @@
 
 pub mod constants;
 pub mod frame_parser;
+pub mod hopper;
 pub mod servo_cmd;
 pub mod servo_math;
 
 pub use frame_parser::FrameParser;
+pub use hopper::HopperDebouncer;
 pub use servo_cmd::{ChecksumError, DispenseDirection, Flags, ServoCommand};

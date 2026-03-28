@@ -13,7 +13,7 @@
   - [X] Tilt clamp (hardware horizon limit enforcement)
   - [X] Power monitoring (VBUS ADC, supercap shutdown sequence)
   - [X] Dispenser servo control (disc/door/deflector, jam detection via stall timeout)
-  - [ ] Hopper sensor GPIO read + status LED
+  - [X] Hopper sensor GPIO read + status LED
 
 [ ] Vision Pipeline (catlaser-vision, partial)
   - [ ] V4L2/libcamera DMA capture from SC3336
