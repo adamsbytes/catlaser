@@ -124,31 +124,31 @@ const MAX_DIMS: usize = 16;
 #[derive(Debug, Clone)]
 pub(crate) struct TensorAttr {
     /// Tensor index (0-based within inputs or outputs).
-    pub(super) index: u32,
+    pub(crate) index: u32,
     /// Number of valid dimensions in `dims`.
-    pub(super) n_dims: u32,
+    pub(crate) n_dims: u32,
     /// Dimension values. Only the first `n_dims` entries are meaningful.
-    pub(super) dims: [u32; MAX_DIMS],
+    pub(crate) dims: [u32; MAX_DIMS],
     /// Total number of elements in the tensor.
-    pub(super) n_elems: u32,
+    pub(crate) n_elems: u32,
     /// Byte size of the tensor data (without stride padding).
-    pub(super) size: u32,
+    pub(crate) size: u32,
     /// Data layout format (NCHW, NHWC, NC1HWC2).
-    pub(super) format: TensorFormat,
+    pub(crate) format: TensorFormat,
     /// Element data type (Float32, Int8, etc.).
-    pub(super) data_type: TensorType,
+    pub(crate) data_type: TensorType,
     /// Quantization method.
-    pub(super) qnt_type: QuantType,
+    pub(crate) qnt_type: QuantType,
     /// Zero point for affine asymmetric quantization.
-    pub(super) zp: i32,
+    pub(crate) zp: i32,
     /// Scale factor for affine asymmetric quantization.
-    pub(super) scale: f32,
+    pub(crate) scale: f32,
     /// Width stride in elements (0 means contiguous, same as width).
-    pub(super) w_stride: u32,
+    pub(crate) w_stride: u32,
     /// Byte size including stride padding (use for memory allocation).
-    pub(super) size_with_stride: u32,
+    pub(crate) size_with_stride: u32,
     /// Height stride in elements.
-    pub(super) h_stride: u32,
+    pub(crate) h_stride: u32,
 }
 
 impl TensorAttr {

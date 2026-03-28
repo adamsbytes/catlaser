@@ -4,6 +4,7 @@
 //! IPC to the Python behavior engine over Unix domain socket.
 
 mod camera;
+mod detect;
 mod npu;
 mod proto;
 
