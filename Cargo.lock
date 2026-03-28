@@ -175,6 +175,7 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
+ "fixed",
  "panic-probe",
  "portable-atomic",
  "static_cell",

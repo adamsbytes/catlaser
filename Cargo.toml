@@ -44,6 +44,9 @@ embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"]
 embassy-sync = { version = "0.8", features = ["defmt"] }
 embassy-futures = "0.1"
 
+# fixed-point arithmetic (PWM divider)
+fixed = "1"
+
 # embedded support (MCU firmware)
 defmt = "1"
 defmt-rtt = "1"

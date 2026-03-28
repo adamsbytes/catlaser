@@ -12,6 +12,7 @@ embassy-rp.workspace = true
 embassy-time.workspace = true
 embassy-sync.workspace = true
 embassy-futures.workspace = true
+fixed.workspace = true
 defmt.workspace = true
 defmt-rtt.workspace = true
 cortex-m.workspace = true

@@ -5,8 +5,8 @@
 //! found, automatically resyncing on checksum failures by sliding the window
 //! forward one byte.
 
-use crate::constants::SERVO_CMD_SIZE;
 use crate::ServoCommand;
+use crate::constants::SERVO_CMD_SIZE;
 
 /// Frame size as `u8` for internal counter arithmetic.
 ///
@@ -145,8 +145,13 @@ mod tests {
     #[test]
     fn test_parse_valid_frame_exact_boundary() {
         let mut parser = FrameParser::new();
-        let cmd =
-            ServoCommand::new(4523_i16, -1000_i16, 128_u8, 200_u8, Flags::new().with_laser(true));
+        let cmd = ServoCommand::new(
+            4523_i16,
+            -1000_i16,
+            128_u8,
+            200_u8,
+            Flags::new().with_laser(true),
+        );
 
         let result = push_command(&mut parser, cmd);
         assert_eq!(
@@ -227,16 +232,12 @@ mod tests {
         let mut parser = FrameParser::new();
 
         // Send a frame with byte 0 corrupted — checksum will fail.
-        let cmd =
-            ServoCommand::new(4523_i16, -1000_i16, 128_u8, 200_u8, Flags::new());
+        let cmd = ServoCommand::new(4523_i16, -1000_i16, 128_u8, 200_u8, Flags::new());
         let [b0, b1, b2, b3, b4, b5, b6, b7] = cmd.to_bytes();
         let bad_frame = [b0 ^ 0xFF_u8, b1, b2, b3, b4, b5, b6, b7];
 
         for &b in &bad_frame {
-            assert!(
-                parser.push(b).is_none(),
-                "corrupted frame must not parse"
-            );
+            assert!(parser.push(b).is_none(), "corrupted frame must not parse");
         }
 
         // Parser shifted buffer left (7 bytes remain). A valid frame must
@@ -259,13 +260,7 @@ mod tests {
             "garbage byte must not parse"
         );
 
-        let cmd = ServoCommand::new(
-            0_i16,
-            4500_i16,
-            255_u8,
-            0_u8,
-            Flags::new().with_laser(true),
-        );
+        let cmd = ServoCommand::new(0_i16, 4500_i16, 255_u8, 0_u8, Flags::new().with_laser(true));
         let result = push_command(&mut parser, cmd);
         assert_eq!(
             result,

@@ -98,6 +98,41 @@ pub const fn dispense_rotations(tier: u8) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// PWM configuration (50 Hz servo signal at 125 MHz / divider 100)
+// ---------------------------------------------------------------------------
+
+/// PWM counter wrap value for 50 Hz servo signal.
+///
+/// `period = (top + 1) * divider / clk_sys = 25000 * 100 / 125_000_000 = 20 ms`
+pub const PWM_TOP: u16 = 24_999_u16;
+
+/// PWM clock divider (integer part) for 50 Hz servo signal.
+pub const PWM_DIVIDER: u8 = 100_u8;
+
+/// PWM compare value for minimum servo pulse (500 us).
+pub const PWM_TICKS_MIN: u16 = 625_u16;
+
+/// PWM compare value for center servo pulse (1500 us).
+pub const PWM_TICKS_CENTER: u16 = 1875_u16;
+
+/// PWM compare value for maximum servo pulse (2500 us).
+pub const PWM_TICKS_MAX: u16 = 3125_u16;
+
+/// Converts a pulse width in microseconds to PWM compare ticks.
+///
+/// `ticks = pulse_us * (PWM_TOP + 1) / period_us = pulse_us * 5 / 4`
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::integer_division,
+    reason = "compile-time helper only; max intermediate = 2500 * 5 = 12500, fits u32 and u16"
+)]
+const fn pulse_us_to_ticks(pulse_us: u16) -> u16 {
+    (pulse_us as u32 * 5_u32 / 4_u32) as u16
+}
+
+// ---------------------------------------------------------------------------
 // UART protocol
 // ---------------------------------------------------------------------------
 
@@ -136,6 +171,28 @@ const _: () = assert!(
 const _: () = assert!(
     SERVO_PULSE_MIN_US < SERVO_PULSE_CENTER_US && SERVO_PULSE_CENTER_US < SERVO_PULSE_MAX_US,
     "servo pulse widths must be ordered: min < center < max"
+);
+
+// PWM tick values must match derivation from pulse widths.
+const _: () = assert!(
+    PWM_TICKS_MIN == pulse_us_to_ticks(SERVO_PULSE_MIN_US),
+    "PWM_TICKS_MIN must equal pulse_us_to_ticks(SERVO_PULSE_MIN_US)"
+);
+const _: () = assert!(
+    PWM_TICKS_CENTER == pulse_us_to_ticks(SERVO_PULSE_CENTER_US),
+    "PWM_TICKS_CENTER must equal pulse_us_to_ticks(SERVO_PULSE_CENTER_US)"
+);
+const _: () = assert!(
+    PWM_TICKS_MAX == pulse_us_to_ticks(SERVO_PULSE_MAX_US),
+    "PWM_TICKS_MAX must equal pulse_us_to_ticks(SERVO_PULSE_MAX_US)"
+);
+const _: () = assert!(
+    PWM_TICKS_MIN < PWM_TICKS_CENTER && PWM_TICKS_CENTER < PWM_TICKS_MAX,
+    "PWM tick values must be ordered: min < center < max"
+);
+const _: () = assert!(
+    PWM_TICKS_MAX <= PWM_TOP,
+    "maximum servo pulse must fit within PWM period"
 );
 
 // ---------------------------------------------------------------------------

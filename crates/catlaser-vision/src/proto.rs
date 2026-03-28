@@ -14,10 +14,13 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
-    clippy::restriction,
+    clippy::restriction
 )]
 pub mod detection {
-    include!(concat!(env!("OUT_DIR"), "/catlaser.detection.v1.detection.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/catlaser.detection.v1.detection.rs"
+    ));
 }
 
 /// App/device API messages over WebRTC data channel or TCP.
@@ -31,7 +34,7 @@ pub mod detection {
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
-    clippy::restriction,
+    clippy::restriction
 )]
 pub mod app {
     include!(concat!(env!("OUT_DIR"), "/catlaser.app.v1.app.rs"));

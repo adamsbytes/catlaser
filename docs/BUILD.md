@@ -7,7 +7,7 @@
 
 [ ] MCU Firmware (catlaser-mcu)
   - [X] Embassy setup, task spawning, UART receive + command parsing
-  - [ ] 200Hz servo interpolation loop + PWM output
+  - [X] 200Hz servo interpolation loop + PWM output
   - [ ] Laser GPIO control
   - [ ] Watchdog (500ms timeout → laser off, servos home, dispenser door closed)
   - [ ] Tilt clamp (hardware horizon limit enforcement)
