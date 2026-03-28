@@ -17,7 +17,7 @@
 
 [ ] Vision Pipeline (catlaser-vision, partial)
   - [X] V4L2/libcamera DMA capture from SC3336
-  - [ ] RKNN NPU inference wrapper (YOLO INT8, 640x480)
+  - [X] RKNN NPU inference wrapper (YOLO INT8, 640x480)
   - [ ] Detection post-processing (NMS, bbox extraction)
   - [ ] SORT tracker (Kalman filter + Hungarian matching)
   - [ ] Track lifecycle (tentative → confirmed → coasting → dead)
