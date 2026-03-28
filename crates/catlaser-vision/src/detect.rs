@@ -289,6 +289,9 @@ struct StrideLevel {
     score_zp: i32,
     /// Score tensor quantization scale.
     score_scale: f32,
+    /// Pre-computed INT8 threshold for the score pre-filter. Raw score
+    /// tensor values below this are skipped without dequantization.
+    score_threshold_i8: i8,
 }
 
 /// Pre-NMS detection candidate.
@@ -372,6 +375,33 @@ fn iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
     }
 
     inter_area / union_area
+}
+
+/// Computes the minimum raw INT8 score tensor value that could meet
+/// the float score threshold after dequantization.
+///
+/// Conservative: may admit cells whose dequantized score falls just
+/// below the float threshold (caught by the confidence check downstream).
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects,
+    reason = "INT8 threshold precomputation: zp (i8-range i32) → f32 is lossless \
+              in practice. f32 division/addition for the threshold mapping. \
+              floor().clamp(-128, 127) guarantees the f32 → i8 cast is in range."
+)]
+fn compute_score_threshold_i8(score_threshold: f32, zp: i32, scale: f32) -> i8 {
+    if !(scale > 0.0_f32) {
+        // Scale must be positive for RKNN affine asymmetric. If it
+        // isn't, disable the optimization by admitting all cells.
+        return i8::MIN;
+    }
+    // float_value = (raw - zp) * scale  →  raw = float_value / scale + zp
+    // floor() ensures we never reject a cell that would pass the float check.
+    let raw = (score_threshold / scale) + zp as f32;
+    let clamped = raw.floor().clamp(f32::from(i8::MIN), f32::from(i8::MAX));
+    clamped as i8
 }
 
 /// Reads a single element from NC1HWC2 tensor data.
@@ -601,7 +631,7 @@ impl Detector {
         };
 
         // Group tensors by spatial dimensions to find stride levels.
-        let strides = build_stride_levels(&identities, model_w, model_h)?;
+        let strides = build_stride_levels(&identities, model_w, model_h, config.score_threshold)?;
 
         #[expect(
             clippy::as_conversions,
@@ -687,7 +717,10 @@ impl Detector {
                 break;
             }
 
-            // Suppress overlapping lower-confidence candidates.
+            // Suppress overlapping lower-confidence candidates of the
+            // same class. Per-class NMS ensures that overlapping detections
+            // of different classes (e.g. a cat in front of a person) both
+            // survive — critical for safety ceiling computation.
             #[expect(
                 clippy::arithmetic_side_effects,
                 reason = "i + 1 cannot overflow: i < len, len is a Vec length (< usize::MAX)"
@@ -698,6 +731,7 @@ impl Detector {
                     continue;
                 }
                 if let Some(other) = self.candidates.get(j)
+                    && other.class_id == candidate.class_id
                     && iou(&candidate.bbox, &other.bbox) > self.config.nms_iou_threshold
                     && let Some(flag) = self.suppressed.get_mut(j)
                 {
@@ -721,6 +755,7 @@ fn build_stride_levels(
     identities: &[TensorIdentity],
     model_w: u32,
     model_h: u32,
+    score_threshold: f32,
 ) -> Result<[StrideLevel; NUM_STRIDES], DetectError> {
     // Collect unique spatial dimensions.
     let mut grid_sizes: Vec<(u32, u32)> = Vec::with_capacity(NUM_STRIDES);
@@ -828,6 +863,11 @@ fn build_stride_levels(
             class_scale: class_t.scale,
             score_zp: score_t.zp,
             score_scale: score_t.scale,
+            score_threshold_i8: compute_score_threshold_i8(
+                score_threshold,
+                score_t.zp,
+                score_t.scale,
+            ),
         });
     }
 
@@ -874,18 +914,12 @@ fn process_stride(
 
     for h in 0..gh {
         for w in 0..gw {
-            // Step 1: Quick pre-filter via score tensor.
-            let score = read_dequant(
-                score_data,
-                0,
-                h,
-                w,
-                gh,
-                gw,
-                stride.score_zp,
-                stride.score_scale,
-            );
-            if score < config.score_threshold {
+            // Step 1: Quick pre-filter via raw INT8 score comparison.
+            // The threshold was pre-computed at construction time from
+            // the float score_threshold and this stride's quantization
+            // parameters, avoiding per-cell dequantization.
+            let raw_score = read_nc1hwc2(score_data, 0, h, w, gh, gw).unwrap_or(i8::MIN);
+            if raw_score < stride.score_threshold_i8 {
                 continue;
             }
 
@@ -921,6 +955,12 @@ fn process_stride(
 }
 
 /// Finds the class with the highest sigmoid score for a grid cell.
+///
+/// All class channels share the same zp/scale per tensor, and affine
+/// dequantization (`scale` is positive) and sigmoid are both
+/// monotonically increasing. The max raw INT8 value therefore maps to
+/// the highest sigmoid score. Scanning raw bytes avoids 79 redundant
+/// dequantizations and sigmoid calls on the A7 hot path.
 #[expect(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
@@ -936,27 +976,18 @@ fn find_best_class(
     stride: &StrideLevel,
 ) -> (u16, f32) {
     let mut best_class = 0_u16;
-    let mut best_score = 0.0_f32;
+    let mut best_raw = read_nc1hwc2(class_data, 0, h, w, grid_h, grid_w).unwrap_or(0_i8);
 
-    for c in 0..NUM_CLASSES {
-        let logit = read_dequant(
-            class_data,
-            c,
-            h,
-            w,
-            grid_h,
-            grid_w,
-            stride.class_zp,
-            stride.class_scale,
-        );
-        let score = sigmoid(logit);
-        if score > best_score {
-            best_score = score;
+    for c in 1..NUM_CLASSES {
+        let raw = read_nc1hwc2(class_data, c, h, w, grid_h, grid_w).unwrap_or(0_i8);
+        if raw > best_raw {
+            best_raw = raw;
             best_class = c as u16;
         }
     }
 
-    (best_class, best_score)
+    let logit = dequantize_affine(best_raw, stride.class_zp, stride.class_scale);
+    (best_class, sigmoid(logit))
 }
 
 /// Decodes DFL offsets (left, top, right, bottom) for a grid cell.
@@ -1587,6 +1618,27 @@ mod tests {
     }
 
     #[test]
+    fn test_nms_preserves_cross_class_overlap() {
+        let mut detector = make_test_detector();
+        detector.candidates.push(Candidate {
+            bbox: BoundingBox::new(0.0_f32, 0.0_f32, 100.0_f32, 100.0_f32),
+            class_id: 15, // cat
+            confidence: 0.9_f32,
+        });
+        detector.candidates.push(Candidate {
+            bbox: BoundingBox::new(10.0_f32, 10.0_f32, 110.0_f32, 110.0_f32),
+            class_id: 0, // person
+            confidence: 0.7_f32,
+        });
+        detector.nms();
+        assert_eq!(
+            detector.detections.len(),
+            2,
+            "overlapping detections of different classes must both survive NMS"
+        );
+    }
+
+    #[test]
     fn test_nms_preserves_non_overlapping() {
         let mut detector = make_test_detector();
         detector.candidates.push(Candidate {
@@ -1772,7 +1824,7 @@ mod tests {
     #[test]
     fn test_build_stride_levels_valid() {
         let identities = make_standard_identities(640, 480);
-        let levels = build_stride_levels(&identities, 640, 480)
+        let levels = build_stride_levels(&identities, 640, 480, 0.25_f32)
             .expect("valid identities should produce stride levels");
 
         // Sorted by grid area descending (largest grid first = smallest stride).
@@ -1791,7 +1843,8 @@ mod tests {
     #[test]
     fn test_build_stride_levels_640x640() {
         let identities = make_standard_identities(640, 640);
-        let levels = build_stride_levels(&identities, 640, 640).expect("640x640 model should work");
+        let levels = build_stride_levels(&identities, 640, 640, 0.25_f32)
+            .expect("640x640 model should work");
 
         assert_eq!(levels[0].grid_h, 80, "stride 8 grid 80x80");
         assert_eq!(levels[0].grid_w, 80, "stride 8 grid 80x80");
@@ -1804,7 +1857,7 @@ mod tests {
         // Remove the box tensor for stride 8.
         let mut identities = make_standard_identities(640, 480);
         identities.retain(|id| !(id.role == TensorRole::Box && id.grid_h == 60));
-        let err = build_stride_levels(&identities, 640, 480).unwrap_err();
+        let err = build_stride_levels(&identities, 640, 480, 0.25_f32).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1829,6 +1882,7 @@ mod tests {
         let class_data = build_class_tensor(grid_h, grid_w, 2, 3, 15, 100_i8);
         let box_data = build_box_tensor(grid_h, grid_w, 2, 3, [3.0_f32, 2.0_f32, 4.0_f32, 5.0_f32]);
 
+        let score_threshold = 0.1_f32;
         let stride = StrideLevel {
             stride: 8,
             grid_h: 4,
@@ -1842,11 +1896,12 @@ mod tests {
             class_scale: 0.1_f32,
             score_zp: -128_i32,
             score_scale: 0.1_f32,
+            score_threshold_i8: compute_score_threshold_i8(score_threshold, -128_i32, 0.1_f32),
         };
 
         let mut detector = Detector {
             config: DetectionConfig {
-                score_threshold: 0.1_f32,
+                score_threshold,
                 confidence_threshold: 0.51_f32,
                 nms_iou_threshold: 0.45_f32,
                 max_detections: 20,
@@ -1921,6 +1976,7 @@ mod tests {
         let class_data = vec![0_i8; 5 * grid_h * grid_w * C2]; // 80ch, C1=5
         let box_data = vec![0_i8; 4 * grid_h * grid_w * C2]; // 64ch, C1=4
 
+        let mut detector = make_test_detector();
         let stride = StrideLevel {
             stride: 8,
             grid_h: 2,
@@ -1934,9 +1990,12 @@ mod tests {
             class_scale: 1.0_f32,
             score_zp: 0,
             score_scale: 0.001_f32,
+            score_threshold_i8: compute_score_threshold_i8(
+                detector.config.score_threshold,
+                0,
+                0.001_f32,
+            ),
         };
-
-        let mut detector = make_test_detector();
         process_stride(
             &detector.config,
             &stride,
@@ -2273,18 +2332,21 @@ mod tests {
                     }
                 }
 
-                // No pair in output has IoU > threshold.
+                // No same-class pair in output has IoU > threshold.
+                // Per-class NMS allows cross-class overlap (e.g. cat + person).
                 for i in 0..detector.detections.len() {
                     for j in (i + 1)..detector.detections.len() {
                         if let (Some(a), Some(b)) = (
                             detector.detections.get(i),
                             detector.detections.get(j),
                         ) {
-                            let overlap = iou(&a.bbox, &b.bbox);
-                            prop_assert!(
-                                overlap <= detector.config.nms_iou_threshold,
-                                "NMS output pair ({i},{j}) has IoU {overlap} > threshold"
-                            );
+                            if a.class_id == b.class_id {
+                                let overlap = iou(&a.bbox, &b.bbox);
+                                prop_assert!(
+                                    overlap <= detector.config.nms_iou_threshold,
+                                    "NMS output same-class pair ({i},{j}) has IoU {overlap} > threshold"
+                                );
+                            }
                         }
                     }
                 }
@@ -2298,6 +2360,7 @@ mod tests {
 
     /// Creates a `Detector` with default config and dummy stride levels for NMS tests.
     fn make_test_detector() -> Detector {
+        let config = DetectionConfig::default();
         let dummy_stride = StrideLevel {
             stride: 8,
             grid_h: 1,
@@ -2311,9 +2374,10 @@ mod tests {
             class_scale: 1.0_f32,
             score_zp: 0,
             score_scale: 1.0_f32,
+            score_threshold_i8: compute_score_threshold_i8(config.score_threshold, 0, 1.0_f32),
         };
         Detector {
-            config: DetectionConfig::default(),
+            config,
             strides: [dummy_stride.clone(), dummy_stride.clone(), dummy_stride],
             model_width: 640.0_f32,
             model_height: 480.0_f32,

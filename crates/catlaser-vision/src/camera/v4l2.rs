@@ -494,17 +494,23 @@ pub(super) fn open_device(path: &Path) -> Result<OwnedFd, CameraError> {
     let path_bytes = path.as_os_str().as_bytes();
 
     // Build a null-terminated path on the stack. Device paths are short
-    // (e.g. /dev/video11) so 256 bytes is generous.
-    let mut c_path = [0_u8; 256];
-    let c_path_slice =
-        c_path
-            .get_mut(..path_bytes.len())
-            .ok_or_else(|| CameraError::DeviceOpen {
-                path: path.to_path_buf(),
-                source: std::io::Error::from_raw_os_error(libc::ENAMETOOLONG),
-            })?;
+    // (e.g. /dev/video11) so 256 bytes is generous. The path must be
+    // strictly shorter than the buffer to leave room for the null
+    // terminator at c_path[path_bytes.len()].
+    const PATH_BUF_LEN: usize = 256;
+    let mut c_path = [0_u8; PATH_BUF_LEN];
+    let path_len = path_bytes.len();
+    let c_path_slice = if path_len < PATH_BUF_LEN {
+        c_path.get_mut(..path_len)
+    } else {
+        None
+    }
+    .ok_or_else(|| CameraError::DeviceOpen {
+        path: path.to_path_buf(),
+        source: std::io::Error::from_raw_os_error(libc::ENAMETOOLONG),
+    })?;
     c_path_slice.copy_from_slice(path_bytes);
-    // Null terminator is already zero from initialization.
+    // Null terminator at c_path[path_len] is zero from initialization.
 
     #[expect(unsafe_code, reason = "libc::open is an FFI syscall wrapper — ADR-001")]
     // SAFETY: c_path is a stack-allocated, null-terminated byte array.

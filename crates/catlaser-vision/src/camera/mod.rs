@@ -70,7 +70,9 @@ pub(crate) struct CameraConfig {
 impl CameraConfig {
     /// Validates the configuration, returning an error for invalid values.
     fn validate(&self) -> Result<(), CameraError> {
-        if self.width == 0 || self.height == 0 {
+        // NV12 requires even dimensions: the UV plane is subsampled 2x
+        // in both directions, so odd width or height produces a malformed frame.
+        if self.width == 0 || self.height == 0 || self.width % 2 != 0 || self.height % 2 != 0 {
             return Err(CameraError::FormatMismatch {
                 requested_width: self.width,
                 requested_height: self.height,
@@ -395,6 +397,30 @@ mod tests {
         assert!(
             config.validate().is_err(),
             "zero height must fail validation"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_odd_width() {
+        let config = CameraConfig {
+            width: 641,
+            ..CameraConfig::default()
+        };
+        assert!(
+            config.validate().is_err(),
+            "odd width must fail validation for NV12"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_odd_height() {
+        let config = CameraConfig {
+            height: 481,
+            ..CameraConfig::default()
+        };
+        assert!(
+            config.validate().is_err(),
+            "odd height must fail validation for NV12"
         );
     }
 
