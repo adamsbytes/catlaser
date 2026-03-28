@@ -1,0 +1,180 @@
+syntax = "proto3";
+package catlaser.detection.v1;
+
+// Wire format message type IDs.
+//
+// Used as the 1-byte prefix in the [type][length][payload] framing over the
+// Unix domain socket. Each side matches on this byte to select the protobuf
+// decoder for the payload.
+enum MsgType {
+  MSG_TYPE_UNSPECIFIED = 0;
+  // Rust -> Python
+  MSG_TYPE_DETECTION_FRAME = 1;
+  MSG_TYPE_TRACK_EVENT = 2;
+  MSG_TYPE_SESSION_REQUEST = 3;
+  // Python -> Rust
+  MSG_TYPE_BEHAVIOR_COMMAND = 4;
+  MSG_TYPE_SESSION_ACK = 5;
+  MSG_TYPE_IDENTITY_RESULT = 6;
+}
+
+// SORT tracker lifecycle states.
+enum TrackState {
+  TRACK_STATE_UNSPECIFIED = 0;
+  TRACK_STATE_TENTATIVE = 1;
+  TRACK_STATE_CONFIRMED = 2;
+  TRACK_STATE_COASTING = 3;
+}
+
+// Behavior engine targeting modes.
+enum TargetingMode {
+  TARGETING_MODE_UNSPECIFIED = 0;
+  TARGETING_MODE_IDLE = 1;
+  TARGETING_MODE_TRACK = 2;
+  TARGETING_MODE_LEAD_TO_POINT = 3;
+  TARGETING_MODE_DISPENSE = 4;
+}
+
+// Reasons Python may skip an autonomous session.
+enum SkipReason {
+  SKIP_REASON_UNSPECIFIED = 0;
+  SKIP_REASON_COOLDOWN = 1;
+  SKIP_REASON_HOPPER_EMPTY = 2;
+  SKIP_REASON_QUIET_HOURS = 3;
+}
+
+// Why Rust initiated a session request.
+enum SessionTrigger {
+  SESSION_TRIGGER_UNSPECIFIED = 0;
+  SESSION_TRIGGER_SCHEDULED = 1;
+  SESSION_TRIGGER_CAT_DETECTED = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Rust -> Python, steady (~15/sec)
+// ---------------------------------------------------------------------------
+
+// A single tracked cat within a DetectionFrame.
+//
+// All spatial fields are normalized to [0.0, 1.0] in frame coordinates so
+// Python never needs to know camera resolution or FOV.
+message TrackedCat {
+  uint32 track_id = 1;
+  // Resolved cat identity from the catalog. Empty until an IdentityResult
+  // arrives for this track.
+  string cat_id = 2;
+  // Bounding box center (normalized).
+  float center_x = 3;
+  float center_y = 4;
+  // Bounding box dimensions (normalized).
+  float width = 5;
+  float height = 6;
+  // Velocity in normalized units per second.
+  float velocity_x = 7;
+  float velocity_y = 8;
+  TrackState state = 9;
+}
+
+// Streaming detection output from the vision pipeline.
+//
+// Sent once per processed frame at ~15 FPS. On the Rust side, decode via
+// DetectionFrameView for zero-copy access on the hot path.
+message DetectionFrame {
+  // Monotonic microseconds since device boot.
+  uint64 timestamp_us = 1;
+  uint64 frame_number = 2;
+  repeated TrackedCat cats = 3;
+  // Lowest safety boundary computed from all person detections.
+  // 0.0 = top of frame, 1.0 = bottom. Negative if no person detected.
+  // Python must keep the laser target below this line.
+  float safety_ceiling_y = 4;
+  bool person_in_frame = 5;
+  // Ambient brightness estimate. 0.0 = dark, 1.0 = bright.
+  float ambient_brightness = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Rust -> Python, sporadic events
+// ---------------------------------------------------------------------------
+
+message NewTrack {
+  uint32 track_id = 1;
+}
+
+message TrackLost {
+  uint32 track_id = 1;
+  // How long this track was alive, for play stats.
+  uint32 duration_ms = 2;
+}
+
+// Sent when a track is confirmed and needs identity resolution.
+// Rust runs the MobileNetV2 embedding model on the NPU and sends the result
+// here. Python compares against stored profiles in SQLite.
+message IdentityRequest {
+  uint32 track_id = 1;
+  // 128-dim float32 embedding vector, serialized as raw bytes (512 bytes).
+  bytes embedding = 2;
+  // Embedding model confidence for this crop.
+  float confidence = 3;
+}
+
+message TrackEvent {
+  oneof event {
+    NewTrack new_track = 1;
+    TrackLost track_lost = 2;
+    IdentityRequest identity_request = 3;
+  }
+}
+
+// Rust wants to start a play session (scheduled or triggered by cat detection).
+// Python responds with SessionAck.
+message SessionRequest {
+  SessionTrigger trigger = 1;
+  // The track that triggered detection. Only set when trigger is CAT_DETECTED.
+  optional uint32 track_id = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Python -> Rust, sporadic (1-5/sec)
+// ---------------------------------------------------------------------------
+
+// Per-frame behavior command from the state machine to the vision daemon.
+// Rust translates this into servo targets for the MCU.
+message BehaviorCommand {
+  TargetingMode mode = 1;
+  // Offset from the tracked cat's center (normalized). Used in TRACK mode
+  // to lead the laser ahead of or around the cat.
+  float offset_x = 2;
+  float offset_y = 3;
+  // Interpolation smoothing factor (0.0 = instant, 1.0 = maximum smoothing).
+  float smoothing = 4;
+  // Maximum laser speed in normalized units per second.
+  float max_speed = 5;
+  bool laser_on = 6;
+  // Which track to follow. Required for TRACK mode.
+  uint32 target_track_id = 7;
+  // Target coordinates for LEAD_TO_POINT mode (left or right chute exit,
+  // both near the device base).
+  float lead_target_x = 8;
+  float lead_target_y = 9;
+  // Disc rotation count for DISPENSE mode (3, 5, or 7).
+  uint32 dispense_rotations = 10;
+}
+
+// Response to SessionRequest. Python decides whether to engage.
+message SessionAck {
+  bool accept = 1;
+  // Set when accept is false. Tells Rust why the session was skipped.
+  SkipReason skip_reason = 2;
+}
+
+// Response to IdentityRequest. Python resolves the embedding against the
+// cat profile catalog in SQLite.
+message IdentityResult {
+  uint32 track_id = 1;
+  // Resolved cat ID from the catalog. Empty for a new/unknown cat -- the app
+  // will prompt the user to name it.
+  string cat_id = 2;
+  // Cosine similarity score. >0.75 = confident match.
+  float similarity = 3;
+}

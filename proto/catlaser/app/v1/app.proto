@@ -1,0 +1,232 @@
+syntax = "proto3";
+package catlaser.app.v1;
+
+// Hopper fill state reported in status updates.
+enum HopperLevel {
+  HOPPER_LEVEL_UNSPECIFIED = 0;
+  HOPPER_LEVEL_OK = 1;
+  HOPPER_LEVEL_LOW = 2;
+  HOPPER_LEVEL_EMPTY = 3;
+}
+
+// Diagnostic test types available via run_diagnostic.
+enum DiagnosticType {
+  DIAGNOSTIC_TYPE_UNSPECIFIED = 0;
+  DIAGNOSTIC_TYPE_SERVO_SWEEP = 1;
+  DIAGNOSTIC_TYPE_LASER_TEST = 2;
+  DIAGNOSTIC_TYPE_CAMERA_CHECK = 3;
+  DIAGNOSTIC_TYPE_DISPENSER_CYCLE = 4;
+  DIAGNOSTIC_TYPE_FULL = 5;
+}
+
+// Days of the week for schedule entries.
+enum DayOfWeek {
+  DAY_OF_WEEK_UNSPECIFIED = 0;
+  DAY_OF_WEEK_MONDAY = 1;
+  DAY_OF_WEEK_TUESDAY = 2;
+  DAY_OF_WEEK_WEDNESDAY = 3;
+  DAY_OF_WEEK_THURSDAY = 4;
+  DAY_OF_WEEK_FRIDAY = 5;
+  DAY_OF_WEEK_SATURDAY = 6;
+  DAY_OF_WEEK_SUNDAY = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+message CatProfile {
+  string cat_id = 1;
+  string name = 2;
+  // JPEG thumbnail crop from the most recent identification.
+  bytes thumbnail = 3;
+  // Per-cat behavior tuning (adapted over sessions).
+  float preferred_speed = 4;
+  float preferred_smoothing = 5;
+  float pattern_randomness = 6;
+  // Lifetime stats.
+  uint32 total_sessions = 7;
+  uint32 total_play_time_sec = 8;
+  uint32 total_treats = 9;
+  // When this cat was first seen (epoch seconds).
+  uint64 created_at = 10;
+}
+
+message PlaySession {
+  string session_id = 1;
+  // Epoch seconds.
+  uint64 start_time = 2;
+  uint64 end_time = 3;
+  repeated string cat_ids = 4;
+  uint32 duration_sec = 5;
+  float engagement_score = 6;
+  uint32 treats_dispensed = 7;
+  uint32 pounce_count = 8;
+}
+
+message ScheduleEntry {
+  string entry_id = 1;
+  // Time of day as minutes from midnight (0-1439).
+  uint32 start_minute = 2;
+  uint32 duration_min = 3;
+  repeated DayOfWeek days = 4;
+  bool enabled = 5;
+}
+
+// ---------------------------------------------------------------------------
+// App -> Device requests
+// ---------------------------------------------------------------------------
+
+message StartSessionRequest {}
+
+// Triggers lead-to-treat cooldown, then dispense.
+message StopSessionRequest {}
+
+message GetStatusRequest {}
+
+message GetCatProfilesRequest {}
+
+message UpdateCatProfileRequest {
+  CatProfile profile = 1;
+}
+
+message DeleteCatProfileRequest {
+  string cat_id = 1;
+}
+
+message GetPlayHistoryRequest {
+  // Epoch seconds. Both inclusive.
+  uint64 start_time = 1;
+  uint64 end_time = 2;
+}
+
+message StartStreamRequest {
+  // WebRTC SDP offer from the app.
+  string sdp_offer = 1;
+}
+
+message StopStreamRequest {}
+
+message SetScheduleRequest {
+  repeated ScheduleEntry entries = 1;
+}
+
+message GetScheduleRequest {}
+
+// User names an unknown cat that was detected during a session.
+message IdentifyNewCatRequest {
+  // Track ID from the NewCatDetected event.
+  uint32 track_id_hint = 1;
+  string name = 2;
+}
+
+message RunDiagnosticRequest {
+  DiagnosticType diagnostic_type = 1;
+}
+
+// Envelope for all app-to-device commands. Sent over WebRTC data channel or
+// TCP over Tailscale.
+message AppRequest {
+  // Caller-assigned ID echoed in the corresponding DeviceEvent. Allows the
+  // app to correlate responses when multiple requests are in flight. Zero
+  // for fire-and-forget commands.
+  uint32 request_id = 13;
+  oneof request {
+    StartSessionRequest start_session = 1;
+    StopSessionRequest stop_session = 2;
+    GetStatusRequest get_status = 3;
+    GetCatProfilesRequest get_cat_profiles = 4;
+    UpdateCatProfileRequest update_cat_profile = 5;
+    DeleteCatProfileRequest delete_cat_profile = 6;
+    GetPlayHistoryRequest get_play_history = 7;
+    StartStreamRequest start_stream = 8;
+    StopStreamRequest stop_stream = 9;
+    SetScheduleRequest set_schedule = 10;
+    IdentifyNewCatRequest identify_new_cat = 11;
+    RunDiagnosticRequest run_diagnostic = 12;
+    GetScheduleRequest get_schedule = 14;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Device -> App events
+// ---------------------------------------------------------------------------
+
+// Doubles as heartbeat, pushed every few seconds.
+message StatusUpdate {
+  HopperLevel hopper_level = 1;
+  bool session_active = 2;
+  repeated string active_cat_ids = 3;
+  uint64 uptime_sec = 4;
+  string firmware_version = 5;
+}
+
+message CatProfileList {
+  repeated CatProfile profiles = 1;
+}
+
+message PlayHistoryResponse {
+  repeated PlaySession sessions = 1;
+}
+
+// Current schedule state. Sent as response to GetScheduleRequest and as
+// confirmation after SetScheduleRequest (request_id identifies which).
+message ScheduleList {
+  repeated ScheduleEntry entries = 1;
+}
+
+message StreamOffer {
+  // WebRTC SDP answer from the device.
+  string sdp_answer = 1;
+}
+
+// Pushed at session end.
+message SessionSummary {
+  repeated string cat_ids = 1;
+  uint32 duration_sec = 2;
+  float engagement_score = 3;
+  uint32 treats_dispensed = 4;
+  uint32 pounce_count = 5;
+  uint64 ended_at = 6;
+}
+
+// Push notification with thumbnail for the naming UX.
+message NewCatDetected {
+  uint32 track_id_hint = 1;
+  // JPEG thumbnail crop of the detected cat.
+  bytes thumbnail = 2;
+  float confidence = 3;
+}
+
+// Push notification to refill the hopper.
+message HopperEmpty {}
+
+message DiagnosticResult {
+  DiagnosticType diagnostic_type = 1;
+  bool passed = 2;
+  string details = 3;
+}
+
+message DeviceError {
+  uint32 code = 1;
+  string message = 2;
+}
+
+// Envelope for all device-to-app messages. Pushed from device to app.
+message DeviceEvent {
+  // Echoed from the AppRequest that triggered this event. Zero for
+  // unsolicited pushes (heartbeats, session summaries, notifications).
+  uint32 request_id = 10;
+  oneof event {
+    StatusUpdate status_update = 1;
+    CatProfileList cat_profile_list = 2;
+    PlayHistoryResponse play_history = 3;
+    StreamOffer stream_offer = 4;
+    SessionSummary session_summary = 5;
+    NewCatDetected new_cat_detected = 6;
+    HopperEmpty hopper_empty = 7;
+    DiagnosticResult diagnostic_result = 8;
+    DeviceError error = 9;
+    ScheduleList schedule = 11;
+  }
+}

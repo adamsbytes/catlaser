@@ -1,8 +1,8 @@
 [ ] Contracts (catlaser-common, proto/, SQLite)
   - [X] ServoCommand packed struct + constants (safety limits, pin maps)
-  - [ ] detection.proto (Rust↔Python IPC messages)
-  - [ ] app.proto (App↔Device API)
-  - [ ] buf.yaml + codegen pipeline (Rust + Python)
+  - [X] detection.proto (Rust↔Python IPC messages)
+  - [X] app.proto (App↔Device API)
+  - [X] buf.yaml + codegen pipeline (Rust + Python)
   - [ ] SQLite schema (sessions, cat profiles, embeddings, schedule, chute state)
 
 [ ] MCU Firmware (catlaser-mcu)

@@ -29,5 +29,16 @@ bench:
 docs:
     cargo doc --no-deps --open
 
+proto-lint:
+    buf lint proto/
+
+proto-generate:
+    buf generate
+
+proto-format:
+    buf format -w proto/
+
+proto: proto-format proto-lint proto-generate
+
 clean-deps:
     cargo machete

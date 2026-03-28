@@ -1,0 +1,8 @@
+version: v2
+inputs:
+  - directory: proto
+plugins:
+  - protoc_builtin: python
+    out: python/catlaser_brain/proto
+  - protoc_builtin: pyi
+    out: python/catlaser_brain/proto

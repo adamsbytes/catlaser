@@ -19,6 +19,10 @@ publish = false
 # internal
 catlaser-common = { path = "crates/catlaser-common" }
 
+# protobuf
+buffa = "0.2"
+buffa-build = "0.2"
+
 # error handling
 thiserror = { version = "2", default-features = false }
 
