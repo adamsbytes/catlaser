@@ -4,6 +4,7 @@
 //! state, applies angle clamping, exponential interpolation, slew-rate limiting,
 //! and outputs PWM to the pan/tilt servos at 200 Hz.
 
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::pwm::{self, Pwm};
 use embassy_time::{Duration, Ticker};
 use fixed::traits::ToFixed as _;
@@ -18,9 +19,9 @@ use crate::state::LATEST_CMD;
 /// Maintains current pan/tilt angles (initialized to home) and smoothly
 /// drives them toward the latest commanded target each tick. Outputs the
 /// resulting angles as PWM compare values on slice 1 channels A (pan)
-/// and B (tilt).
+/// and B (tilt). Drives the laser GPIO from the command flags each tick.
 #[embassy_executor::task]
-pub async fn control_task(mut pwm: Pwm<'static>) {
+pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
     defmt::info!("control: starting 200Hz loop");
 
     let mut current_pan: i16 = PAN_HOME;
@@ -50,6 +51,13 @@ pub async fn control_task(mut pwm: Pwm<'static>) {
         // Apply slew rate limiting.
         current_pan = servo_math::slew_limit(current_pan, next_pan, cmd.max_slew());
         current_tilt = servo_math::slew_limit(current_tilt, next_tilt, cmd.max_slew());
+
+        // Drive laser GPIO from command flags.
+        laser.set_level(if cmd.flags().laser_on() {
+            Level::High
+        } else {
+            Level::Low
+        });
 
         // Convert to PWM ticks and output.
         pwm_cfg.compare_a = servo_math::angle_to_ticks(current_pan);

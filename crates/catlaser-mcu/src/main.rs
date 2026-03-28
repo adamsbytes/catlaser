@@ -23,6 +23,7 @@ mod uart;
 
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::pwm::Pwm;
 use fixed::traits::ToFixed as _;
 
@@ -63,7 +64,10 @@ async fn main(spawner: Spawner) {
 
     let pwm = Pwm::new_output_ab(p.PWM_SLICE1, p.PIN_2, p.PIN_3, pwm_cfg);
 
-    if let Ok(token) = control::control_task(pwm) {
+    // --- Laser GPIO: default off, driven by control loop from command flags ---
+    let laser = Output::new(p.PIN_7, Level::Low);
+
+    if let Ok(token) = control::control_task(pwm, laser) {
         spawner.spawn(token);
     } else {
         defmt::error!("catlaser-mcu: failed to spawn control task");
