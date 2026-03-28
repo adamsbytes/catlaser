@@ -13,7 +13,7 @@ use catlaser_common::ServoCommand;
 use catlaser_common::constants::{CONTROL_LOOP_HZ, PAN_HOME, PWM_DIVIDER, PWM_TOP, TILT_HOME};
 use catlaser_common::servo_math;
 
-use crate::state::{LATEST_CMD, POWER_LOST};
+use crate::state::{DISPENSE_SIGNAL, DISPENSING, DispenseRequest, LATEST_CMD, POWER_LOST};
 
 /// 200 Hz servo interpolation task.
 ///
@@ -27,6 +27,7 @@ pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
 
     let mut current_pan: i16 = PAN_HOME;
     let mut current_tilt: i16 = TILT_HOME;
+    let mut was_dispense_active = false;
 
     let mut pwm_cfg = pwm::Config::default();
     pwm_cfg.top = PWM_TOP;
@@ -76,5 +77,20 @@ pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
         pwm_cfg.compare_a = servo_math::angle_to_ticks(current_pan);
         pwm_cfg.compare_b = servo_math::angle_to_ticks(current_tilt);
         pwm.set_config(&pwm_cfg);
+
+        // Detect dispense trigger (rising edge on direction flags).
+        // Only signal the dispenser task on the first tick that a valid
+        // direction appears, and only if no sequence is already running.
+        let dispense_direction = cmd.flags().dispense_direction();
+        if !was_dispense_active && let Some(direction) = dispense_direction {
+            let dispensing = critical_section::with(|cs| DISPENSING.borrow(cs).get());
+            if !dispensing {
+                DISPENSE_SIGNAL.signal(DispenseRequest {
+                    direction,
+                    tier: cmd.flags().dispense_tier(),
+                });
+            }
+        }
+        was_dispense_active = dispense_direction.is_some();
     }
 }

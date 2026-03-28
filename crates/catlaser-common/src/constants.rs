@@ -119,6 +119,81 @@ pub const fn dispense_rotations(tier: u8) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Dispenser servo positions (hundredths of a degree)
+// ---------------------------------------------------------------------------
+
+/// Disc servo closed position (holes misaligned, resting state).
+///
+/// The disc rests with holes misaligned as a secondary gravity-closed
+/// gate in series with the chute door.
+pub const DISC_CLOSED: i16 = 0_i16;
+
+/// Disc servo open position (holes aligned, one treat drops through).
+pub const DISC_OPEN: i16 = 6000_i16;
+
+/// Door servo closed position (gravity rest, fail-safe default).
+///
+/// The chute door closes by gravity when the servo releases or loses
+/// power. This position matches the gravity rest angle.
+pub const DOOR_CLOSED: i16 = 0_i16;
+
+/// Door servo open position (pulled up against gravity by servo).
+pub const DOOR_OPEN: i16 = -6000_i16;
+
+/// Deflector center (idle) position.
+pub const DEFLECTOR_CENTER: i16 = 0_i16;
+
+/// Deflector position routing treats to the left chute exit.
+pub const DEFLECTOR_LEFT: i16 = -4500_i16;
+
+/// Deflector position routing treats to the right chute exit.
+pub const DEFLECTOR_RIGHT: i16 = 4500_i16;
+
+// ---------------------------------------------------------------------------
+// Dispenser timing (milliseconds)
+// ---------------------------------------------------------------------------
+
+/// Time for the disc servo to travel between open and closed positions.
+pub const DISC_TRAVEL_MS: u32 = 200_u32;
+
+/// Dwell time at disc open position for one treat to fall through.
+pub const DISC_DWELL_MS: u32 = 300_u32;
+
+/// Time for the door servo to travel between open and closed positions.
+pub const DOOR_TRAVEL_MS: u32 = 200_u32;
+
+/// Dwell time with door open for accumulated treats to drop to the floor.
+pub const DOOR_OPEN_DWELL_MS: u32 = 500_u32;
+
+/// Time for the deflector servo to reach and settle at target position.
+pub const DEFLECTOR_SETTLE_MS: u32 = 250_u32;
+
+/// Maximum allowed duration for the entire dispense sequence.
+///
+/// If the sequence exceeds this duration, it is aborted as a potential
+/// mechanical jam. The MCU closes the door and returns to idle.
+pub const DISPENSE_JAM_TIMEOUT_MS: u32 = 10_000_u32;
+
+/// Computes the expected duration of a complete dispense sequence for
+/// the given number of disc rotations.
+///
+/// Sequence: deflector settle → N × (disc travel + dwell + travel) →
+/// door travel + dwell + travel → deflector return.
+#[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "all values are small constants: per_rotation = 700, max disc_phase = 255 * 700 = \
+              178_500, max total = 179_900, all fit u32. u8-to-u32 widening never truncates."
+)]
+pub const fn dispense_sequence_duration_ms(rotations: u8) -> u32 {
+    let per_rotation = DISC_TRAVEL_MS + DISC_DWELL_MS + DISC_TRAVEL_MS;
+    let disc_phase = (rotations as u32) * per_rotation;
+    let door_phase = DOOR_TRAVEL_MS + DOOR_OPEN_DWELL_MS + DOOR_TRAVEL_MS;
+    DEFLECTOR_SETTLE_MS + disc_phase + door_phase + DEFLECTOR_SETTLE_MS
+}
+
+// ---------------------------------------------------------------------------
 // PWM configuration (50 Hz servo signal at 125 MHz / divider 100)
 // ---------------------------------------------------------------------------
 
@@ -342,6 +417,83 @@ const _: () = assert!(
 
 // Poll rate must be nonzero.
 const _: () = assert!(VBUS_POLL_HZ > 0_u32, "VBUS poll rate must be nonzero");
+
+// ---------------------------------------------------------------------------
+// Compile-time dispenser invariants
+// ---------------------------------------------------------------------------
+
+// All dispenser servo angles must be within the valid range.
+const _: () = assert!(
+    DISC_CLOSED >= PAN_LIMIT_MIN && DISC_CLOSED <= PAN_LIMIT_MAX,
+    "DISC_CLOSED must be within servo range"
+);
+const _: () = assert!(
+    DISC_OPEN >= PAN_LIMIT_MIN && DISC_OPEN <= PAN_LIMIT_MAX,
+    "DISC_OPEN must be within servo range"
+);
+const _: () = assert!(
+    DOOR_CLOSED >= PAN_LIMIT_MIN && DOOR_CLOSED <= PAN_LIMIT_MAX,
+    "DOOR_CLOSED must be within servo range"
+);
+const _: () = assert!(
+    DOOR_OPEN >= PAN_LIMIT_MIN && DOOR_OPEN <= PAN_LIMIT_MAX,
+    "DOOR_OPEN must be within servo range"
+);
+const _: () = assert!(
+    DEFLECTOR_CENTER >= PAN_LIMIT_MIN && DEFLECTOR_CENTER <= PAN_LIMIT_MAX,
+    "DEFLECTOR_CENTER must be within servo range"
+);
+const _: () = assert!(
+    DEFLECTOR_LEFT >= PAN_LIMIT_MIN && DEFLECTOR_LEFT <= PAN_LIMIT_MAX,
+    "DEFLECTOR_LEFT must be within servo range"
+);
+const _: () = assert!(
+    DEFLECTOR_RIGHT >= PAN_LIMIT_MIN && DEFLECTOR_RIGHT <= PAN_LIMIT_MAX,
+    "DEFLECTOR_RIGHT must be within servo range"
+);
+
+// Disc positions must be distinct.
+const _: () = assert!(DISC_CLOSED != DISC_OPEN, "disc open and closed must differ");
+
+// Door positions must be distinct.
+const _: () = assert!(DOOR_CLOSED != DOOR_OPEN, "door open and closed must differ");
+
+// Deflector positions must be pairwise distinct.
+const _: () = assert!(
+    DEFLECTOR_LEFT != DEFLECTOR_RIGHT,
+    "deflector left and right must differ"
+);
+const _: () = assert!(
+    DEFLECTOR_LEFT != DEFLECTOR_CENTER,
+    "deflector left and center must differ"
+);
+const _: () = assert!(
+    DEFLECTOR_RIGHT != DEFLECTOR_CENTER,
+    "deflector right and center must differ"
+);
+
+// Maximum dispense sequence must complete within jam timeout.
+const _: () = assert!(
+    dispense_sequence_duration_ms(7_u8) < DISPENSE_JAM_TIMEOUT_MS,
+    "maximum dispense sequence (7 rotations) must complete within jam timeout"
+);
+
+// Timing values must be nonzero.
+const _: () = assert!(DISC_TRAVEL_MS > 0_u32, "disc travel time must be nonzero");
+const _: () = assert!(DISC_DWELL_MS > 0_u32, "disc dwell time must be nonzero");
+const _: () = assert!(DOOR_TRAVEL_MS > 0_u32, "door travel time must be nonzero");
+const _: () = assert!(
+    DOOR_OPEN_DWELL_MS > 0_u32,
+    "door open dwell must be nonzero"
+);
+const _: () = assert!(
+    DEFLECTOR_SETTLE_MS > 0_u32,
+    "deflector settle must be nonzero"
+);
+const _: () = assert!(
+    DISPENSE_JAM_TIMEOUT_MS > 0_u32,
+    "jam timeout must be nonzero"
+);
 
 #[cfg(test)]
 mod tests {
@@ -588,6 +740,112 @@ mod tests {
             } else {
                 prop_assert!(mv > 0_u16, "nonzero raw {} must produce nonzero mV", raw);
             }
+        }
+    }
+
+    // --- dispense_sequence_duration_ms ---
+
+    #[test]
+    fn test_dispense_duration_tier_0() {
+        // 250 + 3*(200+300+200) + 200+500+200 + 250 = 3500
+        assert_eq!(
+            dispense_sequence_duration_ms(3_u8),
+            3500_u32,
+            "tier 0 (3 rotations) duration must be 3500ms"
+        );
+    }
+
+    #[test]
+    fn test_dispense_duration_tier_1() {
+        // 250 + 5*700 + 900 + 250 = 4900
+        assert_eq!(
+            dispense_sequence_duration_ms(5_u8),
+            4900_u32,
+            "tier 1 (5 rotations) duration must be 4900ms"
+        );
+    }
+
+    #[test]
+    fn test_dispense_duration_tier_2() {
+        // 250 + 7*700 + 900 + 250 = 6300
+        assert_eq!(
+            dispense_sequence_duration_ms(7_u8),
+            6300_u32,
+            "tier 2 (7 rotations) duration must be 6300ms"
+        );
+    }
+
+    #[test]
+    fn test_dispense_duration_zero_rotations() {
+        // 250 + 0 + 900 + 250 = 1400 (deflector + door + deflector, no disc)
+        assert_eq!(
+            dispense_sequence_duration_ms(0_u8),
+            1400_u32,
+            "0 rotations must still include door and deflector phases"
+        );
+    }
+
+    #[test]
+    fn test_dispense_duration_all_tiers_within_jam_timeout() {
+        for &rotations in &DISPENSE_ROTATIONS {
+            let duration = dispense_sequence_duration_ms(rotations);
+            assert!(
+                duration < DISPENSE_JAM_TIMEOUT_MS,
+                "tier with {rotations} rotations ({duration}ms) exceeds jam timeout ({DISPENSE_JAM_TIMEOUT_MS}ms)",
+            );
+        }
+    }
+
+    #[test]
+    fn test_dispense_duration_matches_rotation_function() {
+        let [r0, r1, r2] = DISPENSE_ROTATIONS;
+        assert_eq!(
+            dispense_rotations(0_u8).map(dispense_sequence_duration_ms),
+            Some(dispense_sequence_duration_ms(r0)),
+            "tier 0 duration must match array"
+        );
+        assert_eq!(
+            dispense_rotations(1_u8).map(dispense_sequence_duration_ms),
+            Some(dispense_sequence_duration_ms(r1)),
+            "tier 1 duration must match array"
+        );
+        assert_eq!(
+            dispense_rotations(2_u8).map(dispense_sequence_duration_ms),
+            Some(dispense_sequence_duration_ms(r2)),
+            "tier 2 duration must match array"
+        );
+    }
+
+    #[test]
+    fn test_dispenser_angles_produce_valid_pwm() {
+        use crate::servo_math;
+
+        for angle in [
+            DISC_CLOSED,
+            DISC_OPEN,
+            DOOR_CLOSED,
+            DOOR_OPEN,
+            DEFLECTOR_CENTER,
+            DEFLECTOR_LEFT,
+            DEFLECTOR_RIGHT,
+        ] {
+            let ticks = servo_math::angle_to_ticks(angle);
+            assert!(
+                (PWM_TICKS_MIN..=PWM_TICKS_MAX).contains(&ticks),
+                "dispenser angle {angle} produces ticks {ticks} outside valid range [{PWM_TICKS_MIN}, {PWM_TICKS_MAX}]",
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_dispense_duration_monotonic(a in 0_u8..=254_u8) {
+            let b = a.saturating_add(1_u8);
+            prop_assert!(
+                dispense_sequence_duration_ms(a) <= dispense_sequence_duration_ms(b),
+                "duration must be non-decreasing: f({}) = {}, f({}) = {}",
+                a, dispense_sequence_duration_ms(a), b, dispense_sequence_duration_ms(b),
+            );
         }
     }
 }

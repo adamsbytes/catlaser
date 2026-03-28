@@ -136,6 +136,19 @@ impl Flags {
     pub const fn with_dispense_tier(self, tier: u8) -> Self {
         Self((self.0 & !Self::TIER_MASK) | ((tier & 0x03_u8) << 4_u32))
     }
+
+    /// Returns the dispense direction if exactly one direction bit is set.
+    ///
+    /// - `dispense_left` only → `Some(Left)`
+    /// - `dispense_right` only → `Some(Right)`
+    /// - Neither or both set → `None`
+    pub const fn dispense_direction(self) -> Option<DispenseDirection> {
+        match (self.dispense_left(), self.dispense_right()) {
+            (true, false) => Some(DispenseDirection::Left),
+            (false, true) => Some(DispenseDirection::Right),
+            (true, true) | (false, false) => None,
+        }
+    }
 }
 
 impl fmt::Debug for Flags {
@@ -149,6 +162,24 @@ impl fmt::Debug for Flags {
             .field("raw", &self.0)
             .finish()
     }
+}
+
+// ---------------------------------------------------------------------------
+// DispenseDirection
+// ---------------------------------------------------------------------------
+
+/// Direction for treat dispensing via the deflector servo.
+///
+/// Derived from the dispense-left and dispense-right flag bits in
+/// [`ServoCommand`]. Exactly one direction must be set for a valid
+/// dispense request — setting both or neither returns `None` from
+/// [`Flags::dispense_direction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispenseDirection {
+    /// Route treats to the left chute exit.
+    Left,
+    /// Route treats to the right chute exit.
+    Right,
 }
 
 // ---------------------------------------------------------------------------
@@ -531,9 +562,80 @@ mod tests {
         );
     }
 
+    // --- DispenseDirection tests ---
+
+    #[test]
+    fn test_dispense_direction_left_only() {
+        let flags = Flags::new().with_dispense_left(true);
+        assert_eq!(
+            flags.dispense_direction(),
+            Some(DispenseDirection::Left),
+            "left-only must return Left"
+        );
+    }
+
+    #[test]
+    fn test_dispense_direction_right_only() {
+        let flags = Flags::new().with_dispense_right(true);
+        assert_eq!(
+            flags.dispense_direction(),
+            Some(DispenseDirection::Right),
+            "right-only must return Right"
+        );
+    }
+
+    #[test]
+    fn test_dispense_direction_neither() {
+        let flags = Flags::new();
+        assert_eq!(
+            flags.dispense_direction(),
+            None,
+            "neither direction must return None"
+        );
+    }
+
+    #[test]
+    fn test_dispense_direction_both_invalid() {
+        let flags = Flags::new()
+            .with_dispense_left(true)
+            .with_dispense_right(true);
+        assert_eq!(
+            flags.dispense_direction(),
+            None,
+            "both directions set must return None"
+        );
+    }
+
+    #[test]
+    fn test_dispense_direction_independent_of_other_flags() {
+        let flags = Flags::new()
+            .with_laser(true)
+            .with_person_detected(true)
+            .with_dispense_left(true)
+            .with_dispense_tier(2_u8);
+        assert_eq!(
+            flags.dispense_direction(),
+            Some(DispenseDirection::Left),
+            "direction must be independent of other flags"
+        );
+    }
+
     // --- Proptest ---
 
     proptest! {
+        #[test]
+        fn test_dispense_direction_consistent_with_accessors(
+            flags_raw in any::<u8>(),
+        ) {
+            let flags = Flags::from_raw(flags_raw);
+            let direction = flags.dispense_direction();
+            match (flags.dispense_left(), flags.dispense_right()) {
+                (true, false) => prop_assert_eq!(direction, Some(DispenseDirection::Left)),
+                (false, true) => prop_assert_eq!(direction, Some(DispenseDirection::Right)),
+                (true, true) | (false, false) => prop_assert_eq!(direction, None),
+            }
+        }
+
         #[test]
         fn test_arbitrary_command_round_trips(
             pan in any::<i16>(),

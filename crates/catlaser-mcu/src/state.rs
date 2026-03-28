@@ -8,8 +8,10 @@
 use core::cell::Cell;
 
 use critical_section::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 
-use catlaser_common::ServoCommand;
+use catlaser_common::{DispenseDirection, ServoCommand};
 
 /// Latest valid [`ServoCommand`] received from the compute module.
 ///
@@ -33,5 +35,38 @@ pub static LAST_RX_TICKS: Mutex<Cell<u64>> = Mutex::new(Cell::new(0_u64));
 /// One-way latch: set to `true` on VBUS threshold breach, never cleared.
 ///
 /// - **Written by:** power monitor task (on low VBUS detection)
-/// - **Read by:** control loop task (overrides `LATEST_CMD` when set)
+/// - **Read by:** control loop task (overrides `LATEST_CMD` when set),
+///   dispenser task (aborts sequence on power loss)
 pub static POWER_LOST: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
+
+// ---------------------------------------------------------------------------
+// Dispenser inter-task communication
+// ---------------------------------------------------------------------------
+
+/// Request to run the treat dispense sequence.
+///
+/// Published by the control loop on rising edge of dispense flags in
+/// [`ServoCommand`]. Consumed by the dispenser task.
+#[derive(Debug, Clone, Copy)]
+pub struct DispenseRequest {
+    /// Which chute exit to route treats toward.
+    pub direction: DispenseDirection,
+    /// Dispense tier (0-2), indexes into the MCU rotation count table.
+    pub tier: u8,
+}
+
+/// Signal carrying a [`DispenseRequest`] from the control loop to the
+/// dispenser task. Uses last-writer-wins semantics — if signaled multiple
+/// times before the dispenser reads, only the most recent request is kept.
+///
+/// - **Written by:** control loop task (on dispense flag transition)
+/// - **Read by:** dispenser task (runs the physical sequence)
+pub static DISPENSE_SIGNAL: Signal<CriticalSectionRawMutex, DispenseRequest> = Signal::new();
+
+/// Set `true` while the dispenser task is running a dispense sequence.
+/// The control loop checks this before signaling to prevent re-triggering
+/// mid-sequence.
+///
+/// - **Written by:** dispenser task (set on start, clear on finish)
+/// - **Read by:** control loop task (gate for dispense signal)
+pub static DISPENSING: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));

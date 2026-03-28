@@ -12,7 +12,7 @@
   - [X] Watchdog (500ms timeout → laser off, servos home, dispenser door closed)
   - [X] Tilt clamp (hardware horizon limit enforcement)
   - [X] Power monitoring (VBUS ADC, supercap shutdown sequence)
-  - [ ] Dispenser servo control (disc/door/deflector, jam detection via stall timeout)
+  - [X] Dispenser servo control (disc/door/deflector, jam detection via stall timeout)
   - [ ] Hopper sensor GPIO read + status LED
 
 [ ] Vision Pipeline (catlaser-vision, partial)
