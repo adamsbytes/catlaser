@@ -7,6 +7,19 @@ publish.workspace = true
 
 [dependencies]
 catlaser-common.workspace = true
+embassy-executor.workspace = true
+embassy-rp.workspace = true
+embassy-time.workspace = true
+embassy-sync.workspace = true
+embassy-futures.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+panic-probe.workspace = true
+static_cell.workspace = true
+portable-atomic.workspace = true
+critical-section.workspace = true
 
 [lints]
 workspace = true

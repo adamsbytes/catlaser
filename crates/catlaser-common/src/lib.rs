@@ -6,6 +6,8 @@
 #![no_std]
 
 pub mod constants;
+pub mod frame_parser;
 pub mod servo_cmd;
 
+pub use frame_parser::FrameParser;
 pub use servo_cmd::{ChecksumError, Flags, ServoCommand};

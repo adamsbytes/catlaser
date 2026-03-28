@@ -37,6 +37,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proptest = "1"
 insta = { version = "1", features = ["yaml"] }
 
+# embassy async runtime (MCU firmware)
+embassy-executor = { version = "0.10", features = ["defmt", "platform-cortex-m", "executor-thread"] }
+embassy-rp = { version = "0.10", features = ["defmt", "time-driver", "critical-section-impl", "rp2040"] }
+embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-sync = { version = "0.8", features = ["defmt"] }
+embassy-futures = "0.1"
+
+# embedded support (MCU firmware)
+defmt = "1"
+defmt-rtt = "1"
+cortex-m = { version = "0.7", features = ["inline-asm"] }
+cortex-m-rt = "0.7"
+panic-probe = { version = "1", features = ["print-defmt"] }
+static_cell = "2"
+portable-atomic = { version = "1", features = ["critical-section"] }
+critical-section = "1"
+
 # Rust compiler lints
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -100,7 +117,6 @@ implicit_clone = "deny"
 
 # --- strings ---
 str_to_string = "deny"
-string_to_string = "deny"
 inefficient_to_string = "deny"
 format_push_string = "deny"
 string_add = "deny"
