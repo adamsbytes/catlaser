@@ -214,7 +214,7 @@ impl ServoCommand {
     /// Command that parks servos at home position with laser off.
     ///
     /// Used by the MCU watchdog, power-down sequence, and initialization.
-    pub const HOME: Self = Self::new(PAN_HOME, TILT_HOME, 0_u8, 0_u8, Flags::new());
+    pub const HOME: Self = Self::new(PAN_HOME, TILT_HOME, 255_u8, 0_u8, Flags::new());
 
     /// Creates a new command with the given parameters.
     ///
@@ -431,7 +431,11 @@ mod tests {
         let home = ServoCommand::HOME;
         assert_eq!(home.pan(), PAN_HOME, "HOME pan should be PAN_HOME");
         assert_eq!(home.tilt(), TILT_HOME, "HOME tilt should be TILT_HOME");
-        assert_eq!(home.smoothing(), 0_u8, "HOME smoothing should be 0");
+        assert_eq!(
+            home.smoothing(),
+            255_u8,
+            "HOME smoothing should be 255 (snap to target)"
+        );
         assert_eq!(home.max_slew(), 0_u8, "HOME max_slew should be 0");
         assert!(home.verify_checksum(), "HOME checksum must be valid");
     }

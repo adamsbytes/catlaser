@@ -326,7 +326,7 @@ pub const SERVO_CMD_SIZE: usize = 8_usize;
 // RP2040 pin assignments (GPIO numbers)
 // ---------------------------------------------------------------------------
 
-/// UART TX (compute module to MCU).
+/// UART TX (MCU to compute module).
 pub const PIN_UART_TX: u8 = 0_u8;
 
 /// UART RX (compute module to MCU).
