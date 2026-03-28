@@ -5,7 +5,7 @@
   - [X] buf.yaml + codegen pipeline (Rust + Python)
   - [X] SQLite schema (sessions, cat profiles, embeddings, schedule, chute state)
 
-[ ] MCU Firmware (catlaser-mcu)
+[X] MCU Firmware (catlaser-mcu)
   - [X] Embassy setup, task spawning, UART receive + command parsing
   - [X] 200Hz servo interpolation loop + PWM output
   - [X] Laser GPIO control
@@ -16,7 +16,7 @@
   - [X] Hopper sensor GPIO read + status LED
 
 [ ] Vision Pipeline (catlaser-vision, partial)
-  - [ ] V4L2/libcamera DMA capture from SC3336
+  - [X] V4L2/libcamera DMA capture from SC3336
   - [ ] RKNN NPU inference wrapper (YOLO INT8, 640x480)
   - [ ] Detection post-processing (NMS, bbox extraction)
   - [ ] SORT tracker (Kalman filter + Hungarian matching)

@@ -26,6 +26,10 @@ buffa-build = "0.2"
 # error handling
 thiserror = { version = "2", default-features = false }
 
+# system / FFI
+libc = "0.2"
+libloading = "0.8"
+
 # serialization
 serde = { version = "1", features = ["derive"] }
 

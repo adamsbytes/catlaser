@@ -1,0 +1,32 @@
+{"run_id":"1774679807-391734564","line":537,"new":{"module_name":"catlaser_vision__camera__tests","snapshot_name":"error_display_device_open","metadata":{"source":"crates/catlaser-vision/src/camera/mod.rs","assertion_line":537,"expression":"err.to_string()"},"snapshot":"failed to open /dev/video99: No such file or directory (os error 2)"},"old":{"module_name":"catlaser_vision__camera__tests","metadata":{},"snapshot":"failed to open /dev/video99: No such file or directory"}}
+{"run_id":"1774679807-391734564","line":457,"new":{"module_name":"catlaser_vision__camera__tests","snapshot_name":"error_display_ioctl","metadata":{"source":"crates/catlaser-vision/src/camera/mod.rs","assertion_line":457,"expression":"err.to_string()"},"snapshot":"v4l2 ioctl VIDIOC_QUERYCAP failed: No such device (os error 19)"},"old":{"module_name":"catlaser_vision__camera__tests","metadata":{},"snapshot":"v4l2 ioctl VIDIOC_QUERYCAP failed: No such device"}}
+{"run_id":"1774679864-919745701","line":525,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":513,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":504,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":537,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":476,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":489,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":457,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":463,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":498,"new":null,"old":null}
+{"run_id":"1774679864-919745701","line":549,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":525,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":513,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":504,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":537,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":489,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":476,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":457,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":463,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":498,"new":null,"old":null}
+{"run_id":"1774680221-158470712","line":549,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":514,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":547,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":523,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":484,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":497,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":508,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":465,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":471,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":535,"new":null,"old":null}
+{"run_id":"1774680880-133938915","line":559,"new":null,"old":null}

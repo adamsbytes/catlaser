@@ -3,6 +3,7 @@
 //! Camera capture, NPU inference, SORT tracking, servo targeting, and
 //! IPC to the Python behavior engine over Unix domain socket.
 
+mod camera;
 mod proto;
 
 fn main() {}
