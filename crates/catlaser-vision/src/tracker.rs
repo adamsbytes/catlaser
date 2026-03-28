@@ -334,10 +334,7 @@ impl Mat4x4 {
     }
 
     fn set(&mut self, row: usize, col: usize, val: f32) {
-        if let Some(slot) = self
-            .0
-            .get_mut(row.wrapping_mul(MEAS_DIM).wrapping_add(col))
-        {
+        if let Some(slot) = self.0.get_mut(row.wrapping_mul(MEAS_DIM).wrapping_add(col)) {
             *slot = val;
         }
     }
@@ -413,7 +410,6 @@ impl Mat4x4 {
         }
         Self(m)
     }
-
 }
 
 impl Vec8 {
@@ -517,16 +513,16 @@ fn process_noise(w: f32, h: f32) -> Mat8x8 {
     let size = (w + h) * 0.5_f32;
     let pos_var = (PROCESS_NOISE_POS_FACTOR * size) * (PROCESS_NOISE_POS_FACTOR * size);
     let vel_var = (PROCESS_NOISE_VEL_FACTOR * size) * (PROCESS_NOISE_VEL_FACTOR * size);
-    Mat8x8::diagonal(&[pos_var, pos_var, pos_var, pos_var, vel_var, vel_var, vel_var, vel_var])
+    Mat8x8::diagonal(&[
+        pos_var, pos_var, pos_var, pos_var, vel_var, vel_var, vel_var, vel_var,
+    ])
 }
 
 /// Builds the measurement noise covariance R, scaled by the measurement size.
 fn measurement_noise(w: f32, h: f32) -> Mat4x4 {
     let size = (w + h) * 0.5_f32;
-    let pos_var =
-        (MEASUREMENT_NOISE_POS_FACTOR * size) * (MEASUREMENT_NOISE_POS_FACTOR * size);
-    let size_var =
-        (MEASUREMENT_NOISE_SIZE_FACTOR * size) * (MEASUREMENT_NOISE_SIZE_FACTOR * size);
+    let pos_var = (MEASUREMENT_NOISE_POS_FACTOR * size) * (MEASUREMENT_NOISE_POS_FACTOR * size);
+    let size_var = (MEASUREMENT_NOISE_SIZE_FACTOR * size) * (MEASUREMENT_NOISE_SIZE_FACTOR * size);
     let mut r = [0.0_f32; 16];
     if let Some(slot) = r.get_mut(0) {
         *slot = pos_var;
@@ -560,10 +556,9 @@ impl KalmanFilter {
             0.0_f32,
         ]);
 
-        let size =
-            (measurement.get(2).copied().unwrap_or(0.0_f32)
-                + measurement.get(3).copied().unwrap_or(0.0_f32))
-                * 0.5_f32;
+        let size = (measurement.get(2).copied().unwrap_or(0.0_f32)
+            + measurement.get(3).copied().unwrap_or(0.0_f32))
+            * 0.5_f32;
         let pos_std = 0.1_f32 * size;
         let vel_std = 0.05_f32 * size;
         let p = Mat8x8::diagonal(&[
@@ -617,8 +612,16 @@ impl KalmanFilter {
         let y = z.sub(&predicted_meas);
 
         // Adaptive measurement noise based on measurement size.
-        let meas_w = measurement.get(2).copied().unwrap_or(0.01_f32).max(0.01_f32);
-        let meas_h = measurement.get(3).copied().unwrap_or(0.01_f32).max(0.01_f32);
+        let meas_w = measurement
+            .get(2)
+            .copied()
+            .unwrap_or(0.01_f32)
+            .max(0.01_f32);
+        let meas_h = measurement
+            .get(3)
+            .copied()
+            .unwrap_or(0.01_f32)
+            .max(0.01_f32);
         let r = measurement_noise(meas_w, meas_h);
 
         // Innovation covariance: S = H * P * H^T + R
@@ -712,10 +715,26 @@ fn iou_center(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let ca = center_to_corners(a);
     let cb = center_to_corners(b);
 
-    let x1 = ca.first().copied().unwrap_or(0.0_f32).max(cb.first().copied().unwrap_or(0.0_f32));
-    let y1 = ca.get(1).copied().unwrap_or(0.0_f32).max(cb.get(1).copied().unwrap_or(0.0_f32));
-    let x2 = ca.get(2).copied().unwrap_or(0.0_f32).min(cb.get(2).copied().unwrap_or(0.0_f32));
-    let y2 = ca.get(3).copied().unwrap_or(0.0_f32).min(cb.get(3).copied().unwrap_or(0.0_f32));
+    let x1 = ca
+        .first()
+        .copied()
+        .unwrap_or(0.0_f32)
+        .max(cb.first().copied().unwrap_or(0.0_f32));
+    let y1 = ca
+        .get(1)
+        .copied()
+        .unwrap_or(0.0_f32)
+        .max(cb.get(1).copied().unwrap_or(0.0_f32));
+    let x2 = ca
+        .get(2)
+        .copied()
+        .unwrap_or(0.0_f32)
+        .min(cb.get(2).copied().unwrap_or(0.0_f32));
+    let y2 = ca
+        .get(3)
+        .copied()
+        .unwrap_or(0.0_f32)
+        .min(cb.get(3).copied().unwrap_or(0.0_f32));
 
     let inter_w = (x2 - x1).max(0.0_f32);
     let inter_h = (y2 - y1).max(0.0_f32);
@@ -842,7 +861,15 @@ fn augment_row(
     let mut visited_cols = vec![false; n];
     let mut parent_row = vec![unassigned; n];
 
-    if try_augment(r, cost, n, assignment, col_to_row, &mut visited_cols, &mut parent_row) {
+    if try_augment(
+        r,
+        cost,
+        n,
+        assignment,
+        col_to_row,
+        &mut visited_cols,
+        &mut parent_row,
+    ) {
         return;
     }
 
@@ -1115,12 +1142,7 @@ impl Tracker {
     /// `detections` are in pixel coordinates from the detector.
     /// `model_width` and `model_height` are the detector's input dimensions
     /// used to normalize coordinates to 0.0–1.0.
-    pub(crate) fn update(
-        &mut self,
-        detections: &[Detection],
-        model_width: f32,
-        model_height: f32,
-    ) {
+    pub(crate) fn update(&mut self, detections: &[Detection], model_width: f32, model_height: f32) {
         // Normalize detections to [cx, cy, w, h] in 0.0-1.0 range.
         self.normalized.clear();
         for det in detections {
@@ -1166,7 +1188,9 @@ impl Tracker {
                 } else {
                     1.0_f32
                 };
-                if let Some(slot) = self.cost_matrix.get_mut(t.wrapping_mul(n_dets).wrapping_add(d))
+                if let Some(slot) = self
+                    .cost_matrix
+                    .get_mut(t.wrapping_mul(n_dets).wrapping_add(d))
                 {
                     *slot = cost;
                 }
@@ -1483,10 +1507,7 @@ mod tests {
     #[test]
     fn test_mat4x4_singular_returns_none() {
         let m = Mat4x4([0.0_f32; 16]); // All zeros = singular.
-        assert!(
-            m.invert().is_none(),
-            "zero matrix should not be invertible"
-        );
+        assert!(m.invert().is_none(), "zero matrix should not be invertible");
     }
 
     // -------------------------------------------------------------------
@@ -1556,32 +1577,18 @@ mod tests {
     fn test_hungarian_1x1() {
         let costs = [0.5_f32];
         let result = hungarian(&costs, 1, 1);
-        assert_eq!(
-            result.len(),
-            1,
-            "1x1 matrix should produce one assignment"
-        );
-        assert_eq!(
-            result[0],
-            (0, 0),
-            "1x1 assignment should be (0, 0)"
-        );
+        assert_eq!(result.len(), 1, "1x1 matrix should produce one assignment");
+        assert_eq!(result[0], (0, 0), "1x1 assignment should be (0, 0)");
     }
 
     #[test]
     fn test_hungarian_identity_cost() {
         // 3x3 identity cost matrix — each row should match its column.
         let costs = [
-            0.0_f32, 1.0_f32, 1.0_f32,
-            1.0_f32, 0.0_f32, 1.0_f32,
-            1.0_f32, 1.0_f32, 0.0_f32,
+            0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32, 0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32, 0.0_f32,
         ];
         let result = hungarian(&costs, 3, 3);
-        assert_eq!(
-            result.len(),
-            3,
-            "3x3 should produce 3 assignments"
-        );
+        assert_eq!(result.len(), 3, "3x3 should produce 3 assignments");
         let mut total = 0.0_f32;
         for &(r, c) in &result {
             total += costs[r * 3 + c];
@@ -1596,9 +1603,7 @@ mod tests {
     fn test_hungarian_permuted_cost() {
         // Optimal assignment: (0→2), (1→0), (2→1) = cost 1+2+3 = 6.
         let costs = [
-            10.0_f32, 5.0_f32, 1.0_f32,
-            2.0_f32, 10.0_f32, 8.0_f32,
-            7.0_f32, 3.0_f32, 10.0_f32,
+            10.0_f32, 5.0_f32, 1.0_f32, 2.0_f32, 10.0_f32, 8.0_f32, 7.0_f32, 3.0_f32, 10.0_f32,
         ];
         let result = hungarian(&costs, 3, 3);
         let mut total = 0.0_f32;
@@ -1614,11 +1619,7 @@ mod tests {
     #[test]
     fn test_hungarian_more_rows_than_cols() {
         // 3 tracks, 2 detections.
-        let costs = [
-            0.1_f32, 0.9_f32,
-            0.9_f32, 0.1_f32,
-            0.5_f32, 0.5_f32,
-        ];
+        let costs = [0.1_f32, 0.9_f32, 0.9_f32, 0.1_f32, 0.5_f32, 0.5_f32];
         let result = hungarian(&costs, 3, 2);
         assert!(
             result.len() <= 2,
@@ -1629,33 +1630,20 @@ mod tests {
         for &(r, c) in &result {
             total += costs[r * 2 + c];
         }
-        assert!(
-            total < 0.3_f32,
-            "optimal cost should be ~0.2, got {total}"
-        );
+        assert!(total < 0.3_f32, "optimal cost should be ~0.2, got {total}");
     }
 
     #[test]
     fn test_hungarian_more_cols_than_rows() {
         // 2 tracks, 3 detections.
-        let costs = [
-            0.1_f32, 0.9_f32, 0.5_f32,
-            0.9_f32, 0.1_f32, 0.5_f32,
-        ];
+        let costs = [0.1_f32, 0.9_f32, 0.5_f32, 0.9_f32, 0.1_f32, 0.5_f32];
         let result = hungarian(&costs, 2, 3);
-        assert_eq!(
-            result.len(),
-            2,
-            "2 rows should produce 2 assignments"
-        );
+        assert_eq!(result.len(), 2, "2 rows should produce 2 assignments");
         let mut total = 0.0_f32;
         for &(r, c) in &result {
             total += costs[r * 3 + c];
         }
-        assert!(
-            total < 0.3_f32,
-            "optimal cost should be ~0.2, got {total}"
-        );
+        assert!(total < 0.3_f32, "optimal cost should be ~0.2, got {total}");
     }
 
     // -------------------------------------------------------------------
@@ -1739,7 +1727,9 @@ mod tests {
     #[test]
     fn test_tracker_single_detection_creates_tentative_track() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15)];
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
         tracker.update(&dets, 640.0_f32, 480.0_f32);
 
         assert_eq!(
@@ -1752,17 +1742,15 @@ mod tests {
             TrackState::Tentative,
             "new track should be tentative"
         );
-        assert_eq!(
-            tracker.tracks()[0].id(),
-            0,
-            "first track ID should be 0"
-        );
+        assert_eq!(tracker.tracks()[0].id(), 0, "first track ID should be 0");
     }
 
     #[test]
     fn test_tracker_three_hits_promotes_to_confirmed() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15)];
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
 
         for _ in 0_i32..3_i32 {
             tracker.update(&dets, 640.0_f32, 480.0_f32);
@@ -1783,7 +1771,9 @@ mod tests {
     #[test]
     fn test_tracker_empty_frame_causes_coasting() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15)];
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
 
         // 3 frames to confirm.
         for _ in 0_i32..3_i32 {
@@ -1811,14 +1801,12 @@ mod tests {
             ..TrackerConfig::default()
         };
         let mut tracker = Tracker::new(config);
-        let dets = [make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15)];
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
 
         tracker.update(&dets, 640.0_f32, 480.0_f32);
-        assert_eq!(
-            tracker.tracks().len(),
-            1,
-            "should have one track"
-        );
+        assert_eq!(tracker.tracks().len(), 1, "should have one track");
 
         for _ in 0_i32..6_i32 {
             tracker.update(&[], 640.0_f32, 480.0_f32);
@@ -1833,7 +1821,9 @@ mod tests {
     #[test]
     fn test_tracker_reacquire_coasting_to_confirmed() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15)];
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
 
         // Confirm the track.
         for _ in 0_i32..3_i32 {
@@ -1910,7 +1900,9 @@ mod tests {
     #[test]
     fn test_tracker_class_id_preserved() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 42)];
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 42,
+        )];
         tracker.update(&dets, 640.0_f32, 480.0_f32);
 
         assert_eq!(
@@ -1923,7 +1915,9 @@ mod tests {
     #[test]
     fn test_tracker_normalized_coordinates_in_range() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(100.0_f32, 50.0_f32, 300.0_f32, 200.0_f32, 15)];
+        let dets = [make_detection(
+            100.0_f32, 50.0_f32, 300.0_f32, 200.0_f32, 15,
+        )];
         tracker.update(&dets, 640.0_f32, 480.0_f32);
 
         let bbox = tracker.tracks()[0].bbox();
@@ -1938,7 +1932,9 @@ mod tests {
     #[test]
     fn test_tracker_stable_track_across_many_frames() {
         let mut tracker = Tracker::new(TrackerConfig::default());
-        let dets = [make_detection(300.0_f32, 220.0_f32, 380.0_f32, 300.0_f32, 15)];
+        let dets = [make_detection(
+            300.0_f32, 220.0_f32, 380.0_f32, 300.0_f32, 15,
+        )];
 
         for _ in 0_i32..50_i32 {
             tracker.update(&dets, 640.0_f32, 480.0_f32);

@@ -21,7 +21,7 @@
   - [X] Detection post-processing (NMS, bbox extraction)
   - [X] SORT tracker (Kalman filter + Hungarian matching)
   - [X] Track lifecycle (tentative → confirmed → coasting → dead)
-  - [ ] Person detection → safety ceiling computation
+  - [X] Person detection → safety ceiling computation
 
 [ ] Targeting + Serial (catlaser-vision → catlaser-mcu)
   - [ ] Bbox center → servo angle transform (camera FOV, laser offset)

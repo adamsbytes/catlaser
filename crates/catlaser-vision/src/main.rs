@@ -7,6 +7,7 @@ mod camera;
 mod detect;
 mod npu;
 mod proto;
+mod safety;
 mod tracker;
 
 fn main() {}
