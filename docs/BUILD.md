@@ -19,8 +19,8 @@
   - [X] V4L2/libcamera DMA capture from SC3336
   - [X] RKNN NPU inference wrapper (YOLO INT8, 640x480)
   - [X] Detection post-processing (NMS, bbox extraction)
-  - [ ] SORT tracker (Kalman filter + Hungarian matching)
-  - [ ] Track lifecycle (tentative → confirmed → coasting → dead)
+  - [X] SORT tracker (Kalman filter + Hungarian matching)
+  - [X] Track lifecycle (tentative → confirmed → coasting → dead)
   - [ ] Person detection → safety ceiling computation
 
 [ ] Targeting + Serial (catlaser-vision → catlaser-mcu)
