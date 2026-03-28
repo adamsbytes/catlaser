@@ -52,6 +52,12 @@ pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
         current_pan = servo_math::slew_limit(current_pan, next_pan, cmd.max_slew());
         current_tilt = servo_math::slew_limit(current_tilt, next_tilt, cmd.max_slew());
 
+        // Hardware horizon limit: clamp output angles after all processing.
+        // When person_detected transitions true, the stricter limit takes
+        // effect immediately — interpolation and slew rate cannot delay it.
+        current_pan = servo_math::clamp_pan(current_pan);
+        current_tilt = servo_math::clamp_tilt(current_tilt, cmd.flags().person_detected());
+
         // Drive laser GPIO from command flags.
         laser.set_level(if cmd.flags().laser_on() {
             Level::High
