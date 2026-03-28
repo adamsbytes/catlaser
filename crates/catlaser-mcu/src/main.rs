@@ -8,23 +8,25 @@
 //! - `uart_rx` — receives 8-byte [`ServoCommand`] frames from the compute
 //!   module, publishes to shared state
 //! - `control` — 200Hz loop: reads latest command, interpolates servo
-//!   positions, outputs PWM (future step)
+//!   positions, outputs PWM
 //! - `watchdog` — monitors command freshness, kills laser and homes servos
 //!   on timeout
-//! - `power` — monitors VBUS via ADC, initiates shutdown on power loss
-//!   (future step)
+//! - `power` — monitors VBUS via ADC at 10Hz, initiates shutdown on power
+//!   loss (laser off, servos home, signal compute module)
 
 #![no_std]
 #![no_main]
 
 mod control;
+mod power;
 mod safety;
 mod state;
 mod uart;
 
 use embassy_executor::Spawner;
+use embassy_rp::adc;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output};
+use embassy_rp::gpio::{Level, Output, Pull};
 use embassy_rp::pwm::Pwm;
 use embassy_rp::watchdog::{ResetReason, Watchdog};
 use fixed::traits::ToFixed as _;
@@ -36,7 +38,9 @@ use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
-    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>;
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
+                 embassy_rp::dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>;
+    ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
 });
 
 #[embassy_executor::main]
@@ -53,10 +57,19 @@ async fn main(spawner: Spawner) {
         None => {}
     }
 
-    // --- UART RX: commands from compute module ---
+    // --- UART: commands from compute module (RX), shutdown signal (TX) ---
     let mut uart_config = embassy_rp::uart::Config::default();
     uart_config.baudrate = UART_BAUD;
-    let uart_rx = embassy_rp::uart::UartRx::new(p.UART0, p.PIN_1, Irqs, p.DMA_CH0, uart_config);
+    let uart_full = embassy_rp::uart::Uart::new(
+        p.UART0,
+        p.PIN_0,
+        p.PIN_1,
+        Irqs,
+        p.DMA_CH1,
+        p.DMA_CH0,
+        uart_config,
+    );
+    let (uart_tx, uart_rx) = uart_full.split();
 
     if let Ok(token) = uart::uart_rx_task(uart_rx) {
         spawner.spawn(token);
@@ -89,6 +102,17 @@ async fn main(spawner: Spawner) {
         spawner.spawn(token);
     } else {
         defmt::error!("catlaser-mcu: failed to spawn watchdog task");
+        cortex_m::asm::udf();
+    }
+
+    // --- ADC + power monitor: VBUS voltage on GPIO26 / ADC0 ---
+    let adc = adc::Adc::new(p.ADC, Irqs, adc::Config::default());
+    let vbus_channel = adc::Channel::new_pin(p.PIN_26, Pull::None);
+
+    if let Ok(token) = power::power_monitor_task(adc, vbus_channel, uart_tx) {
+        spawner.spawn(token);
+    } else {
+        defmt::error!("catlaser-mcu: failed to spawn power_monitor task");
         cortex_m::asm::udf();
     }
 

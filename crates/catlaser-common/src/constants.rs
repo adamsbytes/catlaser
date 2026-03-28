@@ -278,6 +278,71 @@ pub const VBUS_LOW_THRESHOLD_MV: u16 = 4500_u16;
 /// MCU must complete the entire shutdown sequence within this window.
 pub const SUPERCAP_BUDGET_MS: u32 = 5000_u32;
 
+/// VBUS polling frequency.
+///
+/// 10 Hz = 100 ms interval. In the worst case (power drops just after a
+/// poll), the next poll detects it within 100 ms — meeting the laser-kill
+/// deadline from the product spec.
+pub const VBUS_POLL_HZ: u32 = 10_u32;
+
+/// VBUS voltage divider scaling factor.
+///
+/// The custom PCB feeds VBUS through a resistive divider (200 K high-side,
+/// 100 K low-side) to GPIO26 / ADC0. Actual VBUS voltage equals the ADC
+/// pin voltage multiplied by this factor.
+pub const VBUS_DIVIDER_FACTOR: u32 = 3_u32;
+
+/// ADC reference voltage in millivolts (RP2040 internal 3.3 V reference).
+pub const ADC_REF_MV: u32 = 3300_u32;
+
+/// ADC maximum raw reading (12-bit SAR, 0–4095).
+pub const ADC_MAX_RAW: u16 = 4095_u16;
+
+/// Shutdown signal byte sent to the compute module over UART TX on power loss.
+///
+/// The compute module's serial handler watches for this byte to initiate a
+/// filesystem-safe shutdown within the supercap hold-up window.
+pub const SHUTDOWN_SIGNAL: u8 = 0x53_u8;
+
+/// Converts a raw 12-bit ADC reading to VBUS voltage in millivolts,
+/// accounting for the voltage divider on the sense pin.
+///
+/// Formula: `raw * ADC_REF_MV * VBUS_DIVIDER_FACTOR / ADC_MAX_RAW`
+///
+/// Integer division truncates toward zero, making the reported voltage
+/// slightly lower than actual — the safe direction for a low-threshold
+/// comparator (triggers shutdown marginally early).
+#[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::integer_division,
+    reason = "max intermediate = 4095 * 3300 * 3 = 40_540_500 fits u32; max output = 9900 fits u16"
+)]
+pub const fn raw_to_vbus_mv(raw: u16) -> u16 {
+    (raw as u32 * ADC_REF_MV * VBUS_DIVIDER_FACTOR / ADC_MAX_RAW as u32) as u16
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time power monitoring invariants
+// ---------------------------------------------------------------------------
+
+// VBUS threshold must be detectable by the ADC.
+const _: () = assert!(
+    VBUS_LOW_THRESHOLD_MV < raw_to_vbus_mv(ADC_MAX_RAW),
+    "VBUS low threshold must be below maximum measurable voltage"
+);
+
+// Conversion boundaries must be consistent.
+const _: () = assert!(
+    raw_to_vbus_mv(0_u16) == 0_u16,
+    "raw ADC value 0 must map to 0 mV"
+);
+
+// Poll rate must be nonzero.
+const _: () = assert!(VBUS_POLL_HZ > 0_u32, "VBUS poll rate must be nonzero");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +511,83 @@ mod tests {
                 is_command_stale(last_rx, now, 500_000_u64),
                 "overshoot {} past timeout must be stale", overshoot,
             );
+        }
+    }
+
+    // --- raw_to_vbus_mv ---
+
+    #[test]
+    fn test_vbus_mv_zero_raw_is_zero() {
+        assert_eq!(raw_to_vbus_mv(0_u16), 0_u16, "raw 0 must map to 0 mV");
+    }
+
+    #[test]
+    fn test_vbus_mv_max_raw_is_full_scale() {
+        assert_eq!(
+            raw_to_vbus_mv(ADC_MAX_RAW),
+            9900_u16,
+            "raw 4095 must map to 9900 mV (3300 * 3)"
+        );
+    }
+
+    #[test]
+    fn test_vbus_mv_midpoint() {
+        // raw 2048 ≈ half-scale: 2048 * 9900 / 4095 = 4951 (truncated)
+        assert_eq!(
+            raw_to_vbus_mv(2048_u16),
+            4951_u16,
+            "midpoint raw value must map to approximately half of full-scale"
+        );
+    }
+
+    #[test]
+    fn test_vbus_mv_threshold_boundary_below() {
+        // Highest raw value that converts to below VBUS_LOW_THRESHOLD_MV.
+        // raw 1861 → 1861 * 9900 / 4095 = 4499
+        assert!(
+            raw_to_vbus_mv(1861_u16) < VBUS_LOW_THRESHOLD_MV,
+            "raw 1861 must convert below the 4500 mV threshold"
+        );
+    }
+
+    #[test]
+    fn test_vbus_mv_threshold_boundary_above() {
+        // Lowest raw value that converts to at or above VBUS_LOW_THRESHOLD_MV.
+        // raw 1862 → 1862 * 9900 / 4095 = 4501
+        assert!(
+            raw_to_vbus_mv(1862_u16) >= VBUS_LOW_THRESHOLD_MV,
+            "raw 1862 must convert at or above the 4500 mV threshold"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn test_vbus_mv_bounded(raw in 0_u16..=ADC_MAX_RAW) {
+            let mv = raw_to_vbus_mv(raw);
+            prop_assert!(
+                mv <= 9900_u16,
+                "raw {} produced {} mV, exceeds full-scale 9900 mV", raw, mv,
+            );
+        }
+
+        #[test]
+        fn test_vbus_mv_monotonic(a in 0_u16..ADC_MAX_RAW) {
+            let b = a.saturating_add(1_u16);
+            prop_assert!(
+                raw_to_vbus_mv(a) <= raw_to_vbus_mv(b),
+                "raw_to_vbus_mv must be non-decreasing: f({}) = {}, f({}) = {}",
+                a, raw_to_vbus_mv(a), b, raw_to_vbus_mv(b),
+            );
+        }
+
+        #[test]
+        fn test_vbus_mv_zero_iff_raw_zero(raw in 0_u16..=ADC_MAX_RAW) {
+            let mv = raw_to_vbus_mv(raw);
+            if raw == 0_u16 {
+                prop_assert_eq!(mv, 0_u16, "raw 0 must produce 0 mV");
+            } else {
+                prop_assert!(mv > 0_u16, "nonzero raw {} must produce nonzero mV", raw);
+            }
         }
     }
 }

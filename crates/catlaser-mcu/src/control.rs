@@ -9,10 +9,11 @@ use embassy_rp::pwm::{self, Pwm};
 use embassy_time::{Duration, Ticker};
 use fixed::traits::ToFixed as _;
 
+use catlaser_common::ServoCommand;
 use catlaser_common::constants::{CONTROL_LOOP_HZ, PAN_HOME, PWM_DIVIDER, PWM_TOP, TILT_HOME};
 use catlaser_common::servo_math;
 
-use crate::state::LATEST_CMD;
+use crate::state::{LATEST_CMD, POWER_LOST};
 
 /// 200 Hz servo interpolation task.
 ///
@@ -38,7 +39,13 @@ pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
     loop {
         ticker.next().await;
 
-        let cmd = critical_section::with(|cs| LATEST_CMD.borrow(cs).get());
+        let cmd = critical_section::with(|cs| {
+            if POWER_LOST.borrow(cs).get() {
+                ServoCommand::HOME
+            } else {
+                LATEST_CMD.borrow(cs).get()
+            }
+        });
 
         // Clamp targets to safe range.
         let target_pan = servo_math::clamp_pan(cmd.pan());
