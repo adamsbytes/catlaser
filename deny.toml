@@ -1,0 +1,44 @@
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unlicense",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+# Workspace crates are unpublished and don't need license fields.
+exceptions = []
+[[licenses.clarify]]
+name = "catlaser-common"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+name = "catlaser-mcu"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
+name = "catlaser-vision"
+expression = "MIT"
+license-files = []
+
+[advisories]
+# paste is unmaintained (RUSTSEC-2024-0436) but is a transitive dep of
+# embassy-rp via pio-core — no upgrade path until embassy updates.
+ignore = ["RUSTSEC-2024-0436"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
