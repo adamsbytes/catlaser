@@ -34,7 +34,6 @@ DEFAULT_SOCKET_PATH: Final[Path] = Path("/run/catlaser/vision.sock")
 _RECV_BUF_SIZE: Final[int] = 4096
 """Socket receive buffer size per ``recv()`` call."""
 
-_BLOCKING: Final[bool] = True
 _NON_BLOCKING: Final[bool] = False
 
 # ---------------------------------------------------------------------------
@@ -204,14 +203,16 @@ class IpcClient:
             msg_type, payload = frame
             return self._decode(msg_type, payload)
 
-        # Try a non-blocking read.
+        # Try a non-blocking read. Save and restore the current timeout
+        # so callers who set a timeout via set_timeout() aren't clobbered.
+        prev_timeout = self._sock.gettimeout()
         self._sock.setblocking(_NON_BLOCKING)
         try:
             data = self._sock.recv(_RECV_BUF_SIZE)
         except BlockingIOError:
             return None
         finally:
-            self._sock.setblocking(_BLOCKING)
+            self._sock.settimeout(prev_timeout)
 
         if not data:
             msg = "connection closed by peer"

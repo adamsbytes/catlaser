@@ -11,7 +11,7 @@
 //! laser off and servos home otherwise.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catlaser_common::constants::{PAN_HOME, TILT_HOME};
 use catlaser_common::servo_math;
@@ -53,6 +53,12 @@ const IDLE_SMOOTHING: u8 = 64_u8;
 /// Default assumed FPS for velocity conversion when no prior frame
 /// timestamp is available (first frame after init).
 const DEFAULT_FPS: f32 = 15.0_f32;
+
+/// How long to wait for Python to respond to a `SessionRequest` before
+/// reverting to `Idle`. 5 seconds is generous for a local Unix socket
+/// round-trip but short enough to prevent a stuck Python from permanently
+/// disabling session initiation.
+const SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Error
@@ -459,13 +465,18 @@ pub(crate) fn build_session_request(
 /// Prevents duplicate `SessionRequest` messages while one is pending.
 /// The `AwaitingAck → Idle` and `AwaitingAck → Active` transitions are
 /// handled by the receive path (Part 5, step 5: `BehaviorCommand +
-/// SessionAck + IdentityResult`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// SessionAck + IdentityResult`). A timeout on `AwaitingAck` ensures
+/// a stuck or slow Python doesn't permanently disable session initiation.
+#[derive(Debug, Clone, Copy)]
 enum SessionState {
     /// No session in progress or pending. A `SessionRequest` can be sent.
     Idle,
     /// A `SessionRequest` has been sent; waiting for `SessionAck` from Python.
-    AwaitingAck,
+    /// Reverts to `Idle` after [`SESSION_ACK_TIMEOUT`].
+    AwaitingAck {
+        /// When the `SessionRequest` was sent.
+        sent_at: Instant,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +836,19 @@ impl Pipeline {
         }
 
         // --- SessionRequest (sporadic, at most once per session) ---
-        if self.session_state == SessionState::Idle
+        // Time out stale AwaitingAck so a stuck Python doesn't permanently
+        // disable session initiation.
+        if let SessionState::AwaitingAck { sent_at } = self.session_state
+            && sent_at.elapsed() >= SESSION_ACK_TIMEOUT
+        {
+            tracing::warn!(
+                elapsed_ms = sent_at.elapsed().as_millis(),
+                "session ack timed out, reverting to idle"
+            );
+            self.session_state = SessionState::Idle;
+        }
+
+        if matches!(self.session_state, SessionState::Idle)
             && let Some(track_id) = target_track_id
         {
             let request = build_session_request(
@@ -838,7 +861,9 @@ impl Pipeline {
                 self.session_state = SessionState::Idle;
                 return false;
             }
-            self.session_state = SessionState::AwaitingAck;
+            self.session_state = SessionState::AwaitingAck {
+                sent_at: Instant::now(),
+            };
             tracing::info!(track_id, "session request sent (cat detected)");
         }
 

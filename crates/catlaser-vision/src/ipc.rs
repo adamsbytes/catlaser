@@ -6,7 +6,8 @@
 //! The Rust side is the server — it binds a Unix socket and accepts a single
 //! client connection from the Python sidecar. The server uses non-blocking
 //! accepts and reads so the vision pipeline loop never stalls waiting for
-//! Python. Writes are blocking — messages are small and the kernel socket
+//! Python. Writes temporarily toggle to blocking mode with `SO_SNDTIMEO`
+//! bounding the blocking duration — messages are small and the kernel socket
 //! buffer absorbs them at our throughput (~15 frames/sec, ~500 bytes each).
 //!
 //! # Message types
@@ -23,6 +24,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use buffa::{DecodeOptions, Message};
 
@@ -54,6 +56,14 @@ const MAX_MESSAGE_SIZE: u32 = 65_536_u32;
               From::from is not available in const context"
 )]
 const MAX_MESSAGE_USIZE: usize = MAX_MESSAGE_SIZE as usize;
+
+/// Write timeout applied to the accepted client stream.
+///
+/// Bounds how long a blocking `write_all` can stall the vision pipeline
+/// when the kernel socket buffer is full (Python is slow to drain).
+/// 100 ms is ~1.5 frames at 15 FPS — long enough for normal GC jitter,
+/// short enough to avoid visible laser stall.
+const SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Decode options applied to all inbound protobuf messages.
 ///
@@ -137,9 +147,16 @@ pub(crate) enum IpcError {
         source: io::Error,
     },
 
-    /// Failed to set non-blocking mode on the listener.
-    #[error("failed to set non-blocking on listener: {source}")]
+    /// Failed to set non-blocking mode on a socket.
+    #[error("failed to set non-blocking: {source}")]
     SetNonBlocking {
+        /// Underlying OS error.
+        source: io::Error,
+    },
+
+    /// Failed to set the send timeout on the client stream.
+    #[error("failed to set send timeout: {source}")]
+    SetSendTimeout {
         /// Underlying OS error.
         source: io::Error,
     },
@@ -369,11 +386,16 @@ impl IpcServer {
     pub(crate) fn try_accept(&self) -> Result<Option<IpcConnection>, IpcError> {
         match self.listener.accept() {
             Ok((stream, _addr)) => {
-                // Client reads are non-blocking (polled each frame).
-                // Writes remain blocking — messages are small.
+                // Reads are non-blocking (polled each frame via drain_socket).
                 stream
                     .set_nonblocking(true)
                     .map_err(|source| IpcError::SetNonBlocking { source })?;
+                // Writes toggle to blocking in send_message(). SO_SNDTIMEO
+                // bounds the blocking duration to prevent pipeline stalls
+                // when Python is slow to drain.
+                stream
+                    .set_write_timeout(Some(SEND_TIMEOUT))
+                    .map_err(|source| IpcError::SetSendTimeout { source })?;
                 tracing::info!("IPC client connected");
                 Ok(Some(IpcConnection {
                     stream,
@@ -448,13 +470,77 @@ impl IpcConnection {
     // -----------------------------------------------------------------------
 
     /// Encodes a protobuf message with framing and writes it to the socket.
+    ///
+    /// Encodes the protobuf directly into `write_buf` to avoid an
+    /// intermediate allocation. Switches the stream to blocking mode
+    /// for the write so `write_all` delivers reliably instead of
+    /// returning `WouldBlock` when the kernel buffer is momentarily
+    /// full. `SO_SNDTIMEO` (set at accept time) bounds the blocking
+    /// duration.
     fn send_message<M: Message>(&mut self, wire_type: WireType, msg: &M) -> Result<(), IpcError> {
+        // Reserve header space — backfill after encoding.
         self.write_buf.clear();
-        let payload = msg.encode_to_vec();
-        encode_frame(wire_type, &payload, &mut self.write_buf)?;
+        self.write_buf.resize(HEADER_SIZE, 0_u8);
+
+        // Encode protobuf directly into write_buf (no intermediate Vec).
+        msg.encode(&mut self.write_buf);
+
+        let payload_len = self.write_buf.len().saturating_sub(HEADER_SIZE);
+        let Some(len) = u32::try_from(payload_len)
+            .ok()
+            .filter(|&n| n <= MAX_MESSAGE_SIZE)
+        else {
+            let size = u32::try_from(payload_len).unwrap_or(u32::MAX);
+            return Err(IpcError::MessageTooLarge { size });
+        };
+
+        // Backfill header: [type byte][length LE u32].
+        // write_buf was resized to HEADER_SIZE (5) above and encode()
+        // only appends, so the first 5 bytes are guaranteed present.
+        self.backfill_header(wire_type, len)?;
+
+        self.blocking_write()
+    }
+
+    /// Writes `self.write_buf` to the stream in blocking mode.
+    ///
+    /// Toggles `O_NONBLOCK` off for the write so `write_all` blocks
+    /// until delivery (bounded by `SO_SNDTIMEO`), then restores
+    /// non-blocking for the read path. If restoring non-blocking
+    /// fails, the fd is broken — propagate the more severe error.
+    fn blocking_write(&mut self) -> Result<(), IpcError> {
         self.stream
-            .write_all(&self.write_buf)
-            .map_err(|source| IpcError::Send { source })
+            .set_nonblocking(false)
+            .map_err(|source| IpcError::SetNonBlocking { source })?;
+
+        let write_result = self.stream.write_all(&self.write_buf);
+
+        if let Err(source) = self.stream.set_nonblocking(true) {
+            return Err(IpcError::SetNonBlocking { source });
+        }
+
+        write_result.map_err(|source| IpcError::Send { source })
+    }
+
+    /// Writes the frame header into the reserved prefix of `write_buf`.
+    fn backfill_header(&mut self, wire_type: WireType, len: u32) -> Result<(), IpcError> {
+        let header = self.write_buf.get_mut(..HEADER_SIZE).ok_or_else(|| {
+            IpcError::Send {
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "write_buf shorter than header after encode",
+                ),
+            }
+        })?;
+        let [type_slot, len_slots @ ..] = header else {
+            // HEADER_SIZE is 5, get_mut(..5) succeeded — unreachable.
+            return Err(IpcError::Send {
+                source: io::Error::new(io::ErrorKind::InvalidData, "header destructure failed"),
+            });
+        };
+        *type_slot = wire_type.to_byte();
+        len_slots.copy_from_slice(&len.to_le_bytes());
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
