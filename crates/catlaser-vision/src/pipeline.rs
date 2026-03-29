@@ -21,11 +21,12 @@ use catlaser_common::servo_math;
 
 use crate::camera::{Camera, CameraConfig, IspConfig, IspController};
 use crate::detect::{DetectionConfig, Detector};
+use crate::embed::{self, CompletedEmbedding, EmbedConfig, EmbedEngine};
 use crate::ipc::{IncomingMessage, IpcConnection, IpcServer};
 use crate::npu::{Model, ModelPriority, NpuConfig};
 use crate::proto::detection::{
-    self, BehaviorCommand, DetectionFrame, NewTrack, SessionRequest, TrackEvent, TrackLost,
-    TrackedCat, track_event,
+    self, BehaviorCommand, DetectionFrame, IdentityRequest, NewTrack, SessionRequest, TrackEvent,
+    TrackLost, TrackedCat, track_event,
 };
 use crate::safety::{SafetyComputer, SafetyResult};
 use crate::serial::{self, CommandParams, DispenseRequest, SerialPort};
@@ -39,8 +40,11 @@ use crate::tracker::{Track, TrackState, TrackUpdate, Tracker, TrackerConfig};
 /// Default UART device path on the RV1106G3 compute module.
 const DEFAULT_SERIAL_PATH: &str = "/dev/ttyS3";
 
-/// Default RKNN model file path on the target filesystem.
+/// Default RKNN YOLO model file path on the target filesystem.
 const DEFAULT_MODEL_PATH: &str = "/opt/catlaser/models/yolov8n-coco.rknn";
+
+/// Default RKNN re-ID model file path on the target filesystem.
+const DEFAULT_REID_MODEL_PATH: &str = "/opt/catlaser/models/cat_reid_mobilenet.rknn";
 
 /// Smoothing value for active tracking (responsive but smooth).
 ///
@@ -99,6 +103,10 @@ pub(crate) enum PipelineError {
     /// Failed during detection post-processing.
     #[error("detection: {0}")]
     Detection(#[from] crate::detect::DetectError),
+
+    /// Failed to initialize or run the embedding engine.
+    #[error("embed: {0}")]
+    Embed(#[from] crate::embed::EmbedError),
 
     /// Failed to configure the targeter.
     #[error("targeting: {0}")]
@@ -165,7 +173,9 @@ pub(crate) struct PipelineConfig {
     pub tracker: TrackerConfig,
     /// Camera-to-servo angle transform parameters.
     pub targeting: TargetingConfig,
-    /// Path to the RKNN model file on disk.
+    /// Embedding engine configuration.
+    pub embed: EmbedConfig,
+    /// Path to the RKNN YOLO model file on disk.
     pub model_path: PathBuf,
     /// Path to the UART device node for MCU communication.
     pub serial_path: PathBuf,
@@ -182,6 +192,7 @@ impl Default for PipelineConfig {
             detection: DetectionConfig::default(),
             tracker: TrackerConfig::default(),
             targeting: TargetingConfig::default(),
+            embed: EmbedConfig::default(),
             model_path: PathBuf::from(DEFAULT_MODEL_PATH),
             serial_path: PathBuf::from(DEFAULT_SERIAL_PATH),
             socket_path: PathBuf::from(crate::ipc::DEFAULT_SOCKET_PATH),
@@ -414,19 +425,18 @@ pub(crate) fn behavior_params(cmd: &BehaviorCommand) -> CommandParams {
     let smoothing = (cmd.smoothing.clamp(0.0_f32, 1.0_f32) * 255.0_f32) as u8;
     let max_slew = (cmd.max_speed.clamp(0.0_f32, 1.0_f32) * 255.0_f32) as u8;
 
-    let dispense = (cmd.mode.as_known()
-        == Some(detection::TargetingMode::TARGETING_MODE_DISPENSE))
-    .then(|| {
-        let direction = if cmd.lead_target_x < 0.5_f32 {
-            DispenseDirection::Left
-        } else {
-            DispenseDirection::Right
-        };
-        DispenseRequest {
-            direction,
-            tier: rotations_to_tier(cmd.dispense_rotations),
-        }
-    });
+    let dispense = (cmd.mode.as_known() == Some(detection::TargetingMode::TARGETING_MODE_DISPENSE))
+        .then(|| {
+            let direction = if cmd.lead_target_x < 0.5_f32 {
+                DispenseDirection::Left
+            } else {
+                DispenseDirection::Right
+            };
+            DispenseRequest {
+                direction,
+                tier: rotations_to_tier(cmd.dispense_rotations),
+            }
+        });
 
     CommandParams {
         laser_on: cmd.laser_on,
@@ -595,8 +605,10 @@ pub(crate) fn build_detection_frame(
 /// ready for IPC transmission.
 ///
 /// [`TrackUpdate::Confirmed`] maps to `NewTrack`, [`TrackUpdate::Lost`]
-/// maps to `TrackLost`. [`TrackUpdate::Reacquired`] is filtered out — it
-/// will produce an `IdentityRequest` once the embedding model is integrated.
+/// maps to `TrackLost`. [`TrackUpdate::Reacquired`] does not produce a
+/// direct IPC event — it triggers embedding re-verification which emits
+/// an [`IdentityRequest`] via [`build_identity_request_events`] once the
+/// embedding averaging completes.
 pub(crate) fn build_track_events(updates: &[TrackUpdate]) -> Vec<TrackEvent> {
     updates
         .iter()
@@ -620,6 +632,29 @@ pub(crate) fn build_track_events(updates: &[TrackUpdate]) -> Vec<TrackEvent> {
                 ..Default::default()
             }),
             TrackUpdate::Reacquired { .. } => None,
+        })
+        .collect()
+}
+
+/// Converts completed embeddings into protobuf [`TrackEvent`] messages
+/// containing [`IdentityRequest`]s for the Python behavior engine.
+///
+/// Each completed embedding (averaged over N frames) produces one
+/// `IdentityRequest` with the 128-dim embedding vector serialized as
+/// 512 bytes of little-endian f32 values.
+pub(crate) fn build_identity_request_events(completed: &[CompletedEmbedding]) -> Vec<TrackEvent> {
+    completed
+        .iter()
+        .map(|c| TrackEvent {
+            event: Some(track_event::Event::IdentityRequest(Box::new(
+                IdentityRequest {
+                    track_id: c.track_id,
+                    embedding: embed::embedding_to_bytes(&c.embedding),
+                    confidence: c.confidence,
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
         })
         .collect()
 }
@@ -830,6 +865,9 @@ pub(crate) struct Pipeline {
     tracker: Tracker,
     targeter: Targeter,
     serial: SerialPort,
+    /// MobileNetV2 cat re-ID embedding engine. Loaded at init from the
+    /// re-ID model file. Runs on the NPU at low priority.
+    embed_engine: EmbedEngine,
     /// Active IPC connection to the Python behavior engine, if any.
     /// Drops before `ipc_server` so the connection closes before the
     /// socket file is removed.
@@ -860,6 +898,14 @@ pub(crate) struct Pipeline {
     /// NV12 Y-plane size in bytes (`width × height`). Computed once at init
     /// from the camera config for ambient brightness extraction.
     y_plane_size: usize,
+    /// Camera frame width in pixels (for embedding crop coordinate mapping).
+    frame_width: u32,
+    /// Camera frame height in pixels.
+    frame_height: u32,
+    /// Retained NV12 frame data for embedding extraction. Updated each
+    /// frame before NPU inference so the embed engine can crop cat
+    /// bboxes from the same frame that produced the detections.
+    frame_data: Vec<u8>,
     /// Stale frames drained since pipeline init (diagnostic counter).
     frames_drained: u64,
     /// Total frames processed since pipeline init.
@@ -917,6 +963,9 @@ impl Pipeline {
         tracing::info!(path = %config.socket_path.display(), "binding IPC socket");
         let ipc_server = IpcServer::bind(&config.socket_path)?;
 
+        tracing::info!(path = %config.embed.model_path.display(), "loading re-ID embedding model");
+        let embed_engine = EmbedEngine::load(&config.embed)?;
+
         // NV12 Y-plane size for ambient brightness computation.
         // Camera validation guarantees non-zero even dimensions. On all
         // supported targets (32-bit ARM, 64-bit host), u32→usize is lossless
@@ -939,6 +988,7 @@ impl Pipeline {
             tracker,
             targeter,
             serial,
+            embed_engine,
             ipc_connection: None,
             ipc_server,
             current_pan: PAN_HOME,
@@ -949,6 +999,9 @@ impl Pipeline {
             last_behavior_cmd: None,
             prev_frame_timestamp: None,
             y_plane_size,
+            frame_width: cam_width,
+            frame_height: cam_height,
+            frame_data: Vec::new(),
             frames_drained: 0_u64,
             frame_count: 0_u64,
         })
@@ -980,6 +1033,15 @@ impl Pipeline {
                 let ts = frame.timestamp();
                 let brightness = compute_ambient_brightness(frame.data(), self.y_plane_size);
                 self.model.set_input(frame.data())?;
+
+                // Retain frame data for embedding extraction. Only copy when
+                // the embed engine has pending requests to avoid ~100 us
+                // memcpy on frames that don't need cropping.
+                if self.embed_engine.has_pending() {
+                    self.frame_data.clear();
+                    self.frame_data.extend_from_slice(frame.data());
+                }
+
                 (s, i, ts, brightness)
             };
             self.camera.return_frame(idx)?;
@@ -1024,6 +1086,43 @@ impl Pipeline {
         self.tracker
             .update(cat_detections, model_width, model_height, timestamp_us);
         let track_count = self.tracker.tracks().len();
+
+        // --- Embedding ---
+        // Register new embedding requests for confirmed and re-acquired tracks.
+        // Cancel embeddings for tracks that died (Lost events).
+        for event in self.tracker.events() {
+            match *event {
+                TrackUpdate::Confirmed { track_id } | TrackUpdate::Reacquired { track_id } => {
+                    self.embed_engine.request_embedding(track_id);
+                }
+                TrackUpdate::Lost { track_id, .. } => {
+                    self.embed_engine.cancel(track_id);
+                }
+            }
+        }
+
+        // Process pending embedding extractions against the retained frame data.
+        if self.embed_engine.has_pending() && !self.frame_data.is_empty() {
+            let active_tracks: Vec<(u32, [f32; 4])> = self
+                .embed_engine
+                .pending_track_ids()
+                .iter()
+                .filter_map(|&tid| {
+                    self.tracker
+                        .tracks()
+                        .iter()
+                        .find(|t| t.id() == tid)
+                        .map(|t| (tid, t.bbox()))
+                })
+                .collect();
+
+            self.embed_engine.process_frame(
+                &self.frame_data,
+                self.frame_width,
+                self.frame_height,
+                &active_tracks,
+            );
+        }
 
         // --- Targeting + Command ---
         // When a session is Active and Python has sent a BehaviorCommand,
@@ -1180,6 +1279,19 @@ impl Pipeline {
         for event in &track_events {
             if let Err(err) = conn.send_track_event(event) {
                 tracing::warn!(%err, "IPC client disconnected during track event send");
+                self.ipc_connection = None;
+                self.session_state = SessionState::Idle;
+                self.last_behavior_cmd = None;
+                return false;
+            }
+        }
+
+        // --- IdentityRequest events (sporadic, when embedding averaging completes) ---
+        let identity_events =
+            build_identity_request_events(self.embed_engine.completed_embeddings());
+        for event in &identity_events {
+            if let Err(err) = conn.send_track_event(event) {
+                tracing::warn!(%err, "IPC client disconnected during identity request send");
                 self.ipc_connection = None;
                 self.session_state = SessionState::Idle;
                 self.last_behavior_cmd = None;
@@ -2480,7 +2592,7 @@ mod tests {
         );
         assert!(
             cat.cat_id.is_empty(),
-            "cat_id must be empty before identity integration"
+            "cat_id must be empty until IdentityResult arrives from Python"
         );
 
         // Bounding box center should be near frame center (320/640, 240/480).
@@ -2620,7 +2732,7 @@ mod tests {
         for cat in &frame.cats {
             assert!(
                 cat.cat_id.is_empty(),
-                "cat_id must be empty before identity integration, got {:?}",
+                "cat_id must be empty until IdentityResult arrives from Python, got {:?}",
                 cat.cat_id
             );
         }
@@ -2986,7 +3098,7 @@ mod tests {
         let events = build_track_events(&updates);
         assert!(
             events.is_empty(),
-            "Reacquired must be filtered (no IPC message until embedding model)"
+            "Reacquired must be filtered (triggers embedding re-verification, not a direct IPC event)"
         );
     }
 
@@ -3020,6 +3132,106 @@ mod tests {
                 Some(track_event::Event::TrackLost(_))
             ),
             "second event must be TrackLost"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_identity_request_events
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_identity_request_events_empty() {
+        let events = build_identity_request_events(&[]);
+        assert!(
+            events.is_empty(),
+            "no completed embeddings must produce no events"
+        );
+    }
+
+    #[test]
+    fn test_build_identity_request_events_produces_identity_request() {
+        let mut embedding = [0.0_f32; 128];
+        embedding[0] = 1.0_f32;
+        let completed = [CompletedEmbedding {
+            track_id: 42_u32,
+            embedding,
+            confidence: 0.85_f32,
+        }];
+        let events = build_identity_request_events(&completed);
+        assert_eq!(events.len(), 1, "one completed must produce one event");
+
+        let event = events.first().expect("event must exist");
+        match &event.event {
+            Some(track_event::Event::IdentityRequest(ir)) => {
+                assert_eq!(ir.track_id, 42_u32, "track_id must match");
+                assert_eq!(
+                    ir.embedding.len(),
+                    512,
+                    "embedding must be 512 bytes (128 f32s)"
+                );
+                assert!(
+                    (ir.confidence - 0.85_f32).abs() < 0.01_f32,
+                    "confidence must match"
+                );
+            }
+            other => panic!("expected IdentityRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_identity_request_events_multiple() {
+        let emb = [0.5_f32; 128];
+        let completed = [
+            CompletedEmbedding {
+                track_id: 1_u32,
+                embedding: emb,
+                confidence: 0.9_f32,
+            },
+            CompletedEmbedding {
+                track_id: 2_u32,
+                embedding: emb,
+                confidence: 0.7_f32,
+            },
+        ];
+        let events = build_identity_request_events(&completed);
+        assert_eq!(events.len(), 2, "two completed must produce two events");
+
+        for event in &events {
+            assert!(
+                matches!(&event.event, Some(track_event::Event::IdentityRequest(_))),
+                "all events must be IdentityRequest"
+            );
+        }
+    }
+
+    #[test]
+    fn test_identity_request_embedding_round_trips() {
+        let mut embedding = [0.0_f32; 128];
+        embedding[0] = 1.0_f32;
+        embedding[63] = -0.5_f32;
+        embedding[127] = 0.25_f32;
+
+        let completed = [CompletedEmbedding {
+            track_id: 7_u32,
+            embedding,
+            confidence: 0.95_f32,
+        }];
+        let events = build_identity_request_events(&completed);
+        let event = events.first().expect("event must exist");
+        let ir = match &event.event {
+            Some(track_event::Event::IdentityRequest(ir)) => ir,
+            other => panic!("expected IdentityRequest, got {other:?}"),
+        };
+
+        // Verify the embedding bytes round-trip back to the original floats.
+        let mut recovered = [0.0_f32; 128];
+        for (i, chunk) in ir.embedding.chunks_exact(4).enumerate() {
+            let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            recovered[i] = f32::from_le_bytes(arr);
+        }
+        assert_eq!(
+            embedding, recovered,
+            "embedding must round-trip through protobuf bytes"
         );
     }
 

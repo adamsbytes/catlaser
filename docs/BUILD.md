@@ -35,7 +35,7 @@
   - [X] DetectionFrame streaming (Rust → Python, ~15/sec)
   - [X] TrackEvent + SessionRequest (Rust → Python, sporadic)
   - [X] BehaviorCommand + SessionAck + IdentityResult (Python → Rust)
-  - [ ] Cat re-ID: MobileNetV2 embedding on NPU (Rust side)
+  - [X] Cat re-ID: MobileNetV2 embedding on NPU (Rust side)
   - [ ] Embedding comparison + catalog matching (Python side)
 
 [ ] Behavior Engine (catlaser_brain)
