@@ -36,7 +36,7 @@
   - [X] TrackEvent + SessionRequest (Rust → Python, sporadic)
   - [X] BehaviorCommand + SessionAck + IdentityResult (Python → Rust)
   - [X] Cat re-ID: MobileNetV2 embedding on NPU (Rust side)
-  - [ ] Embedding comparison + catalog matching (Python side)
+  - [X] Embedding comparison + catalog matching (Python side)
 
 [ ] Behavior Engine (catlaser_brain)
   - [ ] State machine (lure / chase / tease / cooldown / dispense)
