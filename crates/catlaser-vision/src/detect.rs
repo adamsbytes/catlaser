@@ -652,6 +652,16 @@ impl Detector {
         })
     }
 
+    /// Returns the model input width in pixels.
+    pub(crate) fn model_width(&self) -> f32 {
+        self.model_width
+    }
+
+    /// Returns the model input height in pixels.
+    pub(crate) fn model_height(&self) -> f32 {
+        self.model_height
+    }
+
     /// Processes raw NPU output tensors into detections.
     ///
     /// The model must have been run ([`Model::set_input`] + [`Model::run`])
