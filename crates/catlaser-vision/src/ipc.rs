@@ -609,10 +609,21 @@ impl IpcConnection {
 
         let header = match decode_header(header_arr) {
             Ok(h) => h,
+            Err(IpcError::MessageTooLarge { size }) => {
+                // Drain header + as much of the declared payload as is
+                // buffered to prevent payload bytes from being parsed as
+                // frame headers on subsequent calls.
+                let payload_len = usize::try_from(size).unwrap_or(usize::MAX);
+                let drain = self
+                    .read_buf
+                    .len()
+                    .min(HEADER_SIZE.saturating_add(payload_len));
+                self.read_buf.drain(..drain);
+                return Err(IpcError::MessageTooLarge { size });
+            }
             Err(err) => {
-                // Drain the invalid header so the reader can attempt resync
-                // on the next byte instead of re-parsing the same bad header
-                // on every call.
+                // Invalid wire type — drain just the header so the reader
+                // can attempt resync on the next byte.
                 self.read_buf.drain(..HEADER_SIZE);
                 return Err(err);
             }

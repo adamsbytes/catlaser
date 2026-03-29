@@ -128,7 +128,10 @@ class FrameReader:
             raise ValueError(msg) from None
 
         if length > MAX_MESSAGE_SIZE:
-            del self._buf[:HEADER_SIZE]
+            # Drain header + as much of the declared payload as is buffered
+            # to prevent the payload bytes from being parsed as frame headers.
+            drain = min(HEADER_SIZE + length, len(self._buf))
+            del self._buf[:drain]
             msg = f"message too large: {length} bytes (max {MAX_MESSAGE_SIZE})"
             raise ValueError(msg)
 

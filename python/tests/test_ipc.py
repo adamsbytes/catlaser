@@ -151,15 +151,24 @@ class TestFrameReader:
         assert msg_type == MsgType.DETECTION_FRAME
         assert payload == b"valid"
 
-    def test_oversized_length_drains_header_and_recovers(self):
+    def test_oversized_length_drains_buffered_payload(self):
         reader = FrameReader()
+        # Declare a payload larger than MAX_MESSAGE_SIZE. Feed some fake
+        # "payload" bytes after the header — these must be drained along
+        # with the header so they aren't parsed as a new frame.
         bad_header = struct.pack("<BI", MsgType.DETECTION_FRAME, MAX_MESSAGE_SIZE + 1)
-        good_frame = encode_frame(MsgType.BEHAVIOR_COMMAND, b"valid")
-        reader.feed(bad_header + good_frame)
+        fake_payload = b"\xab" * 20
+        reader.feed(bad_header + fake_payload)
 
         with pytest.raises(ValueError, match="message too large"):
             reader.next_frame()
 
+        # All buffered data (header + fake payload) should be drained.
+        assert reader.next_frame() is None
+
+        # New data arriving after the drain recovers cleanly.
+        good_frame = encode_frame(MsgType.BEHAVIOR_COMMAND, b"valid")
+        reader.feed(good_frame)
         result = reader.next_frame()
         assert result is not None
         msg_type, payload = result
