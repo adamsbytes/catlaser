@@ -29,7 +29,7 @@
   - [X] ServoCommand packing + UART TX
   - [X] End-to-end: camera sees cat → laser tracks cat
 
-[ ] IPC + Cat Identity
+[X] IPC + Cat Identity
   - [X] Unix socket server (Rust) + client (Python)
   - [X] Wire format: [1B type][4B length LE][protobuf]
   - [X] DetectionFrame streaming (Rust → Python, ~15/sec)

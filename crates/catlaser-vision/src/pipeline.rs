@@ -865,7 +865,7 @@ pub(crate) struct Pipeline {
     tracker: Tracker,
     targeter: Targeter,
     serial: SerialPort,
-    /// MobileNetV2 cat re-ID embedding engine. Loaded at init from the
+    /// `MobileNetV2` cat re-ID embedding engine. Loaded at init from the
     /// re-ID model file. Runs on the NPU at low priority.
     embed_engine: EmbedEngine,
     /// Active IPC connection to the Python behavior engine, if any.
@@ -1014,6 +1014,13 @@ impl Pipeline {
     /// Returns a [`FrameResult`] with per-frame statistics for logging.
     /// Transient errors (poll timeout, corrupt frame) should be retried
     /// by the caller; other errors are fatal.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "sequential pipeline stages (capture → inference → detection → safety → \
+                  tracking → embedding → targeting → serial → IPC → state update) are \
+                  inherently linear; extracting sub-methods would fragment the data flow \
+                  without reducing complexity"
+    )]
     pub(crate) fn run_frame(&mut self) -> Result<FrameResult, PipelineError> {
         // --- Capture ---
         // Capture the freshest available frame by draining any stale
@@ -1095,11 +1102,17 @@ impl Pipeline {
         let mut reacquired_ids: Vec<u32> = Vec::new();
         for event in self.tracker.events() {
             match *event {
-                TrackUpdate::Confirmed { track_id } | TrackUpdate::Reacquired { track_id } => {
+                TrackUpdate::Confirmed { track_id } => {
                     self.embed_engine.request_embedding(track_id);
-                    if matches!(event, TrackUpdate::Reacquired { .. }) {
-                        reacquired_ids.push(track_id);
-                    }
+                }
+                TrackUpdate::Reacquired { track_id } => {
+                    // Cancel any stale partial embedding from before the
+                    // coast period. The cat at this position may have
+                    // changed during occlusion, so the pre-coast frames
+                    // must not contaminate the new embedding.
+                    self.embed_engine.cancel(track_id);
+                    self.embed_engine.request_embedding(track_id);
+                    reacquired_ids.push(track_id);
                 }
                 TrackUpdate::Lost { track_id, .. } => {
                     self.embed_engine.cancel(track_id);
@@ -1173,12 +1186,17 @@ impl Pipeline {
         self.serial.send(servo_cmd)?;
 
         // --- IPC ---
+        // Drain completed embeddings before stream_ipc borrows &mut self.
+        // take_completed() clears the internal list so each embedding is
+        // sent as an IdentityRequest exactly once.
+        let completed_embeddings = self.embed_engine.take_completed();
         let ipc_connected = self.stream_ipc(
             frame_timestamp,
             safety,
             ambient_brightness,
             timestamp_us,
             target_track_id,
+            &completed_embeddings,
         );
 
         // --- State update ---
@@ -1226,6 +1244,13 @@ impl Pipeline {
     /// Computes the FPS estimate from inter-frame timestamps, accepts new
     /// clients, and handles disconnects gracefully — a lost client reverts
     /// to autonomous mode and resets session state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "IPC message sequencing (accept → DetectionFrame → TrackEvents → \
+                  IdentityRequests → drain incoming → session state → SessionRequest) \
+                  is inherently linear; splitting would scatter the disconnect-recovery \
+                  logic across multiple methods"
+    )]
     fn stream_ipc(
         &mut self,
         frame_timestamp: Duration,
@@ -1233,6 +1258,7 @@ impl Pipeline {
         ambient_brightness: f32,
         timestamp_us: u64,
         target_track_id: Option<u32>,
+        completed_embeddings: &[CompletedEmbedding],
     ) -> bool {
         // Compute FPS estimate from V4L2 monotonic timestamps for
         // velocity-per-frame → velocity-per-second conversion.
@@ -1298,8 +1324,7 @@ impl Pipeline {
         }
 
         // --- IdentityRequest events (sporadic, when embedding averaging completes) ---
-        let identity_events =
-            build_identity_request_events(self.embed_engine.completed_embeddings());
+        let identity_events = build_identity_request_events(completed_embeddings);
         for event in &identity_events {
             if let Err(err) = conn.send_track_event(event) {
                 tracing::warn!(%err, "IPC client disconnected during identity request send");
