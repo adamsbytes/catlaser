@@ -271,6 +271,19 @@ impl Mat8x4 {
         }
         Mat8x8(out)
     }
+
+    /// Transpose: 8x4 → 4x8.
+    fn transpose(&self) -> Mat4x8 {
+        let mut out = [0.0_f32; 32];
+        for r in 0..STATE_DIM {
+            for c in 0..MEAS_DIM {
+                if let Some(slot) = out.get_mut(c.wrapping_mul(STATE_DIM).wrapping_add(r)) {
+                    *slot = self.get(r, c);
+                }
+            }
+        }
+        Mat4x8(out)
+    }
 }
 
 impl Mat4x8 {
@@ -641,10 +654,18 @@ impl KalmanFilter {
         // State update: x = x + K * y
         self.x = self.x.add(&k.mul_vec(&y));
 
-        // Covariance update: P = (I - K * H) * P
+        // Covariance update (Joseph form):
+        // P = (I - KH) * P * (I - KH)^T + K * R * K^T
+        //
+        // The Joseph form is symmetric positive-definite by construction,
+        // unlike the simple P = (I - KH)P which accumulates roundoff and
+        // can lose positive-definiteness over long-lived tracks.
         let kh = k.mul_4x8(&hmat);
         let i_kh = Mat8x8::identity().sub(&kh);
-        self.p = i_kh.mul_8x8(&self.p);
+        let i_kh_t = i_kh.transpose();
+        let kt = k.transpose();
+        let kr = k.mul_4x4(&r);
+        self.p = i_kh.mul_8x8(&self.p).mul_8x8(&i_kh_t).add(&kr.mul_4x8(&kt));
 
         y
     }
@@ -755,6 +776,47 @@ fn iou_center(a: &[f32; 4], b: &[f32; 4]) -> f32 {
 // Hungarian algorithm (Kuhn-Munkres)
 // ---------------------------------------------------------------------------
 
+/// Pre-allocated work buffers for the Hungarian algorithm.
+///
+/// Avoids per-frame heap allocation on the Cortex-A7 hot path. Buffers are
+/// resized (never shrunk) to fit the current problem size.
+#[derive(Debug, Clone)]
+struct HungarianWork {
+    cost: Vec<f32>,
+    assignment: Vec<usize>,
+    col_to_row: Vec<usize>,
+    visited_cols: Vec<bool>,
+    visited_rows: Vec<bool>,
+    parent_row: Vec<usize>,
+    row_queue: Vec<usize>,
+}
+
+impl HungarianWork {
+    const fn new() -> Self {
+        Self {
+            cost: Vec::new(),
+            assignment: Vec::new(),
+            col_to_row: Vec::new(),
+            visited_cols: Vec::new(),
+            visited_rows: Vec::new(),
+            parent_row: Vec::new(),
+            row_queue: Vec::new(),
+        }
+    }
+
+    /// Resizes all buffers to fit an `n x n` square problem.
+    fn resize(&mut self, n: usize) {
+        let unassigned = usize::MAX;
+        self.cost.resize(n.saturating_mul(n), 0.0_f32);
+        self.assignment.resize(n, unassigned);
+        self.col_to_row.resize(n, unassigned);
+        self.visited_cols.resize(n, false);
+        self.visited_rows.resize(n, false);
+        self.parent_row.resize(n, unassigned);
+        // row_queue doesn't need a fixed size — it's cleared and pushed to.
+    }
+}
+
 /// Solves the linear assignment problem for a cost matrix using the
 /// Hungarian algorithm (Jonker-Volgenant variant for rectangular matrices).
 ///
@@ -771,18 +833,26 @@ fn iou_center(a: &[f32; 4], b: &[f32; 4]) -> f32 {
               (max ~50 tracks x ~20 detections). All loop indices are < n_rows or \
               n_cols. f32 cost subtraction on bounded IoU-derived values."
 )]
-fn hungarian(costs: &[f32], n_rows: usize, n_cols: usize) -> Vec<(usize, usize)> {
+fn hungarian(
+    costs: &[f32],
+    n_rows: usize,
+    n_cols: usize,
+    work: &mut HungarianWork,
+) -> Vec<(usize, usize)> {
     if n_rows == 0 || n_cols == 0 {
         return Vec::new();
     }
 
     // Pad to square matrix (larger dimension).
     let n = if n_rows > n_cols { n_rows } else { n_cols };
-    let mut cost = vec![0.0_f32; n * n];
+    work.resize(n);
+
+    // Fill the padded cost matrix from the input.
+    work.cost.fill(0.0_f32);
     for r in 0..n_rows {
         for c in 0..n_cols {
             let val = costs.get(r * n_cols + c).copied().unwrap_or(0.0_f32);
-            if let Some(slot) = cost.get_mut(r * n + c) {
+            if let Some(slot) = work.cost.get_mut(r * n + c) {
                 *slot = val;
             }
         }
@@ -792,13 +862,13 @@ fn hungarian(costs: &[f32], n_rows: usize, n_cols: usize) -> Vec<(usize, usize)>
     for r in 0..n {
         let mut min_val = f32::MAX;
         for c in 0..n {
-            let v = cost.get(r * n + c).copied().unwrap_or(0.0_f32);
+            let v = work.cost.get(r * n + c).copied().unwrap_or(0.0_f32);
             if v < min_val {
                 min_val = v;
             }
         }
         for c in 0..n {
-            if let Some(slot) = cost.get_mut(r * n + c) {
+            if let Some(slot) = work.cost.get_mut(r * n + c) {
                 *slot -= min_val;
             }
         }
@@ -808,35 +878,32 @@ fn hungarian(costs: &[f32], n_rows: usize, n_cols: usize) -> Vec<(usize, usize)>
     for c in 0..n {
         let mut min_val = f32::MAX;
         for r in 0..n {
-            let v = cost.get(r * n + c).copied().unwrap_or(0.0_f32);
+            let v = work.cost.get(r * n + c).copied().unwrap_or(0.0_f32);
             if v < min_val {
                 min_val = v;
             }
         }
         for r in 0..n {
-            if let Some(slot) = cost.get_mut(r * n + c) {
+            if let Some(slot) = work.cost.get_mut(r * n + c) {
                 *slot -= min_val;
             }
         }
     }
 
-    // Augmenting path algorithm.
-    // u[r], v[c]: dual variables (potentials).
-    // assignment[r]: column assigned to row r (usize::MAX if unassigned).
-    // col_to_row[c]: row assigned to column c (usize::MAX if unassigned).
+    // Initialize assignment arrays.
     let unassigned = usize::MAX;
-    let mut assignment = vec![unassigned; n];
-    let mut col_to_row = vec![unassigned; n];
+    work.assignment.fill(unassigned);
+    work.col_to_row.fill(unassigned);
 
     // Iteratively find augmenting paths.
     for r in 0..n {
-        augment_row(r, &mut cost, n, &mut assignment, &mut col_to_row);
+        augment_row(r, work, n);
     }
 
     // Collect valid assignments (only original rows/cols, not padding).
     let mut result = Vec::new();
     for r in 0..n_rows {
-        let c = assignment.get(r).copied().unwrap_or(unassigned);
+        let c = work.assignment.get(r).copied().unwrap_or(unassigned);
         if c < n_cols {
             result.push((r, c));
         }
@@ -850,35 +917,23 @@ fn hungarian(costs: &[f32], n_rows: usize, n_cols: usize) -> Vec<(usize, usize)>
     reason = "Hungarian algorithm: index arithmetic on bounded matrix dimensions \
               (max ~50 tracks x ~20 detections). f32 cost adjustments on bounded values."
 )]
-fn augment_row(
-    r: usize,
-    cost: &mut [f32],
-    n: usize,
-    assignment: &mut [usize],
-    col_to_row: &mut [usize],
-) {
+fn augment_row(r: usize, work: &mut HungarianWork, n: usize) {
     let unassigned = usize::MAX;
-    let mut visited_cols = vec![false; n];
-    let mut parent_row = vec![unassigned; n];
+    work.visited_cols.fill(false);
+    work.parent_row.fill(unassigned);
 
-    if try_augment(
-        r,
-        cost,
-        n,
-        assignment,
-        col_to_row,
-        &mut visited_cols,
-        &mut parent_row,
-    ) {
+    if try_augment(r, work, n) {
         return;
     }
 
     // Full Hungarian step: find minimum uncovered value, adjust costs, retry.
     loop {
-        let mut visited_rows = vec![false; n];
-        visited_cols.fill(false);
-        let mut row_queue = vec![r];
-        if let Some(vr) = visited_rows.get_mut(r) {
+        work.visited_rows.fill(false);
+        work.visited_cols.fill(false);
+        work.parent_row.fill(unassigned);
+        work.row_queue.clear();
+        work.row_queue.push(r);
+        if let Some(vr) = work.visited_rows.get_mut(r) {
             *vr = true;
         }
 
@@ -886,35 +941,47 @@ fn augment_row(
         let mut changed = true;
         while changed {
             changed = false;
-            let current_rows: Vec<usize> = row_queue.clone();
-            for &qr in &current_rows {
+            // Iterate over a snapshot of the current queue length to avoid
+            // borrow conflicts — new entries appended during the loop are
+            // picked up on the next `while changed` iteration.
+            let queue_len = work.row_queue.len();
+            for qi in 0..queue_len {
+                let qr = work.row_queue.get(qi).copied().unwrap_or(usize::MAX);
+                if qr == usize::MAX {
+                    continue;
+                }
                 for c in 0..n {
-                    if visited_cols.get(c).copied().unwrap_or(true) {
+                    if work.visited_cols.get(c).copied().unwrap_or(true) {
                         continue;
                     }
-                    let val = cost.get(qr * n + c).copied().unwrap_or(f32::MAX);
+                    let val = work.cost.get(qr * n + c).copied().unwrap_or(f32::MAX);
                     if val.abs() < 1e-9_f32 {
-                        if let Some(vc) = visited_cols.get_mut(c) {
+                        if let Some(vc) = work.visited_cols.get_mut(c) {
                             *vc = true;
                         }
-                        let matched_row = col_to_row.get(c).copied().unwrap_or(unassigned);
+                        let matched_row = work.col_to_row.get(c).copied().unwrap_or(unassigned);
                         if matched_row == unassigned {
-                            if let Some(slot) = parent_row.get_mut(c) {
+                            if let Some(slot) = work.parent_row.get_mut(c) {
                                 *slot = qr;
                             }
-                            flip_path(c, &parent_row, assignment, col_to_row);
+                            flip_path(
+                                c,
+                                &work.parent_row,
+                                &mut work.assignment,
+                                &mut work.col_to_row,
+                            );
                             changed = false;
-                            row_queue.clear();
+                            work.row_queue.clear();
                             break;
                         }
-                        if let Some(slot) = parent_row.get_mut(c) {
+                        if let Some(slot) = work.parent_row.get_mut(c) {
                             *slot = qr;
                         }
-                        if !visited_rows.get(matched_row).copied().unwrap_or(true) {
-                            if let Some(vr) = visited_rows.get_mut(matched_row) {
+                        if !work.visited_rows.get(matched_row).copied().unwrap_or(true) {
+                            if let Some(vr) = work.visited_rows.get_mut(matched_row) {
                                 *vr = true;
                             }
-                            row_queue.push(matched_row);
+                            work.row_queue.push(matched_row);
                             changed = true;
                         }
                     }
@@ -922,21 +989,21 @@ fn augment_row(
             }
         }
 
-        if assignment.get(r).copied().unwrap_or(unassigned) != unassigned {
+        if work.assignment.get(r).copied().unwrap_or(unassigned) != unassigned {
             break;
         }
 
         // Find minimum uncovered cost.
         let mut min_uncovered = f32::MAX;
         for row in 0..n {
-            if !visited_rows.get(row).copied().unwrap_or(false) {
+            if !work.visited_rows.get(row).copied().unwrap_or(false) {
                 continue;
             }
             for col in 0..n {
-                if visited_cols.get(col).copied().unwrap_or(true) {
+                if work.visited_cols.get(col).copied().unwrap_or(true) {
                     continue;
                 }
-                let val = cost.get(row * n + col).copied().unwrap_or(f32::MAX);
+                let val = work.cost.get(row * n + col).copied().unwrap_or(f32::MAX);
                 if val < min_uncovered {
                     min_uncovered = val;
                 }
@@ -950,9 +1017,9 @@ fn augment_row(
         // Adjust costs: subtract from uncovered, add to doubly-covered.
         for row in 0..n {
             for col in 0..n {
-                let row_vis = visited_rows.get(row).copied().unwrap_or(false);
-                let col_vis = visited_cols.get(col).copied().unwrap_or(false);
-                if let Some(slot) = cost.get_mut(row * n + col) {
+                let row_vis = work.visited_rows.get(row).copied().unwrap_or(false);
+                let col_vis = work.visited_cols.get(col).copied().unwrap_or(false);
+                if let Some(slot) = work.cost.get_mut(row * n + col) {
                     if row_vis && !col_vis {
                         *slot -= min_uncovered;
                     } else if !row_vis && col_vis {
@@ -967,47 +1034,30 @@ fn augment_row(
 /// Attempts a simple augmenting path from `row` via DFS.
 ///
 /// Returns `true` if an augmenting path was found and flipped.
-fn try_augment(
-    row: usize,
-    cost: &[f32],
-    n: usize,
-    assignment: &mut [usize],
-    col_to_row: &mut [usize],
-    visited_cols: &mut [bool],
-    parent_row: &mut [usize],
-) -> bool {
+fn try_augment(row: usize, work: &mut HungarianWork, n: usize) -> bool {
     let unassigned = usize::MAX;
     for c in 0..n {
-        if visited_cols.get(c).copied().unwrap_or(true) {
+        if work.visited_cols.get(c).copied().unwrap_or(true) {
             continue;
         }
-        let val = cost
+        let val = work
+            .cost
             .get(row.wrapping_mul(n).wrapping_add(c))
             .copied()
             .unwrap_or(f32::MAX);
         if val.abs() < 1e-9_f32 {
-            if let Some(vc) = visited_cols.get_mut(c) {
+            if let Some(vc) = work.visited_cols.get_mut(c) {
                 *vc = true;
             }
-            if let Some(slot) = parent_row.get_mut(c) {
+            if let Some(slot) = work.parent_row.get_mut(c) {
                 *slot = row;
             }
-            let matched_row = col_to_row.get(c).copied().unwrap_or(unassigned);
-            if matched_row == unassigned
-                || try_augment(
-                    matched_row,
-                    cost,
-                    n,
-                    assignment,
-                    col_to_row,
-                    visited_cols,
-                    parent_row,
-                )
-            {
-                if let Some(a) = assignment.get_mut(row) {
+            let matched_row = work.col_to_row.get(c).copied().unwrap_or(unassigned);
+            if matched_row == unassigned || try_augment(matched_row, work, n) {
+                if let Some(a) = work.assignment.get_mut(row) {
                     *a = c;
                 }
-                if let Some(cr) = col_to_row.get_mut(c) {
+                if let Some(cr) = work.col_to_row.get_mut(c) {
                     *cr = row;
                 }
                 return true;
@@ -1115,6 +1165,7 @@ pub(crate) struct Tracker {
     matched_tracks: Vec<bool>,
     matched_detections: Vec<bool>,
     normalized: Vec<[f32; MEAS_DIM]>,
+    hungarian_work: HungarianWork,
 }
 
 impl Tracker {
@@ -1129,6 +1180,7 @@ impl Tracker {
             matched_tracks: Vec::new(),
             matched_detections: Vec::new(),
             normalized: Vec::new(),
+            hungarian_work: HungarianWork::new(),
         }
     }
 
@@ -1159,7 +1211,12 @@ impl Tracker {
         self.build_cost_matrix();
         let n_tracks = self.tracks.len();
         let n_dets = self.normalized.len();
-        self.assignments = hungarian(&self.cost_matrix, n_tracks, n_dets);
+        self.assignments = hungarian(
+            &self.cost_matrix,
+            n_tracks,
+            n_dets,
+            &mut self.hungarian_work,
+        );
         self.classify_matches(n_tracks, n_dets);
 
         // Apply matches, coast unmatched, spawn new, prune dead.
@@ -1566,7 +1623,8 @@ mod tests {
 
     #[test]
     fn test_hungarian_empty() {
-        let result = hungarian(&[], 0, 0);
+        let mut work = HungarianWork::new();
+        let result = hungarian(&[], 0, 0, &mut work);
         assert!(
             result.is_empty(),
             "empty matrix should produce no assignments"
@@ -1576,7 +1634,8 @@ mod tests {
     #[test]
     fn test_hungarian_1x1() {
         let costs = [0.5_f32];
-        let result = hungarian(&costs, 1, 1);
+        let mut work = HungarianWork::new();
+        let result = hungarian(&costs, 1, 1, &mut work);
         assert_eq!(result.len(), 1, "1x1 matrix should produce one assignment");
         assert_eq!(result[0], (0, 0), "1x1 assignment should be (0, 0)");
     }
@@ -1587,7 +1646,8 @@ mod tests {
         let costs = [
             0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32, 0.0_f32, 1.0_f32, 1.0_f32, 1.0_f32, 0.0_f32,
         ];
-        let result = hungarian(&costs, 3, 3);
+        let mut work = HungarianWork::new();
+        let result = hungarian(&costs, 3, 3, &mut work);
         assert_eq!(result.len(), 3, "3x3 should produce 3 assignments");
         let mut total = 0.0_f32;
         for &(r, c) in &result {
@@ -1605,7 +1665,8 @@ mod tests {
         let costs = [
             10.0_f32, 5.0_f32, 1.0_f32, 2.0_f32, 10.0_f32, 8.0_f32, 7.0_f32, 3.0_f32, 10.0_f32,
         ];
-        let result = hungarian(&costs, 3, 3);
+        let mut work = HungarianWork::new();
+        let result = hungarian(&costs, 3, 3, &mut work);
         let mut total = 0.0_f32;
         for &(r, c) in &result {
             total += costs[r * 3 + c];
@@ -1620,7 +1681,8 @@ mod tests {
     fn test_hungarian_more_rows_than_cols() {
         // 3 tracks, 2 detections.
         let costs = [0.1_f32, 0.9_f32, 0.9_f32, 0.1_f32, 0.5_f32, 0.5_f32];
-        let result = hungarian(&costs, 3, 2);
+        let mut work = HungarianWork::new();
+        let result = hungarian(&costs, 3, 2, &mut work);
         assert!(
             result.len() <= 2,
             "at most 2 assignments for 2 columns, got {}",
@@ -1637,7 +1699,8 @@ mod tests {
     fn test_hungarian_more_cols_than_rows() {
         // 2 tracks, 3 detections.
         let costs = [0.1_f32, 0.9_f32, 0.5_f32, 0.9_f32, 0.1_f32, 0.5_f32];
-        let result = hungarian(&costs, 2, 3);
+        let mut work = HungarianWork::new();
+        let result = hungarian(&costs, 2, 3, &mut work);
         assert_eq!(result.len(), 2, "2 rows should produce 2 assignments");
         let mut total = 0.0_f32;
         for &(r, c) in &result {
@@ -2133,7 +2196,8 @@ mod tests {
             for i in 0..n {
                 costs[i * n + i] = 0.0_f32;
             }
-            let result = hungarian(&costs, n, n);
+            let mut work = HungarianWork::new();
+            let result = hungarian(&costs, n, n, &mut work);
             prop_assert_eq!(
                 result.len(),
                 n,

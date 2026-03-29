@@ -392,9 +392,10 @@ fn iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
               floor().clamp(-128, 127) guarantees the f32 → i8 cast is in range."
 )]
 fn compute_score_threshold_i8(score_threshold: f32, zp: i32, scale: f32) -> i8 {
-    if !(scale > 0.0_f32) {
+    if scale.partial_cmp(&0.0_f32) != Some(std::cmp::Ordering::Greater) {
         // Scale must be positive for RKNN affine asymmetric. If it
-        // isn't, disable the optimization by admitting all cells.
+        // isn't (zero, negative, or NaN), disable the optimization
+        // by admitting all cells.
         return i8::MIN;
     }
     // float_value = (raw - zp) * scale  →  raw = float_value / scale + zp
@@ -782,93 +783,14 @@ fn build_stride_levels(
     let mut levels = Vec::with_capacity(NUM_STRIDES);
 
     for &(grid_h, grid_w) in &grid_sizes {
-        let mut box_tensor: Option<&TensorIdentity> = None;
-        let mut class_tensor: Option<&TensorIdentity> = None;
-        let mut score_tensor: Option<&TensorIdentity> = None;
-
-        for id in identities {
-            if id.grid_h == grid_h && id.grid_w == grid_w {
-                match id.role {
-                    TensorRole::Box => box_tensor = Some(id),
-                    TensorRole::Class => class_tensor = Some(id),
-                    TensorRole::Score => score_tensor = Some(id),
-                }
-            }
-        }
-
-        let box_t = box_tensor.ok_or(DetectError::MissingTensor {
-            role: "box",
+        levels.push(build_single_stride(
+            identities,
             grid_h,
             grid_w,
-        })?;
-        let class_t = class_tensor.ok_or(DetectError::MissingTensor {
-            role: "class",
-            grid_h,
-            grid_w,
-        })?;
-        let score_t = score_tensor.ok_or(DetectError::MissingTensor {
-            role: "score",
-            grid_h,
-            grid_w,
-        })?;
-
-        // Compute stride and validate consistency.
-        #[expect(
-            clippy::arithmetic_side_effects,
-            reason = "grid_w/grid_h == 0 checked first, modulo of non-zero cannot panic"
-        )]
-        if grid_w == 0 || !model_w.is_multiple_of(grid_w) {
-            return Err(DetectError::IndivisibleGrid {
-                model_dim: model_w,
-                grid_dim: grid_w,
-            });
-        }
-        #[expect(
-            clippy::arithmetic_side_effects,
-            reason = "grid_h == 0 checked first, modulo of non-zero cannot panic"
-        )]
-        if grid_h == 0 || !model_h.is_multiple_of(grid_h) {
-            return Err(DetectError::IndivisibleGrid {
-                model_dim: model_h,
-                grid_dim: grid_h,
-            });
-        }
-
-        #[expect(
-            clippy::integer_division,
-            clippy::arithmetic_side_effects,
-            reason = "stride computation: divisibility verified above, division is exact"
-        )]
-        let (stride_x, stride_y) = (model_w / grid_w, model_h / grid_h);
-
-        if stride_x != stride_y {
-            return Err(DetectError::StrideMismatch {
-                stride_x,
-                stride_y,
-                grid_w,
-                grid_h,
-            });
-        }
-
-        levels.push(StrideLevel {
-            stride: stride_x,
-            grid_h,
-            grid_w,
-            box_idx: box_t.index,
-            class_idx: class_t.index,
-            score_idx: score_t.index,
-            box_zp: box_t.zp,
-            box_scale: box_t.scale,
-            class_zp: class_t.zp,
-            class_scale: class_t.scale,
-            score_zp: score_t.zp,
-            score_scale: score_t.scale,
-            score_threshold_i8: compute_score_threshold_i8(
-                score_threshold,
-                score_t.zp,
-                score_t.scale,
-            ),
-        });
+            model_w,
+            model_h,
+            score_threshold,
+        )?);
     }
 
     // Convert Vec to fixed-size array.
@@ -877,6 +799,101 @@ fn build_stride_levels(
         .map_err(|v: Vec<StrideLevel>| DetectError::StrideLevelCount { actual: v.len() })?;
 
     Ok(result)
+}
+
+/// Validates and constructs a single [`StrideLevel`] from tensors matching
+/// the given grid dimensions.
+fn build_single_stride(
+    identities: &[TensorIdentity],
+    grid_h: u32,
+    grid_w: u32,
+    model_w: u32,
+    model_h: u32,
+    score_threshold: f32,
+) -> Result<StrideLevel, DetectError> {
+    let mut box_tensor: Option<&TensorIdentity> = None;
+    let mut class_tensor: Option<&TensorIdentity> = None;
+    let mut score_tensor: Option<&TensorIdentity> = None;
+
+    for id in identities {
+        if id.grid_h == grid_h && id.grid_w == grid_w {
+            match id.role {
+                TensorRole::Box => box_tensor = Some(id),
+                TensorRole::Class => class_tensor = Some(id),
+                TensorRole::Score => score_tensor = Some(id),
+            }
+        }
+    }
+
+    let box_t = box_tensor.ok_or(DetectError::MissingTensor {
+        role: "box",
+        grid_h,
+        grid_w,
+    })?;
+    let class_t = class_tensor.ok_or(DetectError::MissingTensor {
+        role: "class",
+        grid_h,
+        grid_w,
+    })?;
+    let score_t = score_tensor.ok_or(DetectError::MissingTensor {
+        role: "score",
+        grid_h,
+        grid_w,
+    })?;
+
+    // Compute stride and validate consistency.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "grid_w/grid_h == 0 checked first, modulo of non-zero cannot panic"
+    )]
+    if grid_w == 0 || !model_w.is_multiple_of(grid_w) {
+        return Err(DetectError::IndivisibleGrid {
+            model_dim: model_w,
+            grid_dim: grid_w,
+        });
+    }
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "grid_h == 0 checked first, modulo of non-zero cannot panic"
+    )]
+    if grid_h == 0 || !model_h.is_multiple_of(grid_h) {
+        return Err(DetectError::IndivisibleGrid {
+            model_dim: model_h,
+            grid_dim: grid_h,
+        });
+    }
+
+    #[expect(
+        clippy::integer_division,
+        clippy::arithmetic_side_effects,
+        reason = "stride computation: divisibility verified above, division is exact"
+    )]
+    let (stride_x, stride_y) = (model_w / grid_w, model_h / grid_h);
+
+    if stride_x != stride_y {
+        return Err(DetectError::StrideMismatch {
+            stride_x,
+            stride_y,
+            grid_w,
+            grid_h,
+        });
+    }
+
+    Ok(StrideLevel {
+        stride: stride_x,
+        grid_h,
+        grid_w,
+        box_idx: box_t.index,
+        class_idx: class_t.index,
+        score_idx: score_t.index,
+        box_zp: box_t.zp,
+        box_scale: box_t.scale,
+        class_zp: class_t.zp,
+        class_scale: class_t.scale,
+        score_zp: score_t.zp,
+        score_scale: score_t.scale,
+        score_threshold_i8: compute_score_threshold_i8(score_threshold, score_t.zp, score_t.scale),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2339,14 +2356,12 @@ mod tests {
                         if let (Some(a), Some(b)) = (
                             detector.detections.get(i),
                             detector.detections.get(j),
-                        ) {
-                            if a.class_id == b.class_id {
-                                let overlap = iou(&a.bbox, &b.bbox);
-                                prop_assert!(
-                                    overlap <= detector.config.nms_iou_threshold,
-                                    "NMS output same-class pair ({i},{j}) has IoU {overlap} > threshold"
-                                );
-                            }
+                        ) && a.class_id == b.class_id {
+                            let overlap = iou(&a.bbox, &b.bbox);
+                            prop_assert!(
+                                overlap <= detector.config.nms_iou_threshold,
+                                "NMS output same-class pair ({i},{j}) has IoU {overlap} > threshold"
+                            );
                         }
                     }
                 }

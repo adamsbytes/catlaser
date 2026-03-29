@@ -72,7 +72,11 @@ impl CameraConfig {
     fn validate(&self) -> Result<(), CameraError> {
         // NV12 requires even dimensions: the UV plane is subsampled 2x
         // in both directions, so odd width or height produces a malformed frame.
-        if self.width == 0 || self.height == 0 || self.width % 2 != 0 || self.height % 2 != 0 {
+        if self.width == 0
+            || self.height == 0
+            || !self.width.is_multiple_of(2)
+            || !self.height.is_multiple_of(2)
+        {
             return Err(CameraError::FormatMismatch {
                 requested_width: self.width,
                 requested_height: self.height,

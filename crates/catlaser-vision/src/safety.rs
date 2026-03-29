@@ -36,6 +36,14 @@ const NO_PERSON_CEILING: f32 = -1.0_f32;
 /// the person's bounding box — well below the head/eye region.
 const CEILING_HEIGHT_FRACTION: f32 = 0.75_f32;
 
+/// Number of frames to hold the safety ceiling after the last person detection.
+///
+/// At ~15 FPS, 30 frames ≈ 2 seconds of hold time. This prevents the ceiling
+/// from dropping on single-frame detection misses (common with INT8 quantized
+/// inference) — a one-frame gap in person detection must not release the
+/// safety constraint.
+const CEILING_HOLD_FRAMES: u32 = 30_u32;
+
 // ---------------------------------------------------------------------------
 // Safety result
 // ---------------------------------------------------------------------------
@@ -58,11 +66,19 @@ pub(crate) struct SafetyResult {
 
 /// Filters detections by class and computes the per-frame safety ceiling.
 ///
-/// Maintains a pre-allocated buffer for cat-only detections to avoid
-/// per-frame allocation.
+/// Uses the lowest person in the frame (highest y-position, closest to the
+/// floor) to compute the ceiling — a person standing in the background
+/// does not prevent floor-level cat play. Maintains a temporal hold-off
+/// so the ceiling persists for [`CEILING_HOLD_FRAMES`] after the last
+/// person detection, preventing single-frame detection misses from
+/// momentarily releasing the safety constraint.
 #[derive(Debug)]
 pub(crate) struct SafetyComputer {
     cat_detections: Vec<Detection>,
+    /// Most recent valid ceiling value (from the lowest person in frame).
+    held_ceiling_y: f32,
+    /// Frames remaining before the held ceiling expires.
+    hold_remaining: u32,
 }
 
 impl SafetyComputer {
@@ -70,6 +86,8 @@ impl SafetyComputer {
     pub(crate) const fn new() -> Self {
         Self {
             cat_detections: Vec::new(),
+            held_ceiling_y: NO_PERSON_CEILING,
+            hold_remaining: 0_u32,
         }
     }
 
@@ -78,10 +96,17 @@ impl SafetyComputer {
     /// Returns the safety ceiling result. After calling this, use
     /// [`cat_detections()`](Self::cat_detections) to get the cat-only
     /// detection slice for the tracker.
+    ///
+    /// The ceiling is computed from the lowest person in the frame (the one
+    /// positioned closest to the bottom of the image, i.e. highest y2).
+    /// When no person is detected, the previously computed ceiling is held
+    /// for up to [`CEILING_HOLD_FRAMES`] before relaxing to no constraint.
     pub(crate) fn process(&mut self, detections: &[Detection], model_height: f32) -> SafetyResult {
         self.cat_detections.clear();
 
-        let mut lowest_ceiling_y = f32::MAX;
+        // Find the lowest person in the frame (highest y2 = closest to floor).
+        let mut lowest_person_y2 = f32::MIN;
+        let mut lowest_person_ceiling: Option<f32> = None;
         let mut person_in_frame = false;
 
         for det in detections {
@@ -91,23 +116,30 @@ impl SafetyComputer {
                 }
                 COCO_PERSON => {
                     person_in_frame = true;
-                    let ceiling_y = person_ceiling_y(&det.bbox, model_height);
-                    if ceiling_y < lowest_ceiling_y {
-                        lowest_ceiling_y = ceiling_y;
+                    if det.bbox.y2 > lowest_person_y2 {
+                        lowest_person_y2 = det.bbox.y2;
+                        lowest_person_ceiling = Some(person_ceiling_y(&det.bbox, model_height));
                     }
                 }
                 _ => {}
             }
         }
 
-        let ceiling_y = if person_in_frame {
-            lowest_ceiling_y
+        if let Some(ceiling_y) = lowest_person_ceiling {
+            // Person detected — update held ceiling and reset hold timer.
+            self.held_ceiling_y = ceiling_y;
+            self.hold_remaining = CEILING_HOLD_FRAMES;
+        } else if self.hold_remaining > 0 {
+            // No person this frame but hold-off is active — keep the
+            // previous ceiling to ride through detection gaps.
+            self.hold_remaining = self.hold_remaining.saturating_sub(1_u32);
         } else {
-            NO_PERSON_CEILING
-        };
+            // Hold-off expired — release constraint.
+            self.held_ceiling_y = NO_PERSON_CEILING;
+        }
 
         SafetyResult {
-            ceiling_y,
+            ceiling_y: self.held_ceiling_y,
             person_in_frame,
         }
     }
@@ -143,12 +175,9 @@ fn person_ceiling_y(bbox: &crate::detect::BoundingBox, model_height: f32) -> f32
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::as_conversions,
-    clippy::cast_precision_loss,
     clippy::float_cmp,
     clippy::suboptimal_flops,
-    reason = "test code: indexing on known-size arrays, arithmetic and casts on small known values, \
+    reason = "test code: indexing on known-size arrays, \
               float_cmp on exact sentinel values (-1.0) perfectly representable in IEEE 754, \
               suboptimal_flops in expected-value computation mirrors the formula for readability"
 )]
@@ -291,25 +320,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Multiple persons — most restrictive ceiling wins
+    // Multiple persons — lowest person (closest to floor) wins
     // -------------------------------------------------------------------
 
     #[test]
-    fn test_multiple_persons_most_restrictive_ceiling() {
+    fn test_multiple_persons_lowest_person_wins() {
         let mut sc = SafetyComputer::new();
-        // Person A: y1=200, y2=400 → ceiling at 200 + 0.75*200 = 350 → 350/480
-        // Person B: y1=50, y2=300  → ceiling at 50 + 0.75*250 = 237.5 → 237.5/480
-        // Person B has the lower (more restrictive) ceiling.
+        // Person A: y1=200, y2=400 → lowest in frame (highest y2)
+        //   ceiling at 200 + 0.75*200 = 350 → 350/480
+        // Person B: y1=50, y2=300 → higher in frame
+        //   ceiling at 50 + 0.75*250 = 237.5 → 237.5/480
+        // Person A is the lowest person (y2=400 > y2=300), so its ceiling is used.
         let dets = [
             person(100.0_f32, 200.0_f32, 300.0_f32, 400.0_f32),
             person(400.0_f32, 50.0_f32, 550.0_f32, 300.0_f32),
         ];
         let result = sc.process(&dets, MODEL_H);
 
-        let expected = 237.5_f32 / MODEL_H;
+        let expected = 350.0_f32 / MODEL_H;
         assert!(
             (result.ceiling_y - expected).abs() < 1e-6_f32,
-            "ceiling should be the most restrictive (lowest y), expected {expected}, got {}",
+            "ceiling should use the lowest person (highest y2), expected {expected}, got {}",
             result.ceiling_y
         );
     }
@@ -437,13 +468,101 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Buffer reuse across frames
+    // Temporal hold-off
     // -------------------------------------------------------------------
 
     #[test]
-    fn test_process_resets_between_frames() {
+    fn test_ceiling_held_after_person_disappears() {
         let mut sc = SafetyComputer::new();
+        let person_det = [person(100.0_f32, 100.0_f32, 300.0_f32, 400.0_f32)];
+        let ceiling_with_person = sc.process(&person_det, MODEL_H).ceiling_y;
 
+        // One frame without person — ceiling should be held.
+        let r = sc.process(&[], MODEL_H);
+        assert!(
+            !r.person_in_frame,
+            "person_in_frame should be false when no person detected"
+        );
+        assert_eq!(
+            r.ceiling_y, ceiling_with_person,
+            "ceiling should be held on the frame after person disappears"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_held_for_full_hold_period() {
+        let mut sc = SafetyComputer::new();
+        let person_det = [person(100.0_f32, 100.0_f32, 300.0_f32, 400.0_f32)];
+        let ceiling_with_person = sc.process(&person_det, MODEL_H).ceiling_y;
+
+        // Run exactly CEILING_HOLD_FRAMES empty frames — ceiling should be
+        // held on every one.
+        for i in 0..CEILING_HOLD_FRAMES {
+            let r = sc.process(&[], MODEL_H);
+            assert_eq!(
+                r.ceiling_y, ceiling_with_person,
+                "ceiling should be held during hold frame {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ceiling_released_after_hold_expires() {
+        let mut sc = SafetyComputer::new();
+        let person_det = [person(100.0_f32, 100.0_f32, 300.0_f32, 400.0_f32)];
+        let _ = sc.process(&person_det, MODEL_H);
+
+        // Exhaust the hold period.
+        for _ in 0..CEILING_HOLD_FRAMES {
+            let _ = sc.process(&[], MODEL_H);
+        }
+
+        // One more frame — hold expired, ceiling should release.
+        let r = sc.process(&[], MODEL_H);
+        assert_eq!(
+            r.ceiling_y, NO_PERSON_CEILING,
+            "ceiling should release to sentinel after hold expires"
+        );
+        assert!(
+            !r.person_in_frame,
+            "person_in_frame should be false after hold expires"
+        );
+    }
+
+    #[test]
+    fn test_person_redetection_resets_hold_timer() {
+        let mut sc = SafetyComputer::new();
+        let person_det = [person(100.0_f32, 100.0_f32, 300.0_f32, 400.0_f32)];
+        let ceiling_with_person = sc.process(&person_det, MODEL_H).ceiling_y;
+
+        // Drain most of the hold period.
+        for _ in 0..(CEILING_HOLD_FRAMES.saturating_sub(2_u32)) {
+            let _ = sc.process(&[], MODEL_H);
+        }
+
+        // Re-detect person — should reset the timer.
+        let _ = sc.process(&person_det, MODEL_H);
+
+        // Full hold period again from the re-detection.
+        for i in 0..CEILING_HOLD_FRAMES {
+            let r = sc.process(&[], MODEL_H);
+            assert_eq!(
+                r.ceiling_y, ceiling_with_person,
+                "ceiling should be held after re-detection, frame {i}"
+            );
+        }
+
+        // Now it should expire.
+        let r = sc.process(&[], MODEL_H);
+        assert_eq!(
+            r.ceiling_y, NO_PERSON_CEILING,
+            "ceiling should release after full hold from re-detection"
+        );
+    }
+
+    #[test]
+    fn test_cat_detections_reset_during_hold() {
+        let mut sc = SafetyComputer::new();
         // Frame 1: cat + person.
         let dets1 = [
             cat(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32),
@@ -453,7 +572,7 @@ mod tests {
         assert!(r1.person_in_frame, "frame 1 should detect person");
         assert_eq!(sc.cat_detections().len(), 1, "frame 1 should have 1 cat");
 
-        // Frame 2: only cats.
+        // Frame 2: two different cats, no person (ceiling held).
         let dets2 = [
             cat(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32),
             cat(400.0_f32, 300.0_f32, 500.0_f32, 400.0_f32),
@@ -461,11 +580,11 @@ mod tests {
         let r2 = sc.process(&dets2, MODEL_H);
         assert!(
             !r2.person_in_frame,
-            "frame 2 should not carry over person from frame 1"
+            "frame 2 should not report person_in_frame"
         );
-        assert_eq!(
-            r2.ceiling_y, NO_PERSON_CEILING,
-            "frame 2 should reset ceiling to sentinel"
+        assert!(
+            r2.ceiling_y > 0.0_f32,
+            "frame 2 ceiling should still be active from hold-off"
         );
         assert_eq!(
             sc.cat_detections().len(),
@@ -495,7 +614,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     proptest! {
-        /// The ceiling y must be at or below the 75% point of every person bbox.
+        /// The ceiling y equals the 75% point of the person bbox.
         #[test]
         fn test_ceiling_within_person_bbox(
             y1 in 0.0_f32..400.0_f32,
@@ -537,7 +656,7 @@ mod tests {
             );
         }
 
-        /// Without persons, ceiling is always the sentinel value.
+        /// Without persons (fresh computer, no hold-off), ceiling is sentinel.
         #[test]
         fn test_no_person_always_sentinel(
             x1 in 0.0_f32..500.0_f32,
@@ -566,9 +685,9 @@ mod tests {
             );
         }
 
-        /// With multiple persons, the ceiling is the minimum across all persons.
+        /// With multiple persons, the ceiling uses the lowest person (highest y2).
         #[test]
-        fn test_multi_person_ceiling_is_minimum(
+        fn test_multi_person_ceiling_uses_lowest(
             y1a in 0.0_f32..300.0_f32,
             ha in 50.0_f32..180.0_f32,
             y1b in 0.0_f32..300.0_f32,
@@ -583,14 +702,17 @@ mod tests {
             let mut sc = SafetyComputer::new();
             let result = sc.process(&dets, MODEL_H);
 
-            let ceil_a = (y1a + CEILING_HEIGHT_FRACTION * (y2a - y1a)) / MODEL_H;
-            let ceil_b = (y1b + CEILING_HEIGHT_FRACTION * (y2b - y1b)) / MODEL_H;
-            let expected_min = ceil_a.min(ceil_b);
+            // The person with the highest y2 is the lowest in the frame.
+            let expected = if y2a > y2b {
+                (y1a + CEILING_HEIGHT_FRACTION * (y2a - y1a)) / MODEL_H
+            } else {
+                (y1b + CEILING_HEIGHT_FRACTION * (y2b - y1b)) / MODEL_H
+            };
 
             prop_assert!(
-                (result.ceiling_y - expected_min).abs() < 1e-5_f32,
-                "ceiling {} should be min of {} and {} = {}",
-                result.ceiling_y, ceil_a, ceil_b, expected_min,
+                (result.ceiling_y - expected).abs() < 1e-5_f32,
+                "ceiling {} should match lowest person's ceiling {}",
+                result.ceiling_y, expected,
             );
         }
 

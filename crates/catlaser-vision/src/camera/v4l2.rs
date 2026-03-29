@@ -491,13 +491,13 @@ fn as_bytes_mut<T: Sized>(val: &mut T) -> &mut [u8] {
 pub(super) fn open_device(path: &Path) -> Result<OwnedFd, CameraError> {
     use std::os::unix::ffi::OsStrExt;
 
-    let path_bytes = path.as_os_str().as_bytes();
-
     // Build a null-terminated path on the stack. Device paths are short
     // (e.g. /dev/video11) so 256 bytes is generous. The path must be
     // strictly shorter than the buffer to leave room for the null
     // terminator at c_path[path_bytes.len()].
     const PATH_BUF_LEN: usize = 256;
+
+    let path_bytes = path.as_os_str().as_bytes();
     let mut c_path = [0_u8; PATH_BUF_LEN];
     let path_len = path_bytes.len();
     let c_path_slice = if path_len < PATH_BUF_LEN {
