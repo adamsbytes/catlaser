@@ -1,4 +1,4 @@
-//! Cat re-ID embedding via MobileNetV2 on the RV1106 NPU.
+//! Cat re-ID embedding via `MobileNetV2` on the RV1106 NPU.
 //!
 //! Crops a tracked cat's bounding box from the NV12 camera frame, converts
 //! to RGB, resizes to 128x128, runs the embedding model on the NPU, and
@@ -42,7 +42,7 @@ const C2_BLOCK: u32 = 16;
 /// Embedding engine configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct EmbedConfig {
-    /// Path to the MobileNetV2 `.rknn` model file.
+    /// Path to the `MobileNetV2` `.rknn` model file.
     pub model_path: PathBuf,
     /// NPU runtime configuration (library path).
     pub npu: NpuConfig,
@@ -129,11 +129,13 @@ impl CropRegion {
     #[expect(
         clippy::as_conversions,
         clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
         clippy::cast_sign_loss,
         clippy::arithmetic_side_effects,
         reason = "normalized coords in [0,1] multiplied by frame dims produce values in \
-                  [0, frame_dim]; clamped to u32 range before cast. Subtraction is safe \
-                  because x2 >= x1 and y2 >= y1 after clamping (both derived from the \
+                  [0, frame_dim]; clamped to u32 range before cast. Frame dims are ≤ 4096, \
+                  exact in f32 (23-bit mantissa covers integers up to 2^24). Subtraction is \
+                  safe because x2 >= x1 and y2 >= y1 after clamping (both derived from the \
                   same base with additive half-widths). Addition of 1 for minimum size \
                   cannot overflow because frame dims are <= 4096."
     )]
@@ -186,9 +188,11 @@ impl CropRegion {
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::arithmetic_side_effects,
+    clippy::too_many_arguments,
     reason = "output indices and crop dimensions produce coordinates within frame bounds; \
               clamped to [0, frame_dim) before integer cast. u32 values are <= 4096, \
-              exact in f32."
+              exact in f32. 8 args are the minimal decomposition of a 2D bilinear sample: \
+              output coords, crop origin, crop size, frame bounds."
 )]
 fn bilinear_sample_coords(
     out_x: usize,
@@ -560,7 +564,7 @@ pub(crate) struct CompletedEmbedding {
 // Embed engine
 // ---------------------------------------------------------------------------
 
-/// MobileNetV2 cat re-ID embedding engine.
+/// `MobileNetV2` cat re-ID embedding engine.
 ///
 /// Manages the NPU model, tracks which track IDs have pending or completed
 /// embeddings, and accumulates multi-frame averages.
@@ -573,12 +577,12 @@ pub(crate) struct EmbedEngine {
     completed: Vec<CompletedEmbedding>,
     /// Number of frames to average over.
     averaging_frames: u32,
-    /// Reusable RGB buffer for crop_and_resize output.
+    /// Reusable RGB buffer for `crop_and_resize` output.
     rgb_buffer: Vec<u8>,
 }
 
 impl EmbedEngine {
-    /// Loads the MobileNetV2 embedding model and initializes the engine.
+    /// Loads the `MobileNetV2` embedding model and initializes the engine.
     #[tracing::instrument(skip_all, fields(model = %config.model_path.display()))]
     pub(crate) fn load(config: &EmbedConfig) -> Result<Self, EmbedError> {
         let model_data =
@@ -642,8 +646,6 @@ impl EmbedEngine {
         frame_height: u32,
         active_tracks: &[(u32, [f32; 4])],
     ) {
-        self.completed.clear();
-
         // Process each active track that has a pending request.
         // Borrow self.pending and self.model as disjoint fields to avoid
         // conflicting mutable borrows.
@@ -665,7 +667,6 @@ impl EmbedEngine {
                 }
                 Err(err) => {
                     tracing::warn!(track_id, %err, "embedding inference failed, skipping frame");
-                    continue;
                 }
             }
         }
@@ -700,9 +701,15 @@ impl EmbedEngine {
         }
     }
 
-    /// Returns embeddings completed during the last [`process_frame`](Self::process_frame) call.
-    pub(crate) fn completed_embeddings(&self) -> &[CompletedEmbedding] {
-        &self.completed
+    /// Drains embeddings completed during the last [`process_frame`] call.
+    ///
+    /// Returns the completed embeddings and clears the internal list so
+    /// they are only yielded once. This prevents duplicate
+    /// [`IdentityRequest`](crate::proto::detection::IdentityRequest)
+    /// sends on frames where [`process_frame`](Self::process_frame) is
+    /// not called (no pending requests remain).
+    pub(crate) fn take_completed(&mut self) -> Vec<CompletedEmbedding> {
+        std::mem::take(&mut self.completed)
     }
 
     /// Cancels a pending embedding request (e.g., when a track dies).
@@ -757,8 +764,13 @@ pub(crate) fn embedding_to_bytes(embedding: &[f32; EMBEDDING_DIM]) -> Vec<u8> {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::integer_division,
+    clippy::indexing_slicing,
+    clippy::needless_range_loop,
+    clippy::absurd_extreme_comparisons,
     reason = "test code: exact float comparisons for known values, arithmetic for test \
-              data construction, casts for pixel manipulation in test frames"
+              data construction, casts for pixel manipulation in test frames, \
+              indexing on known-size test data, range loops for frame construction, \
+              u8 <= 255 asserts document proptest invariants"
 )]
 mod tests {
     use super::*;
