@@ -307,11 +307,6 @@ struct Candidate {
 // ---------------------------------------------------------------------------
 
 /// Sigmoid activation: 1 / (1 + exp(-x)).
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "f32 arithmetic: exp() and division produce finite results for finite \
-              inputs. The clamp guards against overflow in exp() for large negative x."
-)]
 fn sigmoid(x: f32) -> f32 {
     // Clamp to avoid overflow in exp() for very negative values.
     // sigmoid(-20) ~= 2e-9, sigmoid(20) ~= 1-2e-9 — sufficient precision.
@@ -323,12 +318,6 @@ fn sigmoid(x: f32) -> f32 {
 ///
 /// Computes numerically stable softmax by subtracting the max before
 /// exponentiating to prevent overflow.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "f32 arithmetic in softmax: subtraction for numerical stability, \
-              exp() of bounded range, sum of positive values, division by positive sum. \
-              All produce finite results for finite inputs."
-)]
 fn softmax_16(logits: &[f32; DFL_REG_MAX]) -> [f32; DFL_REG_MAX] {
     // Find max for numerical stability.
     let max_val = logits.iter().copied().reduce(f32::max).unwrap_or(0.0_f32);
@@ -353,11 +342,6 @@ fn softmax_16(logits: &[f32; DFL_REG_MAX]) -> [f32; DFL_REG_MAX] {
 }
 
 /// Intersection over Union between two bounding boxes.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "f32 arithmetic for IoU: min/max for intersection, area subtraction, \
-              division by union area. All values are non-negative pixel coordinates."
-)]
 fn iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
     let left = a.x1.max(b.x1);
     let top = a.y1.max(b.y1);
@@ -386,7 +370,6 @@ fn iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
     clippy::as_conversions,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::arithmetic_side_effects,
     reason = "INT8 threshold precomputation: zp (i8-range i32) → f32 is lossless \
               in practice. f32 division/addition for the threshold mapping. \
               floor().clamp(-128, 127) guarantees the f32 → i8 cast is in range."
@@ -852,20 +835,12 @@ fn build_single_stride(
     })?;
 
     // Compute stride and validate consistency.
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "grid_w/grid_h == 0 checked first, modulo of non-zero cannot panic"
-    )]
     if grid_w == 0 || !model_w.is_multiple_of(grid_w) {
         return Err(DetectError::IndivisibleGrid {
             model_dim: model_w,
             grid_dim: grid_w,
         });
     }
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "grid_h == 0 checked first, modulo of non-zero cannot panic"
-    )]
     if grid_h == 0 || !model_h.is_multiple_of(grid_h) {
         return Err(DetectError::IndivisibleGrid {
             model_dim: model_h,
@@ -915,7 +890,6 @@ fn build_single_stride(
 #[expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
-    clippy::arithmetic_side_effects,
     clippy::too_many_arguments,
     clippy::suboptimal_flops,
     reason = "Grid cell iteration and coordinate computation. \
@@ -1025,11 +999,9 @@ fn find_best_class(
     clippy::as_conversions,
     clippy::cast_precision_loss,
     clippy::arithmetic_side_effects,
-    clippy::suboptimal_flops,
     reason = "DFL decode: dir*16+bin is max 3*16+15=63, fits usize. \
               bin index i (0..15) → f32 is exact. Weighted sum of \
-              probabilities * small integers cannot overflow f32. \
-              Explicit multiply-add matches the spec formula."
+              probabilities * small integers cannot overflow f32."
 )]
 fn decode_dfl(
     box_data: &[i8],

@@ -109,6 +109,8 @@ fn run() -> Result<(), PipelineError> {
                     laser = result.laser_on,
                     ceiling = result.safety.ceiling_y,
                     person = result.safety.person_in_frame,
+                    ipc = result.ipc_connected,
+                    brightness = format_args!("{:.2}", result.ambient_brightness),
                     "frame",
                 );
             }

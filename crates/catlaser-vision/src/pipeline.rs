@@ -11,13 +11,16 @@
 //! laser off and servos home otherwise.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use catlaser_common::constants::{PAN_HOME, TILT_HOME};
 use catlaser_common::servo_math;
 
 use crate::camera::{Camera, CameraConfig, IspConfig, IspController};
 use crate::detect::{DetectionConfig, Detector};
+use crate::ipc::{IpcConnection, IpcServer};
 use crate::npu::{Model, ModelPriority, NpuConfig};
+use crate::proto::detection::{self, DetectionFrame, TrackedCat};
 use crate::safety::{SafetyComputer, SafetyResult};
 use crate::serial::{self, CommandParams, SerialPort};
 use crate::targeting::{Targeter, TargetingConfig, TargetingSolution};
@@ -44,6 +47,10 @@ const TRACKING_SMOOTHING: u8 = 128_u8;
 /// Maps to ~0.25 interpolation factor — slow, smooth drift to home to
 /// avoid startling the cat when the laser disengages.
 const IDLE_SMOOTHING: u8 = 64_u8;
+
+/// Default assumed FPS for velocity conversion when no prior frame
+/// timestamp is available (first frame after init).
+const DEFAULT_FPS: f32 = 15.0_f32;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -80,6 +87,10 @@ pub(crate) enum PipelineError {
         /// Underlying OS error.
         source: std::io::Error,
     },
+
+    /// Failed to initialize the IPC Unix socket server.
+    #[error("ipc: {0}")]
+    Ipc(#[from] crate::ipc::IpcError),
 
     /// Failed to install a signal handler.
     #[error("failed to install {signal} handler: {source}")]
@@ -129,6 +140,8 @@ pub(crate) struct PipelineConfig {
     pub model_path: PathBuf,
     /// Path to the UART device node for MCU communication.
     pub serial_path: PathBuf,
+    /// Path to the Unix domain socket for IPC with the Python behavior engine.
+    pub socket_path: PathBuf,
 }
 
 impl Default for PipelineConfig {
@@ -142,6 +155,7 @@ impl Default for PipelineConfig {
             targeting: TargetingConfig::default(),
             model_path: PathBuf::from(DEFAULT_MODEL_PATH),
             serial_path: PathBuf::from(DEFAULT_SERIAL_PATH),
+            socket_path: PathBuf::from(crate::ipc::DEFAULT_SOCKET_PATH),
         }
     }
 }
@@ -171,6 +185,12 @@ pub(crate) struct FrameResult {
     pub tilt: i16,
     /// Whether the laser was commanded on.
     pub laser_on: bool,
+    /// Whether an IPC client (Python behavior engine) is connected.
+    pub ipc_connected: bool,
+    /// Frame timestamp in monotonic microseconds since boot.
+    pub timestamp_us: u64,
+    /// Ambient brightness estimate from the Y-plane. 0.0 = dark, 1.0 = bright.
+    pub ambient_brightness: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +217,6 @@ const TARGET_SWITCH_MARGIN: f32 = 2.0_f32;
 /// switches only happen on sustained, obvious engagement differences.
 #[expect(
     clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
     reason = "hits clamped to 10 then cast u32→u8→f32; value 0-10 is exact in all types"
 )]
 pub(crate) fn track_score(track: &Track) -> f32 {
@@ -281,6 +299,103 @@ pub(crate) fn compute_solution(
 }
 
 // ---------------------------------------------------------------------------
+// IPC: DetectionFrame construction
+// ---------------------------------------------------------------------------
+
+/// Computes ambient brightness from the NV12 Y-plane.
+///
+/// Averages the luminance values of the first `y_plane_size` bytes in the
+/// frame data (the Y plane in NV12 format). Returns a value in `[0.0, 1.0]`
+/// where 0.0 is complete darkness and 1.0 is maximum brightness.
+///
+/// At 640x480 the Y-plane is 307,200 bytes. Iteration is ~100 us on the
+/// Cortex-A7 — negligible compared to the ~60 ms NPU inference that follows.
+pub(crate) fn compute_ambient_brightness(frame_data: &[u8], y_plane_size: usize) -> f32 {
+    let y_data = match frame_data.get(..y_plane_size) {
+        Some(slice) => slice,
+        None => frame_data,
+    };
+    if y_data.is_empty() {
+        return 0.0_f32;
+    }
+
+    // Sum Y values as u64. Max sum = 255 × 640 × 480 = 78,643,200 — fits u64.
+    let sum: u64 = y_data
+        .iter()
+        .copied()
+        .map(u64::from)
+        .fold(0_u64, u64::saturating_add);
+
+    // Both sum (≤ 78M) and len (≤ 307K) are exact in f64. The quotient is
+    // in [0.0, 255.0]; dividing by 255 gives [0.0, 1.0], exact in f32.
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "sum ≤ 78M and len ≤ 307K are exact in f64; result ∈ [0.0, 1.0] is exact in f32"
+    )]
+    let brightness = ((sum as f64) / (y_data.len() as f64) / 255.0_f64) as f32;
+    brightness
+}
+
+/// Maps the internal tracker state enum to the proto `TrackState` enum.
+pub(crate) fn map_track_state(state: TrackState) -> detection::TrackState {
+    match state {
+        TrackState::Tentative => detection::TrackState::TRACK_STATE_TENTATIVE,
+        TrackState::Confirmed => detection::TrackState::TRACK_STATE_CONFIRMED,
+        TrackState::Coasting => detection::TrackState::TRACK_STATE_COASTING,
+    }
+}
+
+/// Builds a [`DetectionFrame`] protobuf message from the current pipeline state.
+///
+/// Pure function — reads from tracker tracks and safety result, produces a
+/// proto message ready for IPC transmission. Velocity is converted from
+/// per-frame (Kalman filter output) to per-second (proto contract) using
+/// the current FPS estimate.
+///
+/// `cat_id` is left empty for all tracks until the identity system
+/// (`MobileNetV2` embedding + catalog matching) is integrated.
+pub(crate) fn build_detection_frame(
+    tracks: &[Track],
+    safety: SafetyResult,
+    timestamp_us: u64,
+    frame_number: u64,
+    ambient_brightness: f32,
+    fps_estimate: f32,
+) -> DetectionFrame {
+    let cats = tracks
+        .iter()
+        .map(|track| {
+            let [cx, cy, w, h] = track.bbox();
+            let [vx, vy, _, _] = track.velocity();
+            TrackedCat {
+                track_id: track.id(),
+                cat_id: String::new(),
+                center_x: cx,
+                center_y: cy,
+                width: w,
+                height: h,
+                velocity_x: vx * fps_estimate,
+                velocity_y: vy * fps_estimate,
+                state: map_track_state(track.state()).into(),
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    DetectionFrame {
+        timestamp_us,
+        frame_number,
+        cats,
+        safety_ceiling_y: safety.ceiling_y,
+        person_in_frame: safety.person_in_frame,
+        ambient_brightness,
+        ..Default::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
 
@@ -305,6 +420,13 @@ pub(crate) struct Pipeline {
     tracker: Tracker,
     targeter: Targeter,
     serial: SerialPort,
+    /// Active IPC connection to the Python behavior engine, if any.
+    /// Drops before `ipc_server` so the connection closes before the
+    /// socket file is removed.
+    ipc_connection: Option<IpcConnection>,
+    /// Unix socket server for IPC. Drops last among I/O resources —
+    /// removes the socket file on cleanup.
+    ipc_server: IpcServer,
     /// Current pan angle (centidegrees). Tracks what was last commanded.
     current_pan: i16,
     /// Current tilt angle (centidegrees). Tracks what was last commanded.
@@ -315,6 +437,12 @@ pub(crate) struct Pipeline {
     /// transition, the MCU hasn't yet received the relaxed command, so
     /// state clamping must use the stricter person limit for one frame.
     prev_person_in_frame: bool,
+    /// V4L2 timestamp of the previously processed frame. Used to compute
+    /// inter-frame delta for velocity-to-per-second conversion.
+    prev_frame_timestamp: Option<Duration>,
+    /// NV12 Y-plane size in bytes (`width × height`). Computed once at init
+    /// from the camera config for ambient brightness extraction.
+    y_plane_size: usize,
     /// Stale frames drained since pipeline init (diagnostic counter).
     frames_drained: u64,
     /// Total frames processed since pipeline init.
@@ -345,6 +473,10 @@ impl Pipeline {
         let mut isp = IspController::init(&config.isp)?;
         isp.start()?;
 
+        // Capture camera dimensions before config.camera is moved into Camera::open.
+        let cam_width = config.camera.width;
+        let cam_height = config.camera.height;
+
         tracing::info!("opening camera");
         let mut camera = Camera::open(config.camera)?;
         camera.start_streaming()?;
@@ -365,6 +497,21 @@ impl Pipeline {
         tracing::info!(path = %config.serial_path.display(), "opening serial port");
         let serial = SerialPort::open(&config.serial_path)?;
 
+        tracing::info!(path = %config.socket_path.display(), "binding IPC socket");
+        let ipc_server = IpcServer::bind(&config.socket_path)?;
+
+        // NV12 Y-plane size for ambient brightness computation.
+        // Camera validation guarantees non-zero even dimensions. On all
+        // supported targets (32-bit ARM, 64-bit host), u32→usize is lossless
+        // and the product (≤ 4096² = 16M) fits comfortably.
+        #[expect(
+            clippy::as_conversions,
+            clippy::arithmetic_side_effects,
+            reason = "camera dimensions validated ≤ 4096; product fits usize; \
+                      u32→usize widening is lossless on 32-bit+"
+        )]
+        let y_plane_size = cam_width as usize * cam_height as usize;
+
         tracing::info!("pipeline initialized");
         Ok(Self {
             camera,
@@ -375,10 +522,14 @@ impl Pipeline {
             tracker,
             targeter,
             serial,
+            ipc_connection: None,
+            ipc_server,
             current_pan: PAN_HOME,
             current_tilt: TILT_HOME,
             current_target_id: None,
             prev_person_in_frame: false,
+            prev_frame_timestamp: None,
+            y_plane_size,
             frames_drained: 0_u64,
             frame_count: 0_u64,
         })
@@ -402,13 +553,15 @@ impl Pipeline {
         const MAX_DRAIN: u32 = 3_u32;
         let mut drained = 0_u32;
 
-        let sequence = loop {
-            let (seq, idx) = {
+        let (sequence, frame_timestamp, ambient_brightness) = loop {
+            let (seq, idx, ts, brightness) = {
                 let frame = self.camera.capture_frame()?;
                 let s = frame.sequence();
                 let i = frame.index();
+                let ts = frame.timestamp();
+                let brightness = compute_ambient_brightness(frame.data(), self.y_plane_size);
                 self.model.set_input(frame.data())?;
-                (s, i)
+                (s, i, ts, brightness)
             };
             self.camera.return_frame(idx)?;
 
@@ -423,7 +576,7 @@ impl Pipeline {
                 continue;
             }
 
-            break seq;
+            break (seq, ts, brightness);
         };
 
         // --- Inference ---
@@ -466,6 +619,10 @@ impl Pipeline {
         let cmd = serial::build_command(solution, safety, params);
         self.serial.send(cmd)?;
 
+        // --- IPC ---
+        let (ipc_connected, timestamp_us) =
+            self.stream_ipc(frame_timestamp, safety, ambient_brightness);
+
         // --- State update ---
         // Clamp to the MCU's effective range so that on the next frame the
         // targeting math uses an accurate model of where the camera is
@@ -483,6 +640,7 @@ impl Pipeline {
         self.current_tilt = servo_math::clamp_tilt(solution.tilt, clamp_person);
         self.prev_person_in_frame = safety.person_in_frame;
         self.current_target_id = target_track_id;
+        self.prev_frame_timestamp = Some(frame_timestamp);
         self.frame_count = self.frame_count.saturating_add(1_u64);
 
         Ok(FrameResult {
@@ -495,7 +653,79 @@ impl Pipeline {
             pan: solution.pan,
             tilt: solution.tilt,
             laser_on: tracking,
+            ipc_connected,
+            timestamp_us,
+            ambient_brightness,
         })
+    }
+
+    /// Streams a [`DetectionFrame`] to the Python behavior engine over IPC.
+    ///
+    /// Computes the FPS estimate from inter-frame timestamps, accepts new
+    /// clients, builds the proto message, and sends it. Handles disconnects
+    /// gracefully — a lost client reverts to autonomous mode.
+    ///
+    /// Returns `(ipc_connected, timestamp_us)`.
+    fn stream_ipc(
+        &mut self,
+        frame_timestamp: Duration,
+        safety: SafetyResult,
+        ambient_brightness: f32,
+    ) -> (bool, u64) {
+        // Compute FPS estimate from V4L2 monotonic timestamps for
+        // velocity-per-frame → velocity-per-second conversion.
+        let fps_estimate = match self.prev_frame_timestamp {
+            Some(prev_ts) => {
+                let delta_secs = frame_timestamp.saturating_sub(prev_ts).as_secs_f64();
+                if delta_secs > 0.0_f64 {
+                    #[expect(
+                        clippy::as_conversions,
+                        clippy::cast_possible_truncation,
+                        reason = "FPS ∈ [1, 60] at camera rates, exact in f32"
+                    )]
+                    {
+                        (1.0_f64 / delta_secs) as f32
+                    }
+                } else {
+                    DEFAULT_FPS
+                }
+            }
+            None => DEFAULT_FPS,
+        };
+
+        // V4L2 kernel timestamp → proto `timestamp_us`. Duration::as_micros()
+        // returns u128; overflow requires >584K years uptime.
+        let timestamp_us = u64::try_from(frame_timestamp.as_micros()).unwrap_or(u64::MAX);
+
+        // Accept a new IPC client if none is connected.
+        if self.ipc_connection.is_none() {
+            match self.ipc_server.try_accept() {
+                Ok(Some(conn)) => self.ipc_connection = Some(conn),
+                Ok(None) => {}
+                Err(err) => tracing::warn!(%err, "IPC accept failed"),
+            }
+        }
+
+        // Stream DetectionFrame to the behavior engine.
+        if let Some(conn) = &mut self.ipc_connection {
+            let detection_frame = build_detection_frame(
+                self.tracker.tracks(),
+                safety,
+                timestamp_us,
+                self.frame_count,
+                ambient_brightness,
+                fps_estimate,
+            );
+            if let Err(err) = conn.send_detection_frame(&detection_frame) {
+                tracing::warn!(
+                    %err,
+                    "IPC client disconnected, reverting to autonomous mode"
+                );
+                self.ipc_connection = None;
+            }
+        }
+
+        (self.ipc_connection.is_some(), timestamp_us)
     }
 
     /// Returns the total number of frames processed since initialization.
@@ -514,11 +744,21 @@ impl Pipeline {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::integer_division,
+    clippy::panic,
+    clippy::float_cmp,
+    reason = "test code: expect for test assertions, integer division in known-safe \
+              size computations, panic in test failure paths, float_cmp for protobuf \
+              round-trip (IEEE 754 preserved bit-exact)"
+)]
 mod tests {
     use super::*;
     use crate::detect::{BoundingBox, Detection};
     use crate::serial::build_command;
     use crate::targeting::TargetingConfig;
+    use buffa::Message;
     use catlaser_common::constants::{
         PAN_HOME, PAN_LIMIT_MAX, PAN_LIMIT_MIN, TILT_HOME, TILT_HORIZON_LIMIT,
         TILT_HORIZON_LIMIT_PERSON, TILT_LIMIT_MAX, TILT_LIMIT_MIN,
@@ -531,10 +771,6 @@ mod tests {
 
     /// Creates a cat detection at the given pixel-space center with a fixed size.
     fn cat_detection(cx: f32, cy: f32, size: f32) -> Detection {
-        #[expect(
-            clippy::arithmetic_side_effects,
-            reason = "test helper; cx/cy/size are small known constants, no overflow risk"
-        )]
         let half = size / 2.0_f32;
         Detection {
             bbox: BoundingBox {
@@ -581,10 +817,7 @@ mod tests {
             match self {
                 Some(val) => val,
                 None => {
-                    #[expect(clippy::panic, reason = "test-only assertion helper")]
-                    {
-                        panic!("expect_or_log failed on None: {msg}")
-                    }
+                    panic!("expect_or_log failed on None: {msg}")
                 }
             }
         }
@@ -596,10 +829,7 @@ mod tests {
             match self {
                 Ok(val) => val,
                 Err(err) => {
-                    #[expect(clippy::panic, reason = "test-only assertion helper")]
-                    {
-                        panic!("expect_or_log failed on Err({err:?}): {msg}")
-                    }
+                    panic!("expect_or_log failed on Err({err:?}): {msg}")
                 }
             }
         }
@@ -1547,6 +1777,11 @@ mod tests {
             PathBuf::from(DEFAULT_SERIAL_PATH),
             "default serial path"
         );
+        assert_eq!(
+            config.socket_path,
+            PathBuf::from(crate::ipc::DEFAULT_SOCKET_PATH),
+            "default socket path"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1588,5 +1823,609 @@ mod tests {
             !err.is_transient(),
             "model read error must not be transient"
         );
+    }
+
+    #[test]
+    fn test_is_not_transient_ipc() {
+        let err = PipelineError::Ipc(crate::ipc::IpcError::Bind {
+            path: String::from("/tmp/test.sock"),
+            source: std::io::Error::from_raw_os_error(libc::EACCES),
+        });
+        assert!(!err.is_transient(), "IPC bind error must not be transient");
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_ambient_brightness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_ambient_brightness_all_black() {
+        let data = vec![0_u8; 640 * 480];
+        let result = compute_ambient_brightness(&data, 640 * 480);
+        assert_eq!(result, 0.0_f32, "all-zero Y-plane must produce 0.0");
+    }
+
+    #[test]
+    fn test_compute_ambient_brightness_all_white() {
+        let data = vec![255_u8; 640 * 480];
+        let result = compute_ambient_brightness(&data, 640 * 480);
+        assert!(
+            (result - 1.0_f32).abs() < 0.001_f32,
+            "all-255 Y-plane must produce ~1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_compute_ambient_brightness_half() {
+        let data = vec![128_u8; 640 * 480];
+        let result = compute_ambient_brightness(&data, 640 * 480);
+        let expected = 128.0_f32 / 255.0_f32;
+        assert!(
+            (result - expected).abs() < 0.001_f32,
+            "all-128 Y-plane must produce ~{expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_compute_ambient_brightness_empty_data() {
+        let result = compute_ambient_brightness(&[], 0);
+        assert_eq!(result, 0.0_f32, "empty data must produce 0.0");
+    }
+
+    #[test]
+    fn test_compute_ambient_brightness_data_shorter_than_y_plane() {
+        // When frame data is shorter than y_plane_size, use all available data.
+        let data = vec![200_u8; 100];
+        let result = compute_ambient_brightness(&data, 1000);
+        let expected = 200.0_f32 / 255.0_f32;
+        assert!(
+            (result - expected).abs() < 0.001_f32,
+            "short data must average what's available, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_compute_ambient_brightness_ignores_uv_plane() {
+        // NV12: Y-plane (width*height) followed by UV-plane.
+        // Only the first y_plane_size bytes should be used.
+        let y_size = 640 * 480;
+        let uv_size = 640 * 480 / 2;
+        let mut data = vec![100_u8; y_size + uv_size];
+        // Fill UV plane with a different value.
+        for byte in data.get_mut(y_size..).expect("UV range exists") {
+            *byte = 255_u8;
+        }
+        let result = compute_ambient_brightness(&data, y_size);
+        let expected = 100.0_f32 / 255.0_f32;
+        assert!(
+            (result - expected).abs() < 0.001_f32,
+            "UV plane data must be ignored, got {result}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // map_track_state
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_map_track_state_all_variants() {
+        assert_eq!(
+            map_track_state(TrackState::Tentative),
+            detection::TrackState::TRACK_STATE_TENTATIVE,
+            "Tentative must map to TRACK_STATE_TENTATIVE"
+        );
+        assert_eq!(
+            map_track_state(TrackState::Confirmed),
+            detection::TrackState::TRACK_STATE_CONFIRMED,
+            "Confirmed must map to TRACK_STATE_CONFIRMED"
+        );
+        assert_eq!(
+            map_track_state(TrackState::Coasting),
+            detection::TrackState::TRACK_STATE_COASTING,
+            "Coasting must map to TRACK_STATE_COASTING"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_detection_frame
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_detection_frame_empty_tracks() {
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let frame = build_detection_frame(&[], safety, 1_000_000_u64, 42_u64, 0.5_f32, 15.0_f32);
+
+        assert!(frame.cats.is_empty(), "no tracks must produce no cats");
+        assert_eq!(frame.timestamp_us, 1_000_000_u64, "timestamp_us");
+        assert_eq!(frame.frame_number, 42_u64, "frame_number");
+        assert_eq!(frame.safety_ceiling_y, -1.0_f32, "safety_ceiling_y");
+        assert!(!frame.person_in_frame, "person_in_frame");
+        assert_eq!(frame.ambient_brightness, 0.5_f32, "ambient_brightness");
+    }
+
+    #[test]
+    fn test_build_detection_frame_single_confirmed_cat() {
+        let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        let frame = build_detection_frame(
+            tracker.tracks(),
+            safety,
+            500_000_u64,
+            10_u64,
+            0.7_f32,
+            15.0_f32,
+        );
+
+        assert_eq!(frame.cats.len(), 1, "one track must produce one cat");
+        let cat = frame.cats.first().expect("cat must exist");
+        assert_eq!(
+            cat.state,
+            detection::TrackState::TRACK_STATE_CONFIRMED,
+            "confirmed track must map to TRACK_STATE_CONFIRMED"
+        );
+        assert!(
+            cat.cat_id.is_empty(),
+            "cat_id must be empty before identity integration"
+        );
+
+        // Bounding box center should be near frame center (320/640, 240/480).
+        assert!(
+            (cat.center_x - 0.5_f32).abs() < 0.05_f32,
+            "center_x should be near 0.5, got {}",
+            cat.center_x
+        );
+        assert!(
+            (cat.center_y - 0.5_f32).abs() < 0.05_f32,
+            "center_y should be near 0.5, got {}",
+            cat.center_y
+        );
+    }
+
+    #[test]
+    fn test_build_detection_frame_multiple_cats_all_states() {
+        let det_a = cat_detection(100.0_f32, 100.0_f32, 50.0_f32);
+        let det_b = cat_detection(500.0_f32, 400.0_f32, 50.0_f32);
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        // Confirm both tracks.
+        for _ in 0_u32..3_u32 {
+            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32);
+        }
+        // Feed only det_a to make det_b coast.
+        tracker.update(&[det_a], 640.0_f32, 480.0_f32);
+
+        let safety = SafetyResult {
+            ceiling_y: 0.75_f32,
+            person_in_frame: true,
+        };
+
+        let frame = build_detection_frame(
+            tracker.tracks(),
+            safety,
+            2_000_000_u64,
+            100_u64,
+            0.3_f32,
+            15.0_f32,
+        );
+
+        let has_confirmed = frame
+            .cats
+            .iter()
+            .any(|c| c.state == detection::TrackState::TRACK_STATE_CONFIRMED);
+        let has_coasting = frame
+            .cats
+            .iter()
+            .any(|c| c.state == detection::TrackState::TRACK_STATE_COASTING);
+        assert!(has_confirmed, "must have at least one confirmed cat");
+        assert!(has_coasting, "must have at least one coasting cat");
+        assert_eq!(
+            frame.safety_ceiling_y, 0.75_f32,
+            "safety ceiling must propagate"
+        );
+        assert!(frame.person_in_frame, "person_in_frame must propagate");
+    }
+
+    #[test]
+    fn test_build_detection_frame_safety_no_person() {
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let frame = build_detection_frame(&[], safety, 0_u64, 0_u64, 0.0_f32, 15.0_f32);
+
+        assert_eq!(
+            frame.safety_ceiling_y, -1.0_f32,
+            "no-person ceiling must be -1.0"
+        );
+        assert!(!frame.person_in_frame, "no person must be false");
+    }
+
+    #[test]
+    fn test_build_detection_frame_safety_with_person() {
+        let safety = SafetyResult {
+            ceiling_y: 0.65_f32,
+            person_in_frame: true,
+        };
+        let frame = build_detection_frame(&[], safety, 0_u64, 0_u64, 0.0_f32, 15.0_f32);
+
+        assert_eq!(
+            frame.safety_ceiling_y, 0.65_f32,
+            "person ceiling must propagate"
+        );
+        assert!(frame.person_in_frame, "person flag must propagate");
+    }
+
+    #[test]
+    fn test_build_detection_frame_velocity_per_second() {
+        // A track that moves in x by 0.01 per frame at 15 FPS should
+        // report velocity_x ≈ 0.15 normalized units per second.
+        let det1 = cat_detection(300.0_f32, 240.0_f32, 50.0_f32);
+        let det2 = cat_detection(310.0_f32, 240.0_f32, 50.0_f32);
+        let det3 = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+        let det4 = cat_detection(330.0_f32, 240.0_f32, 50.0_f32);
+        let tracker = run_tracker(&[&[det1], &[det2], &[det3], &[det4]]);
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        let fps = 15.0_f32;
+        let frame = build_detection_frame(tracker.tracks(), safety, 0_u64, 0_u64, 0.0_f32, fps);
+
+        assert_eq!(frame.cats.len(), 1, "must have one tracked cat");
+        let cat = frame.cats.first().expect("cat must exist");
+
+        // The cat moves ~10 pixels per frame = 10/640 ≈ 0.016 normalized per frame.
+        // Velocity_x per second ≈ 0.016 * 15 ≈ 0.234. Kalman smoothing reduces
+        // this, so check direction and order of magnitude rather than exact value.
+        assert!(
+            cat.velocity_x > 0.0_f32,
+            "moving right must produce positive velocity_x, got {}",
+            cat.velocity_x
+        );
+        assert!(
+            cat.velocity_x < 1.0_f32,
+            "velocity_x must be reasonable, got {}",
+            cat.velocity_x
+        );
+    }
+
+    #[test]
+    fn test_build_detection_frame_cat_id_always_empty() {
+        let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        let frame =
+            build_detection_frame(tracker.tracks(), safety, 0_u64, 0_u64, 0.0_f32, 15.0_f32);
+
+        for cat in &frame.cats {
+            assert!(
+                cat.cat_id.is_empty(),
+                "cat_id must be empty before identity integration, got {:?}",
+                cat.cat_id
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // build_detection_frame — insta snapshot
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_detection_frame_from_tracks() {
+        let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let safety = SafetyResult {
+            ceiling_y: 0.75_f32,
+            person_in_frame: true,
+        };
+
+        let frame = build_detection_frame(
+            tracker.tracks(),
+            safety,
+            1_000_000_u64,
+            42_u64,
+            0.6_f32,
+            15.0_f32,
+        );
+
+        // Snapshot the protobuf wire bytes to detect unexpected changes in
+        // the mapping from tracker state to proto fields.
+        let payload = frame.encode_to_vec();
+        insta::assert_yaml_snapshot!("detection_frame_from_tracks", payload);
+    }
+
+    // -----------------------------------------------------------------------
+    // IPC: DetectionFrame round-trip over real Unix socket
+    // -----------------------------------------------------------------------
+
+    /// Creates an IPC server in a temp directory.
+    fn ipc_test_server() -> (crate::ipc::IpcServer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir creation must succeed in tests");
+        let path = dir.path().join("test.sock");
+        let server = crate::ipc::IpcServer::bind(&path).expect("bind must succeed in tests");
+        (server, dir)
+    }
+
+    /// Connects a raw `UnixStream` to the IPC server's socket.
+    fn ipc_raw_client(server: &crate::ipc::IpcServer) -> std::os::unix::net::UnixStream {
+        std::os::unix::net::UnixStream::connect(server.path())
+            .expect("connect must succeed in tests")
+    }
+
+    /// Accepts a connection from the IPC server.
+    fn ipc_accept_connection(server: &crate::ipc::IpcServer) -> crate::ipc::IpcConnection {
+        for _ in 0..100_u32 {
+            if let Some(conn) = server
+                .try_accept()
+                .expect("try_accept must not fail in tests")
+            {
+                return conn;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("server did not accept connection within timeout");
+    }
+
+    #[test]
+    fn test_ipc_detection_frame_round_trip() {
+        let (server, _dir) = ipc_test_server();
+        let mut client = ipc_raw_client(&server);
+        let mut conn = ipc_accept_connection(&server);
+
+        // Build a DetectionFrame from real tracker state.
+        let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let safety = SafetyResult {
+            ceiling_y: 0.75_f32,
+            person_in_frame: true,
+        };
+
+        let frame = build_detection_frame(
+            tracker.tracks(),
+            safety,
+            1_000_000_u64,
+            42_u64,
+            0.6_f32,
+            15.0_f32,
+        );
+
+        conn.send_detection_frame(&frame)
+            .expect("send must succeed");
+
+        // Read raw bytes from the client side.
+        client
+            .set_nonblocking(false)
+            .expect("set blocking must succeed");
+
+        let mut header_buf = [0_u8; 5_usize];
+        std::io::Read::read_exact(&mut client, &mut header_buf).expect("read header must succeed");
+
+        let header = crate::ipc::decode_header(header_buf).expect("header must decode");
+        assert_eq!(
+            header.wire_type,
+            crate::ipc::WireType::DetectionFrame,
+            "wire type must be DetectionFrame"
+        );
+
+        let payload_len = usize::try_from(header.length).expect("length fits usize in tests");
+        let mut payload_buf = vec![0_u8; payload_len];
+        std::io::Read::read_exact(&mut client, &mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = buffa::DecodeOptions::new()
+            .decode_from_slice::<DetectionFrame>(&payload_buf)
+            .expect("protobuf decode must succeed");
+
+        assert_eq!(decoded.timestamp_us, 1_000_000_u64, "timestamp_us");
+        assert_eq!(decoded.frame_number, 42_u64, "frame_number");
+        assert_eq!(
+            decoded.cats.len(),
+            tracker.tracks().len(),
+            "cat count must match track count"
+        );
+        assert_eq!(decoded.safety_ceiling_y, 0.75_f32, "safety_ceiling_y");
+        assert!(decoded.person_in_frame, "person_in_frame");
+        assert_eq!(decoded.ambient_brightness, 0.6_f32, "ambient_brightness");
+
+        // Verify the tracked cat fields.
+        let cat = decoded.cats.first().expect("must have at least one cat");
+        assert!(cat.cat_id.is_empty(), "cat_id must be empty");
+        assert_eq!(
+            cat.state,
+            detection::TrackState::TRACK_STATE_CONFIRMED,
+            "track state must be CONFIRMED"
+        );
+    }
+
+    #[test]
+    fn test_ipc_multiple_frames_streaming() {
+        let (server, _dir) = ipc_test_server();
+        let mut client = ipc_raw_client(&server);
+        let mut conn = ipc_accept_connection(&server);
+
+        client
+            .set_nonblocking(false)
+            .expect("set blocking must succeed");
+
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        // Stream 10 frames and verify each arrives correctly.
+        for i in 0_u64..10_u64 {
+            let frame = build_detection_frame(
+                &[],
+                safety,
+                i.saturating_mul(66_667_u64),
+                i,
+                0.5_f32,
+                15.0_f32,
+            );
+            conn.send_detection_frame(&frame)
+                .expect("send must succeed");
+
+            let mut header_buf = [0_u8; 5_usize];
+            std::io::Read::read_exact(&mut client, &mut header_buf)
+                .expect("read header must succeed");
+            let header = crate::ipc::decode_header(header_buf).expect("header must decode");
+
+            let payload_len = usize::try_from(header.length).expect("length fits usize");
+            let mut payload_buf = vec![0_u8; payload_len];
+            std::io::Read::read_exact(&mut client, &mut payload_buf)
+                .expect("read payload must succeed");
+
+            let decoded = buffa::DecodeOptions::new()
+                .decode_from_slice::<DetectionFrame>(&payload_buf)
+                .expect("decode must succeed");
+            assert_eq!(decoded.frame_number, i, "frame_number for frame {i}");
+        }
+    }
+
+    #[test]
+    fn test_ipc_server_continues_without_client() {
+        let (server, _dir) = ipc_test_server();
+
+        // No client connected — try_accept returns None.
+        let result = server.try_accept().expect("try_accept must not fail");
+        assert!(
+            result.is_none(),
+            "must return None when no client is pending"
+        );
+    }
+
+    #[test]
+    fn test_ipc_server_recovers_from_disconnect() {
+        let (server, _dir) = ipc_test_server();
+
+        // First client connects and disconnects.
+        let client = ipc_raw_client(&server);
+        let mut conn = ipc_accept_connection(&server);
+        drop(client);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let frame = build_detection_frame(
+            &[],
+            SafetyResult {
+                ceiling_y: -1.0_f32,
+                person_in_frame: false,
+            },
+            0_u64,
+            0_u64,
+            0.0_f32,
+            15.0_f32,
+        );
+        let result = conn.send_detection_frame(&frame);
+        assert!(result.is_err(), "send to disconnected client must fail");
+        drop(conn);
+
+        // Second client connects successfully after first disconnected.
+        let _client2 = ipc_raw_client(&server);
+        let conn2 = ipc_accept_connection(&server);
+        drop(conn2);
+    }
+
+    // -----------------------------------------------------------------------
+    // build_detection_frame — proptests
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #[test]
+        fn test_detection_frame_fields_in_range(
+            n_frames in 1_usize..=6_usize,
+            has_person: bool,
+            ceiling_y in -1.0_f32..1.0_f32,
+            brightness in 0.0_f32..=1.0_f32,
+            fps in 1.0_f32..60.0_f32,
+            timestamp_us in any::<u64>(),
+            frame_number in any::<u64>(),
+        ) {
+            let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+            let dets: Vec<Detection> = vec![det];
+            let refs: Vec<&[Detection]> = (0..n_frames).map(|_| dets.as_slice()).collect();
+            let tracker = run_tracker(&refs);
+
+            let safety_ceiling = if has_person { ceiling_y.abs() } else { -1.0_f32 };
+            let safety = SafetyResult {
+                ceiling_y: safety_ceiling,
+                person_in_frame: has_person,
+            };
+
+            let frame = build_detection_frame(
+                tracker.tracks(),
+                safety,
+                timestamp_us,
+                frame_number,
+                brightness,
+                fps,
+            );
+
+            prop_assert_eq!(frame.timestamp_us, timestamp_us);
+            prop_assert_eq!(frame.frame_number, frame_number);
+            prop_assert_eq!(frame.safety_ceiling_y, safety_ceiling);
+            prop_assert_eq!(frame.person_in_frame, has_person);
+            prop_assert_eq!(frame.ambient_brightness, brightness);
+
+            for cat in &frame.cats {
+                // Normalized coordinates must be in [0, 1].
+                prop_assert!(
+                    cat.center_x >= 0.0_f32 && cat.center_x <= 1.0_f32,
+                    "center_x {} out of range",
+                    cat.center_x,
+                );
+                prop_assert!(
+                    cat.center_y >= 0.0_f32 && cat.center_y <= 1.0_f32,
+                    "center_y {} out of range",
+                    cat.center_y,
+                );
+                prop_assert!(
+                    cat.width >= 0.0_f32 && cat.width <= 1.0_f32,
+                    "width {} out of range",
+                    cat.width,
+                );
+                prop_assert!(
+                    cat.height >= 0.0_f32 && cat.height <= 1.0_f32,
+                    "height {} out of range",
+                    cat.height,
+                );
+                // cat_id must be empty (identity not integrated).
+                prop_assert!(
+                    cat.cat_id.is_empty(),
+                    "cat_id must be empty",
+                );
+                // State must be a valid proto enum value (not UNSPECIFIED).
+                prop_assert!(
+                    cat.state != detection::TrackState::TRACK_STATE_UNSPECIFIED,
+                    "track state must not be UNSPECIFIED",
+                );
+            }
+        }
+
+        #[test]
+        fn test_ambient_brightness_always_in_range(
+            pixel_val in 0_u8..=255_u8,
+        ) {
+            let data = vec![pixel_val; 640 * 480];
+            let result = compute_ambient_brightness(&data, 640 * 480);
+            prop_assert!(
+                (0.0_f32..=1.0_f32).contains(&result),
+                "brightness {} must be in [0, 1] for pixel value {}",
+                result,
+                pixel_val,
+            );
+        }
     }
 }
