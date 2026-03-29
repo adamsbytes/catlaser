@@ -15,7 +15,7 @@
   - [X] Dispenser servo control (disc/door/deflector, jam detection via stall timeout)
   - [X] Hopper sensor GPIO read + status LED
 
-[ ] Vision Pipeline (catlaser-vision, partial)
+[X] Vision Pipeline (catlaser-vision, partial)
   - [X] V4L2/libcamera DMA capture from SC3336
   - [X] RKNN NPU inference wrapper (YOLO INT8, 640x480)
   - [X] Detection post-processing (NMS, bbox extraction)
@@ -24,7 +24,7 @@
   - [X] Person detection → safety ceiling computation
 
 [ ] Targeting + Serial (catlaser-vision → catlaser-mcu)
-  - [ ] Bbox center → servo angle transform (camera FOV, laser offset)
+  - [X] Bbox center → servo angle transform (camera FOV, laser offset)
   - [ ] Safety ceiling enforcement (clamp tilt above person threshold)
   - [ ] ServoCommand packing + UART TX
   - [ ] End-to-end: camera sees cat → laser tracks cat

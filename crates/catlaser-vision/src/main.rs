@@ -8,6 +8,7 @@ mod detect;
 mod npu;
 mod proto;
 mod safety;
+mod targeting;
 mod tracker;
 
 fn main() {}
