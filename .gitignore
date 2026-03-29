@@ -4,3 +4,4 @@
 .env
 *.snap.new
 *.pyc
+*.egg-info

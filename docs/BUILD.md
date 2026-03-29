@@ -23,15 +23,15 @@
   - [X] Track lifecycle (tentative → confirmed → coasting → dead)
   - [X] Person detection → safety ceiling computation
 
-[ ] Targeting + Serial (catlaser-vision → catlaser-mcu)
+[X] Targeting + Serial (catlaser-vision → catlaser-mcu)
   - [X] Bbox center → servo angle transform (camera FOV, laser offset)
   - [X] Safety ceiling enforcement (clamp tilt above person threshold)
   - [X] ServoCommand packing + UART TX
   - [X] End-to-end: camera sees cat → laser tracks cat
 
 [ ] IPC + Cat Identity
-  - [ ] Unix socket server (Rust) + client (Python)
-  - [ ] Wire format: [1B type][4B length LE][protobuf]
+  - [X] Unix socket server (Rust) + client (Python)
+  - [X] Wire format: [1B type][4B length LE][protobuf]
   - [ ] DetectionFrame streaming (Rust → Python, ~15/sec)
   - [ ] TrackEvent + SessionRequest (Rust → Python, sporadic)
   - [ ] BehaviorCommand + SessionAck + IdentityResult (Python → Rust)

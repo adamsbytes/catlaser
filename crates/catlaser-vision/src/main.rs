@@ -10,6 +10,7 @@
 
 mod camera;
 mod detect;
+mod ipc;
 mod npu;
 mod pipeline;
 mod proto;

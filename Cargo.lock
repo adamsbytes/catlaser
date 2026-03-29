@@ -187,11 +187,13 @@ version = "0.1.0"
 dependencies = [
  "buffa",
  "buffa-build",
+ "bytes",
  "catlaser-common",
  "insta",
  "libc",
  "libloading",
  "proptest",
+ "tempfile",
  "thiserror",
  "tracing",
  "tracing-subscriber",

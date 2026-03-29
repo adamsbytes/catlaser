@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 catlaser-common.workspace = true
 buffa.workspace = true
+bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -20,6 +21,7 @@ buffa-build.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 insta.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
