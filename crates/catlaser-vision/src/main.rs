@@ -8,6 +8,7 @@ mod detect;
 mod npu;
 mod proto;
 mod safety;
+mod serial;
 mod targeting;
 mod tracker;
 

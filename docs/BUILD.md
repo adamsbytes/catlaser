@@ -26,7 +26,7 @@
 [ ] Targeting + Serial (catlaser-vision → catlaser-mcu)
   - [X] Bbox center → servo angle transform (camera FOV, laser offset)
   - [X] Safety ceiling enforcement (clamp tilt above person threshold)
-  - [ ] ServoCommand packing + UART TX
+  - [X] ServoCommand packing + UART TX
   - [ ] End-to-end: camera sees cat → laser tracks cat
 
 [ ] IPC + Cat Identity
