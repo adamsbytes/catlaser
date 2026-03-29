@@ -1090,15 +1090,26 @@ impl Pipeline {
         // --- Embedding ---
         // Register new embedding requests for confirmed and re-acquired tracks.
         // Cancel embeddings for tracks that died (Lost events).
+        // Collect re-acquired track IDs for cat_id clearing after the
+        // immutable borrow of events() ends.
+        let mut reacquired_ids: Vec<u32> = Vec::new();
         for event in self.tracker.events() {
             match *event {
                 TrackUpdate::Confirmed { track_id } | TrackUpdate::Reacquired { track_id } => {
                     self.embed_engine.request_embedding(track_id);
+                    if matches!(event, TrackUpdate::Reacquired { .. }) {
+                        reacquired_ids.push(track_id);
+                    }
                 }
                 TrackUpdate::Lost { track_id, .. } => {
                     self.embed_engine.cancel(track_id);
                 }
             }
+        }
+        // Clear stale identity on re-acquired tracks so Python falls back to
+        // neutral behavior parameters while embedding re-verification runs.
+        for track_id in reacquired_ids {
+            self.tracker.set_track_cat_id(track_id, String::new());
         }
 
         // Process pending embedding extractions against the retained frame data.
