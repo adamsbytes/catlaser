@@ -1,0 +1,18 @@
+---
+source: crates/catlaser-vision/src/pipeline.rs
+expression: wire
+---
+- 4
+- 9
+- 0
+- 0
+- 0
+- 8
+- 4
+- 69
+- 154
+- 153
+- 153
+- 62
+- 80
+- 5

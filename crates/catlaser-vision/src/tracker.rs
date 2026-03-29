@@ -1150,6 +1150,9 @@ pub(crate) struct Track {
     /// Monotonic timestamp (microseconds) when this track was created.
     /// Used to compute `duration_ms` for `TrackLost` events.
     created_timestamp_us: u64,
+    /// Resolved cat identity from the catalog. Empty until an
+    /// `IdentityResult` arrives from the Python behavior engine.
+    cat_id: String,
 }
 
 impl Track {
@@ -1188,6 +1191,22 @@ impl Track {
     /// Consecutive frames without a matched detection (0 when confirmed).
     pub(crate) const fn coast_frames(&self) -> u32 {
         self.coast_frames
+    }
+
+    /// Resolved cat identity from the catalog.
+    ///
+    /// Empty until an `IdentityResult` from the Python behavior engine
+    /// resolves this track's embedding against stored profiles.
+    pub(crate) fn cat_id(&self) -> &str {
+        &self.cat_id
+    }
+
+    /// Sets the resolved cat identity for this track.
+    ///
+    /// Called when an `IdentityResult` arrives from the Python behavior
+    /// engine. An empty `cat_id` indicates a new/unknown cat.
+    pub(crate) fn set_cat_id(&mut self, cat_id: String) {
+        self.cat_id = cat_id;
     }
 }
 
@@ -1245,6 +1264,21 @@ impl Tracker {
     /// must read them before the next `update()`.
     pub(crate) fn events(&self) -> &[TrackUpdate] {
         &self.events
+    }
+
+    /// Sets the cat identity for a track, as resolved by the Python
+    /// behavior engine's catalog matching.
+    ///
+    /// Returns `true` if the track was found and updated, `false` if
+    /// no track with the given ID exists (track may have died between
+    /// the identity request and the result arriving).
+    pub(crate) fn set_track_cat_id(&mut self, track_id: u32, cat_id: String) -> bool {
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            track.set_cat_id(cat_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Processes a frame's detections and updates all tracks.
@@ -1435,6 +1469,7 @@ impl Tracker {
                     coast_frames: 0_u32,
                     class_id: det.class_id,
                     created_timestamp_us: timestamp_us,
+                    cat_id: String::new(),
                 });
             }
         }
@@ -2681,6 +2716,127 @@ mod tests {
             confirmed_events.len(),
             2,
             "two tracks confirmed in same frame must produce two events"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Cat identity tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_track_cat_id_default_empty() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det = make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15);
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
+
+        assert_eq!(
+            tracker.tracks().len(),
+            1,
+            "one detection must create one track"
+        );
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "",
+            "new track cat_id must be empty"
+        );
+    }
+
+    #[test]
+    fn test_set_track_cat_id_found() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det = make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15);
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
+
+        let track_id = tracker.tracks()[0].id();
+        let found = tracker.set_track_cat_id(track_id, String::from("whiskers"));
+        assert!(
+            found,
+            "set_track_cat_id must return true for existing track"
+        );
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "whiskers",
+            "cat_id must be set after set_track_cat_id"
+        );
+    }
+
+    #[test]
+    fn test_set_track_cat_id_not_found() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det = make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15);
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
+
+        let found = tracker.set_track_cat_id(999_u32, String::from("ghost"));
+        assert!(
+            !found,
+            "set_track_cat_id must return false for nonexistent track"
+        );
+    }
+
+    #[test]
+    fn test_set_track_cat_id_overwrites() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det = make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15);
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
+
+        let track_id = tracker.tracks()[0].id();
+        tracker.set_track_cat_id(track_id, String::from("whiskers"));
+        tracker.set_track_cat_id(track_id, String::from("mittens"));
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "mittens",
+            "second set_track_cat_id must overwrite the first"
+        );
+    }
+
+    #[test]
+    fn test_set_track_cat_id_multiple_tracks() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det_a = make_detection(50.0_f32, 50.0_f32, 150.0_f32, 150.0_f32, 15);
+        let det_b = make_detection(400.0_f32, 300.0_f32, 500.0_f32, 400.0_f32, 15);
+        tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32, 0_u64);
+
+        let id_a = tracker.tracks()[0].id();
+        let id_b = tracker.tracks()[1].id();
+
+        tracker.set_track_cat_id(id_a, String::from("whiskers"));
+        tracker.set_track_cat_id(id_b, String::from("mittens"));
+
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "whiskers",
+            "track A must have cat_id 'whiskers'"
+        );
+        assert_eq!(
+            tracker.tracks()[1].cat_id(),
+            "mittens",
+            "track B must have cat_id 'mittens'"
+        );
+    }
+
+    #[test]
+    fn test_cat_id_survives_track_update() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det = make_detection(100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15);
+
+        // First frame creates the track.
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
+        let track_id = tracker.tracks()[0].id();
+        tracker.set_track_cat_id(track_id, String::from("whiskers"));
+
+        // Subsequent frames update the track — cat_id must persist.
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 1000_u64);
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "whiskers",
+            "cat_id must survive tracker update"
+        );
+
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 2000_u64);
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "whiskers",
+            "cat_id must survive multiple tracker updates"
         );
     }
 }

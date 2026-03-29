@@ -34,7 +34,7 @@
   - [X] Wire format: [1B type][4B length LE][protobuf]
   - [X] DetectionFrame streaming (Rust → Python, ~15/sec)
   - [X] TrackEvent + SessionRequest (Rust → Python, sporadic)
-  - [ ] BehaviorCommand + SessionAck + IdentityResult (Python → Rust)
+  - [X] BehaviorCommand + SessionAck + IdentityResult (Python → Rust)
   - [ ] Cat re-ID: MobileNetV2 embedding on NPU (Rust side)
   - [ ] Embedding comparison + catalog matching (Python side)
 

@@ -13,7 +13,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use catlaser_common::constants::{PAN_HOME, TILT_HOME};
+use catlaser_common::DispenseDirection;
+use catlaser_common::constants::{
+    PAN_HOME, PAN_LIMIT_MAX, PAN_LIMIT_MIN, TILT_HOME, TILT_LIMIT_MAX, TILT_LIMIT_MIN,
+};
 use catlaser_common::servo_math;
 
 use crate::camera::{Camera, CameraConfig, IspConfig, IspController};
@@ -21,10 +24,11 @@ use crate::detect::{DetectionConfig, Detector};
 use crate::ipc::{IncomingMessage, IpcConnection, IpcServer};
 use crate::npu::{Model, ModelPriority, NpuConfig};
 use crate::proto::detection::{
-    self, DetectionFrame, NewTrack, SessionRequest, TrackEvent, TrackLost, TrackedCat, track_event,
+    self, BehaviorCommand, DetectionFrame, NewTrack, SessionRequest, TrackEvent, TrackLost,
+    TrackedCat, track_event,
 };
 use crate::safety::{SafetyComputer, SafetyResult};
-use crate::serial::{self, CommandParams, SerialPort};
+use crate::serial::{self, CommandParams, DispenseRequest, SerialPort};
 use crate::targeting::{Targeter, TargetingConfig, TargetingSolution};
 use crate::tracker::{Track, TrackState, TrackUpdate, Tracker, TrackerConfig};
 
@@ -324,6 +328,169 @@ pub(crate) fn compute_solution(
 }
 
 // ---------------------------------------------------------------------------
+// Behavior-driven targeting
+// ---------------------------------------------------------------------------
+
+/// Computes a [`TargetingSolution`] from a [`BehaviorCommand`] and the
+/// current tracker state.
+///
+/// Each targeting mode maps to a different strategy:
+/// - `TRACK`: Follows the target track with Python-specified offsets.
+/// - `LEAD_TO_POINT`: Steers to absolute normalized servo coordinates.
+/// - `IDLE` / `DISPENSE` / unspecified: Returns the home position.
+///
+/// Safety ceiling is enforced on all modes that have the laser on.
+pub(crate) fn behavior_solution(
+    cmd: &BehaviorCommand,
+    targeter: &Targeter,
+    tracks: &[Track],
+    safety: SafetyResult,
+    current_pan: i16,
+    current_tilt: i16,
+) -> TargetingSolution {
+    let mode = cmd.mode.as_known();
+
+    match mode {
+        Some(detection::TargetingMode::TARGETING_MODE_TRACK) => {
+            let track = tracks.iter().find(|t| t.id() == cmd.target_track_id);
+            let Some(track) = track else {
+                // Target track not found — fall back to home. Python will
+                // re-issue a command with a valid track on the next frame.
+                return TargetingSolution {
+                    pan: PAN_HOME,
+                    tilt: TILT_HOME,
+                };
+            };
+
+            let bbox = track.bbox();
+            // bbox is [cx, cy, w, h] in normalized 0.0-1.0 coordinates.
+            let cx = bbox.first().copied().unwrap_or(0.5_f32);
+            let cy = bbox.get(1_usize).copied().unwrap_or(0.5_f32);
+
+            // Apply Python's offset (e.g. leading the laser ahead of the cat).
+            let target_x = cx + cmd.offset_x;
+            let target_y = cy + cmd.offset_y;
+
+            let raw = targeter.compute(target_x, target_y, current_pan, current_tilt);
+            targeter.enforce_ceiling(raw, safety.ceiling_y, current_tilt)
+        }
+
+        Some(detection::TargetingMode::TARGETING_MODE_LEAD_TO_POINT) => {
+            let solution = lead_target_to_solution(cmd.lead_target_x, cmd.lead_target_y);
+            // Safety ceiling applies — the laser is on during lead-to-point.
+            if safety.ceiling_y >= 0.0_f32 {
+                let ceiling_tilt = lead_target_to_solution(0.0_f32, safety.ceiling_y).tilt;
+                TargetingSolution {
+                    pan: solution.pan,
+                    tilt: solution.tilt.max(ceiling_tilt),
+                }
+            } else {
+                solution
+            }
+        }
+
+        // IDLE, DISPENSE, UNSPECIFIED, unknown future variants: home position.
+        // Laser on/off is handled by behavior_params, not targeting.
+        _ => TargetingSolution {
+            pan: PAN_HOME,
+            tilt: TILT_HOME,
+        },
+    }
+}
+
+/// Converts a [`BehaviorCommand`] into [`CommandParams`] for servo command
+/// assembly.
+///
+/// Maps Python's float smoothing/speed values to the MCU's u8 range and
+/// translates DISPENSE mode into the appropriate dispense flags.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "smoothing and max_speed are clamped to [0.0, 1.0] before multiplication; \
+              product is in [0.0, 255.0], fits u8 without loss"
+)]
+pub(crate) fn behavior_params(cmd: &BehaviorCommand) -> CommandParams {
+    let smoothing = (cmd.smoothing.clamp(0.0_f32, 1.0_f32) * 255.0_f32) as u8;
+    let max_slew = (cmd.max_speed.clamp(0.0_f32, 1.0_f32) * 255.0_f32) as u8;
+
+    let dispense = (cmd.mode.as_known()
+        == Some(detection::TargetingMode::TARGETING_MODE_DISPENSE))
+    .then(|| {
+        let direction = if cmd.lead_target_x < 0.5_f32 {
+            DispenseDirection::Left
+        } else {
+            DispenseDirection::Right
+        };
+        DispenseRequest {
+            direction,
+            tier: rotations_to_tier(cmd.dispense_rotations),
+        }
+    });
+
+    CommandParams {
+        laser_on: cmd.laser_on,
+        smoothing,
+        max_slew,
+        dispense,
+    }
+}
+
+/// Maps dispense rotation count (3, 5, 7) to MCU tier index (0, 1, 2).
+///
+/// The MCU's rotation table maps tier to a fixed rotation count. Python
+/// sends the human-readable count; this converts to the tier index.
+/// Unknown values map to tier 0 (lowest/safest dispense amount).
+pub(crate) const fn rotations_to_tier(rotations: u32) -> u8 {
+    match rotations {
+        5_u32 => 1_u8,
+        7_u32 => 2_u8,
+        // 3 rotations and all unknown values default to tier 0
+        // (lowest/safest dispense amount).
+        _ => 0_u8,
+    }
+}
+
+/// Converts normalized lead-target coordinates to absolute servo angles.
+///
+/// `(0.0, 0.0)` maps to `(PAN_LIMIT_MIN, TILT_LIMIT_MIN)` and
+/// `(1.0, 1.0)` maps to `(PAN_LIMIT_MAX, TILT_LIMIT_MAX)`. This is a
+/// linear mapping across the full servo range.
+///
+/// Used for `LEAD_TO_POINT` mode where Python specifies absolute
+/// positions (chute exits near the device base) rather than positions
+/// relative to the current camera direction.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "pan/tilt range is [-9000, 9000] / [-4500, 9000]; the linear interpolation \
+              result fits i16 after clamping. f32 → i16 truncation is intentional (sub-centidegree \
+              precision is not meaningful)"
+)]
+pub(crate) fn lead_target_to_solution(x: f32, y: f32) -> TargetingSolution {
+    let x_clamped = x.clamp(0.0_f32, 1.0_f32);
+    let y_clamped = y.clamp(0.0_f32, 1.0_f32);
+
+    let pan_range = f32::from(PAN_LIMIT_MAX) - f32::from(PAN_LIMIT_MIN);
+    let tilt_range = f32::from(TILT_LIMIT_MAX) - f32::from(TILT_LIMIT_MIN);
+
+    let pan_raw = x_clamped.mul_add(pan_range, f32::from(PAN_LIMIT_MIN));
+    let tilt_raw = y_clamped.mul_add(tilt_range, f32::from(TILT_LIMIT_MIN));
+
+    // Clamp to i16 range and servo limits. The mul_add result is within
+    // [PAN_LIMIT_MIN, PAN_LIMIT_MAX] by construction (input clamped 0-1),
+    // so the clamp is a safety net rather than a runtime correction.
+    let pan = pan_raw
+        .clamp(f32::from(PAN_LIMIT_MIN), f32::from(PAN_LIMIT_MAX))
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+    let tilt = tilt_raw
+        .clamp(f32::from(TILT_LIMIT_MIN), f32::from(TILT_LIMIT_MAX))
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+
+    TargetingSolution { pan, tilt }
+}
+
+// ---------------------------------------------------------------------------
 // IPC: DetectionFrame construction
 // ---------------------------------------------------------------------------
 
@@ -379,8 +546,8 @@ pub(crate) fn map_track_state(state: TrackState) -> detection::TrackState {
 /// per-frame (Kalman filter output) to per-second (proto contract) using
 /// the current FPS estimate.
 ///
-/// `cat_id` is left empty for all tracks until the identity system
-/// (`MobileNetV2` embedding + catalog matching) is integrated.
+/// `cat_id` is populated from the track's resolved identity. Empty until
+/// an `IdentityResult` arrives from the Python behavior engine.
 pub(crate) fn build_detection_frame(
     tracks: &[Track],
     safety: SafetyResult,
@@ -396,7 +563,7 @@ pub(crate) fn build_detection_frame(
             let [vx, vy, _, _] = track.velocity();
             TrackedCat {
                 track_id: track.id(),
-                cat_id: String::new(),
+                cat_id: track.cat_id().to_owned(),
                 center_x: cx,
                 center_y: cy,
                 width: w,
@@ -523,13 +690,20 @@ fn advance_session_state(state: &mut SessionState) {
 /// handler.
 ///
 /// Free function (not a method) to avoid borrowing `self` while `conn`
-/// (from `self.ipc_connection`) is in use. Only mutates `session_state`.
+/// (from `self.ipc_connection`) is in use. Mutates `session_state`,
+/// `last_behavior_cmd`, and `tracker` as disjoint fields from the
+/// caller's borrow of `self.ipc_connection`.
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "Instant + Duration panics only beyond ~500 billion years; \
               reject cooldowns are ≤ 300 seconds"
 )]
-fn handle_incoming(msg: IncomingMessage, session_state: &mut SessionState) {
+fn handle_incoming(
+    msg: IncomingMessage,
+    session_state: &mut SessionState,
+    last_behavior_cmd: &mut Option<BehaviorCommand>,
+    tracker: &mut Tracker,
+) {
     match msg {
         IncomingMessage::SessionAck(ack) => {
             if let SessionState::AwaitingAck { .. } = *session_state {
@@ -555,6 +729,7 @@ fn handle_incoming(msg: IncomingMessage, session_state: &mut SessionState) {
             if matches!(*session_state, SessionState::Active) {
                 tracing::info!("session ended by behavior engine");
                 *session_state = SessionState::Idle;
+                *last_behavior_cmd = None;
             } else {
                 tracing::debug!(
                     state = ?session_state,
@@ -563,18 +738,37 @@ fn handle_incoming(msg: IncomingMessage, session_state: &mut SessionState) {
             }
         }
         IncomingMessage::BehaviorCommand(cmd) => {
-            tracing::debug!(
-                mode = ?cmd.mode,
-                track_id = cmd.target_track_id,
-                "received BehaviorCommand, behavior integration pending"
-            );
+            if matches!(*session_state, SessionState::Active) {
+                tracing::debug!(
+                    mode = ?cmd.mode,
+                    track_id = cmd.target_track_id,
+                    laser = cmd.laser_on,
+                    "behavior command applied"
+                );
+                *last_behavior_cmd = Some(cmd);
+            } else {
+                tracing::debug!(
+                    state = ?session_state,
+                    "received BehaviorCommand outside Active state, ignoring"
+                );
+            }
         }
         IncomingMessage::IdentityResult(result) => {
-            tracing::debug!(
-                track_id = result.track_id,
-                cat_id = %result.cat_id,
-                "received IdentityResult, identity integration pending"
-            );
+            let found = tracker.set_track_cat_id(result.track_id, result.cat_id.clone());
+            if found {
+                tracing::info!(
+                    track_id = result.track_id,
+                    cat_id = %result.cat_id,
+                    similarity = result.similarity,
+                    "identity resolved"
+                );
+            } else {
+                tracing::debug!(
+                    track_id = result.track_id,
+                    cat_id = %result.cat_id,
+                    "identity result for unknown track, track may have died"
+                );
+            }
         }
     }
 }
@@ -656,6 +850,10 @@ pub(crate) struct Pipeline {
     /// Autonomous session lifecycle state. Prevents duplicate
     /// `SessionRequest` messages while one is pending.
     session_state: SessionState,
+    /// Most recent `BehaviorCommand` from the Python behavior engine.
+    /// Present only when a session is `Active`. Cleared on session end,
+    /// Python disconnect, or session timeout.
+    last_behavior_cmd: Option<BehaviorCommand>,
     /// V4L2 timestamp of the previously processed frame. Used to compute
     /// inter-frame delta for velocity-to-per-second conversion.
     prev_frame_timestamp: Option<Duration>,
@@ -748,6 +946,7 @@ impl Pipeline {
             current_target_id: None,
             prev_person_in_frame: false,
             session_state: SessionState::Idle,
+            last_behavior_cmd: None,
             prev_frame_timestamp: None,
             y_plane_size,
             frames_drained: 0_u64,
@@ -826,23 +1025,42 @@ impl Pipeline {
             .update(cat_detections, model_width, model_height, timestamp_us);
         let track_count = self.tracker.tracks().len();
 
-        // --- Targeting ---
-        let target = select_target(self.tracker.tracks(), self.current_target_id);
-        let tracking = target.is_some();
-        let target_track_id = target.map(Track::id);
+        // --- Targeting + Command ---
+        // When a session is Active and Python has sent a BehaviorCommand,
+        // use behavior-driven targeting. Otherwise, use autonomous mode
+        // (track the highest-scoring cat, or home when idle).
+        let (solution, params, target_track_id) =
+            if matches!(self.session_state, SessionState::Active)
+                && let Some(cmd) = &self.last_behavior_cmd
+            {
+                let sol = behavior_solution(
+                    cmd,
+                    &self.targeter,
+                    self.tracker.tracks(),
+                    safety,
+                    self.current_pan,
+                    self.current_tilt,
+                );
+                let par = behavior_params(cmd);
+                let tid = (cmd.target_track_id > 0_u32).then_some(cmd.target_track_id);
+                (sol, par, tid)
+            } else {
+                let target = select_target(self.tracker.tracks(), self.current_target_id);
+                let tracking = target.is_some();
+                let tid = target.map(Track::id);
+                let sol = compute_solution(
+                    &self.targeter,
+                    target,
+                    safety,
+                    self.current_pan,
+                    self.current_tilt,
+                );
+                let par = default_command_params(tracking);
+                (sol, par, tid)
+            };
 
-        let solution = compute_solution(
-            &self.targeter,
-            target,
-            safety,
-            self.current_pan,
-            self.current_tilt,
-        );
-
-        // --- Command ---
-        let params = default_command_params(tracking);
-        let cmd = serial::build_command(solution, safety, params);
-        self.serial.send(cmd)?;
+        let servo_cmd = serial::build_command(solution, safety, params);
+        self.serial.send(servo_cmd)?;
 
         // --- IPC ---
         let ipc_connected = self.stream_ipc(
@@ -882,7 +1100,7 @@ impl Pipeline {
             safety,
             pan: solution.pan,
             tilt: solution.tilt,
-            laser_on: tracking,
+            laser_on: params.laser_on,
             ipc_connected,
             timestamp_us,
             ambient_brightness,
@@ -953,6 +1171,7 @@ impl Pipeline {
             tracing::warn!(%err, "IPC client disconnected, reverting to autonomous mode");
             self.ipc_connection = None;
             self.session_state = SessionState::Idle;
+            self.last_behavior_cmd = None;
             return false;
         }
 
@@ -963,6 +1182,7 @@ impl Pipeline {
                 tracing::warn!(%err, "IPC client disconnected during track event send");
                 self.ipc_connection = None;
                 self.session_state = SessionState::Idle;
+                self.last_behavior_cmd = None;
                 return false;
             }
         }
@@ -970,12 +1190,18 @@ impl Pipeline {
         // --- Drain incoming messages ---
         loop {
             match conn.try_recv() {
-                Ok(Some(msg)) => handle_incoming(msg, &mut self.session_state),
+                Ok(Some(msg)) => handle_incoming(
+                    msg,
+                    &mut self.session_state,
+                    &mut self.last_behavior_cmd,
+                    &mut self.tracker,
+                ),
                 Ok(None) => break,
                 Err(err) => {
                     tracing::warn!(%err, "IPC recv error, disconnecting");
                     self.ipc_connection = None;
                     self.session_state = SessionState::Idle;
+                    self.last_behavior_cmd = None;
                     return false;
                 }
             }
@@ -996,6 +1222,7 @@ impl Pipeline {
                 tracing::warn!(%err, "IPC client disconnected during session request");
                 self.ipc_connection = None;
                 self.session_state = SessionState::Idle;
+                self.last_behavior_cmd = None;
                 return false;
             }
             self.session_state = SessionState::AwaitingAck {
@@ -1025,12 +1252,13 @@ impl Pipeline {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
+    clippy::indexing_slicing,
     clippy::integer_division,
     clippy::panic,
     clippy::float_cmp,
-    reason = "test code: expect for test assertions, integer division in known-safe \
-              size computations, panic in test failure paths, float_cmp for protobuf \
-              round-trip (IEEE 754 preserved bit-exact)"
+    reason = "test code: expect for test assertions, indexing on known-size test data, \
+              integer division in known-safe size computations, panic in test failure \
+              paths, float_cmp for protobuf round-trip (IEEE 754 preserved bit-exact)"
 )]
 mod tests {
     use super::*;
@@ -2997,5 +3225,753 @@ mod tests {
             "trigger must match"
         );
         assert_eq!(decoded.track_id, Some(10_u32), "track_id must match");
+    }
+
+    // -----------------------------------------------------------------------
+    // behavior_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_behavior_params_smoothing_conversion() {
+        let cmd = BehaviorCommand {
+            smoothing: 0.5_f32,
+            max_speed: 0.0_f32,
+            ..Default::default()
+        };
+        let params = behavior_params(&cmd);
+        assert_eq!(params.smoothing, 127_u8, "0.5 smoothing must map to 127");
+    }
+
+    #[test]
+    fn test_behavior_params_max_speed_conversion() {
+        let cmd = BehaviorCommand {
+            max_speed: 1.0_f32,
+            ..Default::default()
+        };
+        let params = behavior_params(&cmd);
+        assert_eq!(params.max_slew, 255_u8, "1.0 max_speed must map to 255");
+    }
+
+    #[test]
+    fn test_behavior_params_clamps_out_of_range() {
+        let cmd = BehaviorCommand {
+            smoothing: 2.0_f32,
+            max_speed: -1.0_f32,
+            ..Default::default()
+        };
+        let params = behavior_params(&cmd);
+        assert_eq!(
+            params.smoothing, 255_u8,
+            "smoothing > 1.0 must clamp to 255"
+        );
+        assert_eq!(params.max_slew, 0_u8, "max_speed < 0.0 must clamp to 0");
+    }
+
+    #[test]
+    fn test_behavior_params_laser_on() {
+        let cmd_on = BehaviorCommand {
+            laser_on: true,
+            ..Default::default()
+        };
+        let cmd_off = BehaviorCommand {
+            laser_on: false,
+            ..Default::default()
+        };
+        assert!(
+            behavior_params(&cmd_on).laser_on,
+            "laser_on true must pass through"
+        );
+        assert!(
+            !behavior_params(&cmd_off).laser_on,
+            "laser_on false must pass through"
+        );
+    }
+
+    #[test]
+    fn test_behavior_params_no_dispense_for_non_dispense_mode() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            dispense_rotations: 5_u32,
+            ..Default::default()
+        };
+        let params = behavior_params(&cmd);
+        assert!(
+            params.dispense.is_none(),
+            "non-DISPENSE mode must not produce a DispenseRequest"
+        );
+    }
+
+    #[test]
+    fn test_behavior_params_dispense_left() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_DISPENSE.into(),
+            lead_target_x: 0.2_f32,
+            dispense_rotations: 3_u32,
+            ..Default::default()
+        };
+        let params = behavior_params(&cmd);
+        let dispense = params
+            .dispense
+            .expect("DISPENSE mode must produce a DispenseRequest");
+        assert_eq!(
+            dispense.direction,
+            DispenseDirection::Left,
+            "lead_target_x < 0.5 must map to Left"
+        );
+        assert_eq!(dispense.tier, 0_u8, "3 rotations must map to tier 0");
+    }
+
+    #[test]
+    fn test_behavior_params_dispense_right() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_DISPENSE.into(),
+            lead_target_x: 0.8_f32,
+            dispense_rotations: 7_u32,
+            ..Default::default()
+        };
+        let params = behavior_params(&cmd);
+        let dispense = params
+            .dispense
+            .expect("DISPENSE mode must produce a DispenseRequest");
+        assert_eq!(
+            dispense.direction,
+            DispenseDirection::Right,
+            "lead_target_x >= 0.5 must map to Right"
+        );
+        assert_eq!(dispense.tier, 2_u8, "7 rotations must map to tier 2");
+    }
+
+    // -----------------------------------------------------------------------
+    // rotations_to_tier
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rotations_to_tier_known_values() {
+        assert_eq!(rotations_to_tier(3_u32), 0_u8, "3 rotations = tier 0");
+        assert_eq!(rotations_to_tier(5_u32), 1_u8, "5 rotations = tier 1");
+        assert_eq!(rotations_to_tier(7_u32), 2_u8, "7 rotations = tier 2");
+    }
+
+    #[test]
+    fn test_rotations_to_tier_unknown_defaults_zero() {
+        assert_eq!(
+            rotations_to_tier(0_u32),
+            0_u8,
+            "unknown rotation count must default to tier 0"
+        );
+        assert_eq!(
+            rotations_to_tier(4_u32),
+            0_u8,
+            "unknown rotation count must default to tier 0"
+        );
+        assert_eq!(
+            rotations_to_tier(100_u32),
+            0_u8,
+            "unknown rotation count must default to tier 0"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // lead_target_to_solution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lead_target_to_solution_corners() {
+        let bottom_left = lead_target_to_solution(0.0_f32, 0.0_f32);
+        assert_eq!(
+            bottom_left.pan, PAN_LIMIT_MIN,
+            "(0,0) pan must be PAN_LIMIT_MIN"
+        );
+        assert_eq!(
+            bottom_left.tilt, TILT_LIMIT_MIN,
+            "(0,0) tilt must be TILT_LIMIT_MIN"
+        );
+
+        let top_right = lead_target_to_solution(1.0_f32, 1.0_f32);
+        assert_eq!(
+            top_right.pan, PAN_LIMIT_MAX,
+            "(1,1) pan must be PAN_LIMIT_MAX"
+        );
+        assert_eq!(
+            top_right.tilt, TILT_LIMIT_MAX,
+            "(1,1) tilt must be TILT_LIMIT_MAX"
+        );
+    }
+
+    #[test]
+    fn test_lead_target_to_solution_center() {
+        let center = lead_target_to_solution(0.5_f32, 0.5_f32);
+        // Center of PAN range: (-9000 + 9000) / 2 = 0
+        assert_eq!(center.pan, 0_i16, "(0.5, 0.5) pan must be 0");
+        // Center of TILT range: (-4500 + 9000) / 2 = 2250
+        assert_eq!(center.tilt, 2250_i16, "(0.5, 0.5) tilt must be 2250");
+    }
+
+    #[test]
+    fn test_lead_target_to_solution_clamps_out_of_range() {
+        let oob = lead_target_to_solution(-0.5_f32, 1.5_f32);
+        assert_eq!(
+            oob.pan, PAN_LIMIT_MIN,
+            "negative x must clamp to PAN_LIMIT_MIN"
+        );
+        assert_eq!(
+            oob.tilt, TILT_LIMIT_MAX,
+            "y > 1.0 must clamp to TILT_LIMIT_MAX"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // behavior_solution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_behavior_solution_idle_returns_home() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_IDLE.into(),
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let solution = behavior_solution(&cmd, &targeter, &[], safety, PAN_HOME, TILT_HOME);
+        assert_eq!(solution.pan, PAN_HOME, "IDLE pan must be PAN_HOME");
+        assert_eq!(solution.tilt, TILT_HOME, "IDLE tilt must be TILT_HOME");
+    }
+
+    #[test]
+    fn test_behavior_solution_dispense_returns_home() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_DISPENSE.into(),
+            dispense_rotations: 5_u32,
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let solution = behavior_solution(&cmd, &targeter, &[], safety, PAN_HOME, TILT_HOME);
+        assert_eq!(solution.pan, PAN_HOME, "DISPENSE pan must be PAN_HOME");
+        assert_eq!(solution.tilt, TILT_HOME, "DISPENSE tilt must be TILT_HOME");
+    }
+
+    #[test]
+    fn test_behavior_solution_track_missing_target_returns_home() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            target_track_id: 99_u32,
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let solution = behavior_solution(&cmd, &targeter, &[], safety, PAN_HOME, TILT_HOME);
+        assert_eq!(
+            solution.pan, PAN_HOME,
+            "TRACK with missing target must return PAN_HOME"
+        );
+        assert_eq!(
+            solution.tilt, TILT_HOME,
+            "TRACK with missing target must return TILT_HOME"
+        );
+    }
+
+    #[test]
+    fn test_behavior_solution_track_with_target() {
+        // Create a confirmed track at frame center.
+        let det = cat_detection(320.0_f32, 240.0_f32, 100.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let tracks = tracker.tracks();
+        assert!(!tracks.is_empty(), "must have at least one track");
+
+        let track_id = tracks[0].id();
+
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            target_track_id: track_id,
+            offset_x: 0.0_f32,
+            offset_y: 0.0_f32,
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        let solution = behavior_solution(&cmd, &targeter, tracks, safety, PAN_HOME, TILT_HOME);
+        // With a target at frame center and zero offset, the solution
+        // should be close to the current position. Exact value depends
+        // on the Kalman filter state, but it should not be home.
+        // (Home is pan=0, tilt=4500. A centered detection at 0.5,0.5
+        //  means zero displacement from current, so it stays at current.)
+        // With zero parallax and detection at center, compute() returns
+        // current_pan + 0 = PAN_HOME, current_tilt + 0 = TILT_HOME.
+        // This is expected — a centered detection means "keep pointing here."
+        assert_eq!(
+            solution.pan, PAN_HOME,
+            "centered track with zero offset must keep pan at current"
+        );
+        assert_eq!(
+            solution.tilt, TILT_HOME,
+            "centered track with zero offset must keep tilt at current"
+        );
+    }
+
+    #[test]
+    fn test_behavior_solution_track_with_offset() {
+        let det = cat_detection(320.0_f32, 240.0_f32, 100.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let tracks = tracker.tracks();
+        let track_id = tracks[0].id();
+
+        // Apply a rightward offset.
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            target_track_id: track_id,
+            offset_x: 0.1_f32,
+            offset_y: 0.0_f32,
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let solution = behavior_solution(&cmd, &targeter, tracks, safety, PAN_HOME, TILT_HOME);
+
+        // With a positive x offset, the pan should shift right (positive).
+        assert!(
+            solution.pan > PAN_HOME,
+            "positive offset_x must shift pan right: got {}",
+            solution.pan
+        );
+    }
+
+    #[test]
+    fn test_behavior_solution_lead_to_point() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_LEAD_TO_POINT.into(),
+            lead_target_x: 0.0_f32,
+            lead_target_y: 1.0_f32,
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+        let solution = behavior_solution(&cmd, &targeter, &[], safety, PAN_HOME, TILT_HOME);
+        assert_eq!(
+            solution.pan, PAN_LIMIT_MIN,
+            "lead_target_x=0 must map to PAN_LIMIT_MIN"
+        );
+        assert_eq!(
+            solution.tilt, TILT_LIMIT_MAX,
+            "lead_target_y=1 must map to TILT_LIMIT_MAX"
+        );
+    }
+
+    #[test]
+    fn test_behavior_solution_lead_to_point_with_safety_ceiling() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_LEAD_TO_POINT.into(),
+            lead_target_x: 0.5_f32,
+            lead_target_y: 0.0_f32,
+            ..Default::default()
+        };
+        let targeter = test_targeter();
+        // Safety ceiling at y=0.3 — the laser must not go above this.
+        let safety = SafetyResult {
+            ceiling_y: 0.3_f32,
+            person_in_frame: true,
+        };
+        let solution = behavior_solution(&cmd, &targeter, &[], safety, PAN_HOME, TILT_HOME);
+
+        // The unconstrained tilt for y=0.0 is TILT_LIMIT_MIN (-4500).
+        // The ceiling at y=0.3 maps to a higher (less negative) tilt.
+        // The result must be clamped to at or below the ceiling.
+        let ceiling_tilt = lead_target_to_solution(0.0_f32, 0.3_f32).tilt;
+        assert!(
+            solution.tilt >= ceiling_tilt,
+            "safety ceiling must clamp tilt: solution={}, ceiling={}",
+            solution.tilt,
+            ceiling_tilt
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_incoming: BehaviorCommand integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handle_incoming_behavior_command_stored_when_active() {
+        let mut state = SessionState::Active;
+        let mut last_cmd: Option<BehaviorCommand> = None;
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            target_track_id: 5_u32,
+            laser_on: true,
+            smoothing: 0.7_f32,
+            ..Default::default()
+        };
+
+        handle_incoming(
+            IncomingMessage::BehaviorCommand(cmd),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+
+        let stored = last_cmd.expect("BehaviorCommand must be stored when Active");
+        assert_eq!(
+            stored.target_track_id, 5_u32,
+            "stored command must match sent command"
+        );
+        assert!(stored.laser_on, "laser_on must be preserved");
+    }
+
+    #[test]
+    fn test_handle_incoming_behavior_command_ignored_when_idle() {
+        let mut state = SessionState::Idle;
+        let mut last_cmd: Option<BehaviorCommand> = None;
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            target_track_id: 5_u32,
+            ..Default::default()
+        };
+
+        handle_incoming(
+            IncomingMessage::BehaviorCommand(cmd),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+
+        assert!(
+            last_cmd.is_none(),
+            "BehaviorCommand must be ignored when not Active"
+        );
+    }
+
+    #[test]
+    fn test_handle_incoming_behavior_command_ignored_when_awaiting_ack() {
+        let mut state = SessionState::AwaitingAck {
+            sent_at: Instant::now(),
+        };
+        let mut last_cmd: Option<BehaviorCommand> = None;
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_TRACK.into(),
+            ..Default::default()
+        };
+
+        handle_incoming(
+            IncomingMessage::BehaviorCommand(cmd),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+
+        assert!(
+            last_cmd.is_none(),
+            "BehaviorCommand must be ignored when AwaitingAck"
+        );
+    }
+
+    #[test]
+    fn test_handle_incoming_behavior_command_overwrites_previous() {
+        let mut state = SessionState::Active;
+        let mut last_cmd: Option<BehaviorCommand> = None;
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        let cmd1 = BehaviorCommand {
+            target_track_id: 1_u32,
+            ..Default::default()
+        };
+        let cmd2 = BehaviorCommand {
+            target_track_id: 2_u32,
+            ..Default::default()
+        };
+
+        handle_incoming(
+            IncomingMessage::BehaviorCommand(cmd1),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+        handle_incoming(
+            IncomingMessage::BehaviorCommand(cmd2),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+
+        let stored = last_cmd.expect("BehaviorCommand must be stored");
+        assert_eq!(
+            stored.target_track_id, 2_u32,
+            "latest BehaviorCommand must overwrite previous"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_incoming: SessionEnd clears behavior command
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handle_incoming_session_end_clears_behavior_command() {
+        let mut state = SessionState::Active;
+        let mut last_cmd: Option<BehaviorCommand> = Some(BehaviorCommand {
+            target_track_id: 1_u32,
+            laser_on: true,
+            ..Default::default()
+        });
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        handle_incoming(
+            IncomingMessage::SessionEnd,
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+
+        assert!(
+            matches!(state, SessionState::Idle),
+            "session must transition to Idle"
+        );
+        assert!(
+            last_cmd.is_none(),
+            "SessionEnd must clear the behavior command"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_incoming: IdentityResult integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handle_incoming_identity_result_sets_cat_id() {
+        let mut state = SessionState::Active;
+        let mut last_cmd: Option<BehaviorCommand> = None;
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        // Create a track.
+        let det = cat_detection(320.0_f32, 240.0_f32, 100.0_f32);
+        tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
+        let track_id = tracker.tracks()[0].id();
+
+        let result = detection::IdentityResult {
+            track_id,
+            cat_id: String::from("whiskers"),
+            similarity: 0.85_f32,
+            ..Default::default()
+        };
+
+        handle_incoming(
+            IncomingMessage::IdentityResult(result),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+
+        assert_eq!(
+            tracker.tracks()[0].cat_id(),
+            "whiskers",
+            "IdentityResult must set cat_id on the matching track"
+        );
+    }
+
+    #[test]
+    fn test_handle_incoming_identity_result_unknown_track() {
+        let mut state = SessionState::Active;
+        let mut last_cmd: Option<BehaviorCommand> = None;
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        let result = detection::IdentityResult {
+            track_id: 999_u32,
+            cat_id: String::from("ghost"),
+            similarity: 0.9_f32,
+            ..Default::default()
+        };
+
+        // Should not panic — just logs and continues.
+        handle_incoming(
+            IncomingMessage::IdentityResult(result),
+            &mut state,
+            &mut last_cmd,
+            &mut tracker,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_detection_frame: cat_id populated from tracks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_detection_frame_includes_cat_id() {
+        let det = cat_detection(320.0_f32, 240.0_f32, 100.0_f32);
+        let mut tracker = run_tracker(&[&[det], &[det], &[det]]);
+
+        let track_id = tracker.tracks()[0].id();
+        tracker.set_track_cat_id(track_id, String::from("mittens"));
+
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        let frame =
+            build_detection_frame(tracker.tracks(), safety, 1000_u64, 1_u64, 0.5_f32, 15.0_f32);
+
+        assert_eq!(frame.cats.len(), 1, "must have one tracked cat");
+        assert_eq!(
+            frame.cats[0].cat_id, "mittens",
+            "DetectionFrame must include the resolved cat_id"
+        );
+    }
+
+    #[test]
+    fn test_build_detection_frame_empty_cat_id_when_unresolved() {
+        let det = cat_detection(320.0_f32, 240.0_f32, 100.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        let frame =
+            build_detection_frame(tracker.tracks(), safety, 1000_u64, 1_u64, 0.5_f32, 15.0_f32);
+
+        assert_eq!(frame.cats.len(), 1, "must have one tracked cat");
+        assert_eq!(
+            frame.cats[0].cat_id, "",
+            "unresolved cat_id must be empty string"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Proptest: behavior_params float conversion
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #[test]
+        fn test_behavior_params_smoothing_monotonic(
+            a in 0.0_f32..=0.5_f32,
+            b in 0.5_f32..=1.0_f32,
+        ) {
+            let cmd_a = BehaviorCommand {
+                smoothing: a,
+                ..Default::default()
+            };
+            let cmd_b = BehaviorCommand {
+                smoothing: b,
+                ..Default::default()
+            };
+            let pa = behavior_params(&cmd_a);
+            let pb = behavior_params(&cmd_b);
+            prop_assert!(
+                pb.smoothing >= pa.smoothing,
+                "higher smoothing must produce >= u8: a={a} -> {}, b={b} -> {}",
+                pa.smoothing,
+                pb.smoothing,
+            );
+        }
+
+        #[test]
+        fn test_behavior_params_max_slew_monotonic(
+            a in 0.0_f32..=0.5_f32,
+            b in 0.5_f32..=1.0_f32,
+        ) {
+            let cmd_a = BehaviorCommand {
+                max_speed: a,
+                ..Default::default()
+            };
+            let cmd_b = BehaviorCommand {
+                max_speed: b,
+                ..Default::default()
+            };
+            let pa = behavior_params(&cmd_a);
+            let pb = behavior_params(&cmd_b);
+            prop_assert!(
+                pb.max_slew >= pa.max_slew,
+                "higher max_speed must produce >= u8: a={a} -> {}, b={b} -> {}",
+                pa.max_slew,
+                pb.max_slew,
+            );
+        }
+
+        #[test]
+        fn test_lead_target_to_solution_within_limits(
+            x in -0.5_f32..=1.5_f32,
+            y in -0.5_f32..=1.5_f32,
+        ) {
+            let solution = lead_target_to_solution(x, y);
+            prop_assert!(
+                solution.pan >= PAN_LIMIT_MIN && solution.pan <= PAN_LIMIT_MAX,
+                "pan {} must be within [{}, {}]",
+                solution.pan, PAN_LIMIT_MIN, PAN_LIMIT_MAX,
+            );
+            prop_assert!(
+                solution.tilt >= TILT_LIMIT_MIN && solution.tilt <= TILT_LIMIT_MAX,
+                "tilt {} must be within [{}, {}]",
+                solution.tilt, TILT_LIMIT_MIN, TILT_LIMIT_MAX,
+            );
+        }
+
+        #[test]
+        fn test_rotations_to_tier_always_valid(
+            rotations in 0..100_u32,
+        ) {
+            let tier = rotations_to_tier(rotations);
+            prop_assert!(tier <= 2_u8, "tier must be 0-2, got {}", tier);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Insta snapshots: BehaviorCommand with dispense
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_behavior_command_dispense_wire_bytes() {
+        let cmd = BehaviorCommand {
+            mode: detection::TargetingMode::TARGETING_MODE_DISPENSE.into(),
+            lead_target_x: 0.3_f32,
+            dispense_rotations: 5_u32,
+            ..Default::default()
+        };
+
+        let payload = cmd.encode_to_vec();
+        let mut wire = Vec::new();
+        crate::ipc::encode_frame(crate::ipc::WireType::BehaviorCommand, &payload, &mut wire)
+            .expect("encode must succeed");
+
+        insta::assert_yaml_snapshot!("behavior_command_dispense_wire", wire);
+    }
+
+    #[test]
+    fn test_snapshot_identity_result_wire_bytes() {
+        let result = detection::IdentityResult {
+            track_id: 3_u32,
+            cat_id: String::from("whiskers"),
+            similarity: 0.87_f32,
+            ..Default::default()
+        };
+
+        let payload = result.encode_to_vec();
+        let mut wire = Vec::new();
+        crate::ipc::encode_frame(crate::ipc::WireType::IdentityResult, &payload, &mut wire)
+            .expect("encode must succeed");
+
+        insta::assert_yaml_snapshot!("identity_result_wire", wire);
     }
 }
