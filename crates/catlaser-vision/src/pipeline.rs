@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 
 use catlaser_common::constants::{PAN_HOME, TILT_HOME};
+use catlaser_common::servo_math;
 
 use crate::camera::{Camera, CameraConfig, IspConfig, IspController};
 use crate::detect::{DetectionConfig, Detector};
@@ -389,8 +390,13 @@ impl Pipeline {
         self.serial.send(cmd)?;
 
         // --- State update ---
-        self.current_pan = solution.pan;
-        self.current_tilt = solution.tilt;
+        // Clamp to the MCU's effective range so that on the next frame the
+        // targeting math uses an accurate model of where the camera is
+        // actually pointing.  Without this, commands beyond the MCU's
+        // horizon limit cause `current_tilt` to diverge from the physical
+        // servo position, producing oscillation/jitter near the limit.
+        self.current_pan = servo_math::clamp_pan(solution.pan);
+        self.current_tilt = servo_math::clamp_tilt(solution.tilt, safety.person_in_frame);
         self.frame_count = self.frame_count.saturating_add(1_u64);
 
         Ok(FrameResult {
@@ -423,7 +429,8 @@ mod tests {
     use crate::serial::build_command;
     use crate::targeting::TargetingConfig;
     use catlaser_common::constants::{
-        PAN_HOME, PAN_LIMIT_MAX, PAN_LIMIT_MIN, TILT_HOME, TILT_LIMIT_MAX, TILT_LIMIT_MIN,
+        PAN_HOME, PAN_LIMIT_MAX, PAN_LIMIT_MIN, TILT_HOME, TILT_HORIZON_LIMIT,
+        TILT_HORIZON_LIMIT_PERSON, TILT_LIMIT_MAX, TILT_LIMIT_MIN,
     };
     use proptest::prelude::*;
 
@@ -920,6 +927,106 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // State clamping (pipeline state tracks MCU effective range)
+    // -----------------------------------------------------------------------
+
+    /// Simulates the pipeline state update for tilt: the value stored in
+    /// `current_tilt` after a frame is the MCU-clamped solution, not the
+    /// raw solution. This helper mirrors the production code path.
+    fn clamped_tilt(solution_tilt: i16, person_in_frame: bool) -> i16 {
+        servo_math::clamp_tilt(solution_tilt, person_in_frame)
+    }
+
+    #[test]
+    fn test_state_tilt_clamped_to_horizon_limit() {
+        // A solution that exceeds the MCU's horizon limit must be clamped
+        // in the pipeline's internal state so the next frame's targeting
+        // math uses the physical servo position.
+        let below_horizon = TILT_HORIZON_LIMIT.saturating_sub(500_i16);
+        let clamped = clamped_tilt(below_horizon, false);
+
+        assert_eq!(
+            clamped, TILT_HORIZON_LIMIT,
+            "tilt below horizon limit must clamp to TILT_HORIZON_LIMIT"
+        );
+    }
+
+    #[test]
+    fn test_state_tilt_clamped_to_person_limit() {
+        // When a person is in frame, the MCU applies the stricter person
+        // limit. The pipeline state must match.
+        let below_person_limit = TILT_HORIZON_LIMIT_PERSON.saturating_sub(200_i16);
+        let clamped = clamped_tilt(below_person_limit, true);
+
+        assert_eq!(
+            clamped, TILT_HORIZON_LIMIT_PERSON,
+            "tilt below person limit must clamp to TILT_HORIZON_LIMIT_PERSON"
+        );
+    }
+
+    #[test]
+    fn test_state_tilt_passthrough_within_range() {
+        let in_range = 4500_i16;
+        let clamped = clamped_tilt(in_range, false);
+
+        assert_eq!(
+            clamped, in_range,
+            "tilt within safe range must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_state_pan_clamped_to_limits() {
+        let beyond_max = PAN_LIMIT_MAX.saturating_add(100_i16);
+        let clamped = servo_math::clamp_pan(beyond_max);
+
+        assert_eq!(
+            clamped, PAN_LIMIT_MAX,
+            "pan beyond max limit must clamp to PAN_LIMIT_MAX"
+        );
+    }
+
+    #[test]
+    fn test_state_clamping_prevents_feedback_divergence() {
+        // Scenario: cat at top of FOV, no person. The targeting solution
+        // goes beyond the MCU's horizon limit. Without clamping, the
+        // pipeline's current_tilt diverges from the physical position,
+        // causing incorrect targeting on subsequent frames.
+        let targeter = test_targeter();
+        let safety = SafetyResult {
+            ceiling_y: -1.0_f32,
+            person_in_frame: false,
+        };
+
+        // Confirmed track near top of frame.
+        let det = cat_detection(320.0_f32, 10.0_f32, 30.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let target = select_target(tracker.tracks());
+        assert!(target.is_some(), "must have confirmed target");
+
+        // Start with tilt near the horizon limit.
+        let current_tilt = TILT_HORIZON_LIMIT;
+        let solution = compute_solution(&targeter, target, safety, 0_i16, current_tilt);
+
+        // The raw solution may go below the horizon limit.
+        // The clamped state must not.
+        let next_tilt = servo_math::clamp_tilt(solution.tilt, false);
+        assert!(
+            next_tilt >= TILT_HORIZON_LIMIT,
+            "clamped state tilt {next_tilt} must be >= TILT_HORIZON_LIMIT {TILT_HORIZON_LIMIT}"
+        );
+
+        // Verify the state differs from the unclamped solution when the
+        // solution exceeds the horizon.
+        if solution.tilt < TILT_HORIZON_LIMIT {
+            assert_ne!(
+                next_tilt, solution.tilt,
+                "state must differ from raw solution when solution exceeds horizon limit"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Proptests
     // -----------------------------------------------------------------------
 
@@ -1104,6 +1211,36 @@ mod tests {
                 cmd.flags().person_detected(),
                 has_person,
                 "person flag must match safety",
+            );
+        }
+
+        #[test]
+        fn test_state_clamping_always_within_mcu_range(
+            solution_pan in any::<i16>(),
+            solution_tilt in any::<i16>(),
+            person_in_frame: bool,
+        ) {
+            // The pipeline stores servo_math::clamp_pan / clamp_tilt of
+            // the solution. This must always be within the MCU's effective
+            // range — the same range the MCU applies in its control loop.
+            let clamped_pan = servo_math::clamp_pan(solution_pan);
+            let clamped_tilt = servo_math::clamp_tilt(solution_tilt, person_in_frame);
+
+            prop_assert!(
+                (PAN_LIMIT_MIN..=PAN_LIMIT_MAX).contains(&clamped_pan),
+                "clamped pan {} must be within [{}, {}]",
+                clamped_pan, PAN_LIMIT_MIN, PAN_LIMIT_MAX,
+            );
+
+            let tilt_min = if person_in_frame {
+                TILT_HORIZON_LIMIT_PERSON
+            } else {
+                TILT_HORIZON_LIMIT
+            };
+            prop_assert!(
+                (tilt_min..=TILT_LIMIT_MAX).contains(&clamped_tilt),
+                "clamped tilt {} must be within [{}, {}] (person={})",
+                clamped_tilt, tilt_min, TILT_LIMIT_MAX, person_in_frame,
             );
         }
     }

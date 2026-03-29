@@ -51,10 +51,10 @@ pub(crate) enum SerialError {
     #[error("UART write failed: {0}")]
     Write(io::Error),
 
-    /// Write completed but fewer than [`SERVO_CMD_SIZE`] bytes were sent.
-    #[error("short write: sent {sent} of {SERVO_CMD_SIZE} bytes")]
-    ShortWrite {
-        /// Number of bytes actually written.
+    /// Repeated writes produced zero bytes — the device is gone.
+    #[error("UART write stalled after {sent} of {SERVO_CMD_SIZE} bytes")]
+    WriteStall {
+        /// Number of bytes written before the stall.
         sent: usize,
     },
 }
@@ -150,17 +150,14 @@ impl SerialPort {
 
     /// Packs and transmits a single [`ServoCommand`] over UART.
     ///
-    /// Serializes the command to its 8-byte wire format and writes the
-    /// full frame in one `write()` call. Returns [`SerialError::ShortWrite`]
-    /// if the OS accepts fewer than 8 bytes (should not happen on a
-    /// properly configured blocking UART, but the invariant is enforced).
+    /// Serializes the command to its 8-byte wire format and writes all
+    /// bytes, retrying on partial writes (e.g. signal interruption during
+    /// the ~694 us transfer at 115200 baud). Returns
+    /// [`SerialError::WriteStall`] if a write returns zero bytes, which
+    /// indicates the device is no longer accepting data.
     pub(crate) fn send(&self, cmd: ServoCommand) -> Result<(), SerialError> {
         let bytes = cmd.to_bytes();
-        let written = write_all_fd(&self.fd, &bytes)?;
-        if written < SERVO_CMD_SIZE {
-            return Err(SerialError::ShortWrite { sent: written });
-        }
-        Ok(())
+        write_all_fd(&self.fd, &bytes)
     }
 }
 
@@ -302,10 +299,26 @@ const fn baud_to_speed(baud: u32) -> libc::speed_t {
     }
 }
 
-/// Writes a buffer to a file descriptor, returning the number of bytes written.
-fn write_all_fd(fd: &OwnedFd, buf: &[u8]) -> Result<usize, SerialError> {
-    let mut file = fd_to_write(fd);
-    file.write(buf).map_err(SerialError::Write)
+/// Writes the entire buffer to a file descriptor, retrying on partial writes.
+///
+/// A single `libc::write` for 8 bytes on a blocking UART completes
+/// atomically in practice, but a signal delivered during the transfer
+/// can cause a short write. This loop retries until all bytes are sent.
+/// Returns [`SerialError::WriteStall`] if a write returns zero bytes
+/// (device gone / broken pipe).
+fn write_all_fd(fd: &OwnedFd, buf: &[u8]) -> Result<(), SerialError> {
+    let mut writer = fd_to_write(fd);
+    let mut sent = 0_usize;
+    while sent < buf.len() {
+        let n = writer
+            .write(buf.get(sent..).unwrap_or_default())
+            .map_err(SerialError::Write)?;
+        if n == 0_usize {
+            return Err(SerialError::WriteStall { sent });
+        }
+        sent = sent.saturating_add(n);
+    }
+    Ok(())
 }
 
 /// Borrows an `OwnedFd` as a writable `std::fs::File` reference without
