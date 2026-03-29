@@ -122,10 +122,12 @@ class FrameReader:
         try:
             msg_type = MsgType(type_byte)
         except ValueError:
+            del self._buf[:HEADER_SIZE]
             msg = f"invalid wire type byte: {type_byte}"
             raise ValueError(msg) from None
 
         if length > MAX_MESSAGE_SIZE:
+            del self._buf[:HEADER_SIZE]
             msg = f"message too large: {length} bytes (max {MAX_MESSAGE_SIZE})"
             raise ValueError(msg)
 

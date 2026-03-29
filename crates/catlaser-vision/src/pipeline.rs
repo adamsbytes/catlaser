@@ -18,7 +18,7 @@ use catlaser_common::servo_math;
 
 use crate::camera::{Camera, CameraConfig, IspConfig, IspController};
 use crate::detect::{DetectionConfig, Detector};
-use crate::ipc::{IpcConnection, IpcServer};
+use crate::ipc::{IncomingMessage, IpcConnection, IpcServer};
 use crate::npu::{Model, ModelPriority, NpuConfig};
 use crate::proto::detection::{
     self, DetectionFrame, NewTrack, SessionRequest, TrackEvent, TrackLost, TrackedCat, track_event,
@@ -472,11 +472,20 @@ enum SessionState {
     /// No session in progress or pending. A `SessionRequest` can be sent.
     Idle,
     /// A `SessionRequest` has been sent; waiting for `SessionAck` from Python.
-    /// Reverts to `Idle` after [`SESSION_ACK_TIMEOUT`].
     AwaitingAck {
         /// When the `SessionRequest` was sent.
         sent_at: Instant,
     },
+    /// A `SessionRequest` timed out or was rejected. Blocks re-sends until
+    /// the deadline expires, preventing immediate re-fire.
+    Cooldown {
+        /// When the cooldown expires and state reverts to `Idle`.
+        until: Instant,
+    },
+    /// A session is active (Python accepted the `SessionRequest`). No new
+    /// `SessionRequest` will be sent until the session ends or Python
+    /// disconnects.
+    Active,
 }
 
 // ---------------------------------------------------------------------------
@@ -835,19 +844,74 @@ impl Pipeline {
             }
         }
 
-        // --- SessionRequest (sporadic, at most once per session) ---
+        // --- Drain incoming messages (Python → Rust) ---
+        loop {
+            match conn.try_recv() {
+                Ok(Some(msg)) => match msg {
+                    IncomingMessage::SessionAck(ack) => {
+                        if let SessionState::AwaitingAck { .. } = self.session_state {
+                            if ack.accept {
+                                tracing::info!("session accepted");
+                                self.session_state = SessionState::Active;
+                            } else {
+                                tracing::info!(skip_reason = ?ack.skip_reason, "session rejected");
+                                self.session_state = SessionState::Cooldown {
+                                    until: Instant::now() + SESSION_ACK_TIMEOUT,
+                                };
+                            }
+                        } else {
+                            tracing::debug!("received stale SessionAck, ignoring");
+                        }
+                    }
+                    IncomingMessage::BehaviorCommand(cmd) => {
+                        tracing::debug!(
+                            mode = ?cmd.mode,
+                            track_id = cmd.target_track_id,
+                            "received BehaviorCommand, behavior integration pending"
+                        );
+                    }
+                    IncomingMessage::IdentityResult(result) => {
+                        tracing::debug!(
+                            track_id = result.track_id,
+                            cat_id = %result.cat_id,
+                            "received IdentityResult, identity integration pending"
+                        );
+                    }
+                },
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(%err, "IPC recv error, disconnecting");
+                    self.ipc_connection = None;
+                    self.session_state = SessionState::Idle;
+                    return false;
+                }
+            }
+        }
+
+        // --- Session state transitions ---
         // Time out stale AwaitingAck so a stuck Python doesn't permanently
-        // disable session initiation.
+        // disable session initiation. Transitions to Cooldown (not Idle) to
+        // prevent immediate re-fire on the next frame.
         if let SessionState::AwaitingAck { sent_at } = self.session_state
             && sent_at.elapsed() >= SESSION_ACK_TIMEOUT
         {
             tracing::warn!(
                 elapsed_ms = sent_at.elapsed().as_millis(),
-                "session ack timed out, reverting to idle"
+                "session ack timed out, cooling down"
             );
+            self.session_state = SessionState::Cooldown {
+                until: Instant::now() + SESSION_ACK_TIMEOUT,
+            };
+        }
+
+        // Expire cooldown — ready for a new session attempt.
+        if let SessionState::Cooldown { until } = self.session_state
+            && Instant::now() >= until
+        {
             self.session_state = SessionState::Idle;
         }
 
+        // --- SessionRequest (sporadic, at most once per session) ---
         if matches!(self.session_state, SessionState::Idle)
             && let Some(track_id) = target_track_id
         {

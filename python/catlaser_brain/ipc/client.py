@@ -36,6 +36,13 @@ _RECV_BUF_SIZE: Final[int] = 4096
 
 _NON_BLOCKING: Final[bool] = False
 
+_SEND_TIMEOUT: Final[float] = 0.1
+"""Send timeout in seconds, matching the Rust server's SO_SNDTIMEO.
+
+Bounds how long ``sendall`` can stall when the peer is slow to drain.
+Prevents a hung vision daemon from permanently blocking the behavior engine.
+"""
+
 # ---------------------------------------------------------------------------
 # Message type mapping
 # ---------------------------------------------------------------------------
@@ -144,10 +151,27 @@ class IpcClient:
         self._send(MsgType.IDENTITY_RESULT, result)
 
     def _send(self, msg_type: MsgType, msg: Message) -> None:
-        """Encode and send a framed protobuf message."""
+        """Encode and send a framed protobuf message.
+
+        Temporarily sets a send timeout to prevent indefinite blocking if the
+        vision daemon is stalled. The previous socket timeout is restored after
+        the send completes (or fails).
+
+        Raises:
+            ConnectionError: If the send times out (vision daemon stalled)
+                or the connection is broken.
+        """
         payload = msg.SerializeToString()
         frame = encode_frame(msg_type, payload)
-        self._sock.sendall(frame)
+        prev_timeout = self._sock.gettimeout()
+        self._sock.settimeout(_SEND_TIMEOUT)
+        try:
+            self._sock.sendall(frame)
+        except TimeoutError as exc:
+            err = "send timed out"
+            raise ConnectionError(err) from exc
+        finally:
+            self._sock.settimeout(prev_timeout)
 
     # -----------------------------------------------------------------------
     # Receive (Rust -> Python)

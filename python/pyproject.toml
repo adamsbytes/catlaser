@@ -44,6 +44,7 @@ ignore = [
 "**/test_*" = [
     "S101",     # assert — tests need assert statements
     "PLR2004",  # magic-value-comparison — test values are self-documenting
+    "SLF001",   # private-member-access — tests verify internal state
     "D",        # docstrings — tests describe themselves
     "ARG",      # unused-argument — fixtures
 ]

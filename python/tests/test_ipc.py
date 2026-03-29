@@ -136,6 +136,36 @@ class TestFrameReader:
         with pytest.raises(ValueError, match="message too large"):
             reader.next_frame()
 
+    def test_invalid_type_byte_drains_header_and_recovers(self):
+        reader = FrameReader()
+        bad_header = struct.pack("<BI", 0, 0)
+        good_frame = encode_frame(MsgType.DETECTION_FRAME, b"valid")
+        reader.feed(bad_header + good_frame)
+
+        with pytest.raises(ValueError, match="invalid wire type"):
+            reader.next_frame()
+
+        result = reader.next_frame()
+        assert result is not None
+        msg_type, payload = result
+        assert msg_type == MsgType.DETECTION_FRAME
+        assert payload == b"valid"
+
+    def test_oversized_length_drains_header_and_recovers(self):
+        reader = FrameReader()
+        bad_header = struct.pack("<BI", MsgType.DETECTION_FRAME, MAX_MESSAGE_SIZE + 1)
+        good_frame = encode_frame(MsgType.BEHAVIOR_COMMAND, b"valid")
+        reader.feed(bad_header + good_frame)
+
+        with pytest.raises(ValueError, match="message too large"):
+            reader.next_frame()
+
+        result = reader.next_frame()
+        assert result is not None
+        msg_type, payload = result
+        assert msg_type == MsgType.BEHAVIOR_COMMAND
+        assert payload == b"valid"
+
 
 # ---------------------------------------------------------------------------
 # Cross-language wire compatibility
@@ -472,6 +502,41 @@ class TestIpcClient:
             # Socket should be closed after exiting context.
             assert sock.fileno() == -1
             peer.close()
+
+    def test_send_preserves_recv_timeout(self):
+        with TemporaryDirectory() as tmpdir:
+            _, client_sock, peer_sock = _make_socket_pair(tmpdir)
+            try:
+                client = IpcClient(client_sock)
+                client.set_timeout(5.0)
+
+                cmd = pb.BehaviorCommand(laser_on=True)
+                client.send_behavior_command(cmd)
+
+                # The recv timeout must survive the send's temporary
+                # timeout swap. Verify via the underlying socket which
+                # IpcClient wraps.
+                assert client_sock.gettimeout() == 5.0
+            finally:
+                client_sock.close()
+                peer_sock.close()
+
+    def test_send_preserves_blocking_mode(self):
+        with TemporaryDirectory() as tmpdir:
+            _, client_sock, peer_sock = _make_socket_pair(tmpdir)
+            try:
+                client = IpcClient(client_sock)
+                # Default: blocking (timeout=None).
+                assert client_sock.gettimeout() is None
+
+                cmd = pb.BehaviorCommand(laser_on=True)
+                client.send_behavior_command(cmd)
+
+                # Must still be blocking after the send.
+                assert client_sock.gettimeout() is None
+            finally:
+                client_sock.close()
+                peer_sock.close()
 
     def test_connect_classmethod(self):
         with TemporaryDirectory() as tmpdir:

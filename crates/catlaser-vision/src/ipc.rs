@@ -524,14 +524,15 @@ impl IpcConnection {
 
     /// Writes the frame header into the reserved prefix of `write_buf`.
     fn backfill_header(&mut self, wire_type: WireType, len: u32) -> Result<(), IpcError> {
-        let header = self.write_buf.get_mut(..HEADER_SIZE).ok_or_else(|| {
-            IpcError::Send {
+        let header = self
+            .write_buf
+            .get_mut(..HEADER_SIZE)
+            .ok_or_else(|| IpcError::Send {
                 source: io::Error::new(
                     io::ErrorKind::InvalidData,
                     "write_buf shorter than header after encode",
                 ),
-            }
-        })?;
+            })?;
         let [type_slot, len_slots @ ..] = header else {
             // HEADER_SIZE is 5, get_mut(..5) succeeded — unreachable.
             return Err(IpcError::Send {
@@ -574,10 +575,11 @@ impl IpcConnection {
 
     /// Tries to extract one complete frame from `read_buf`.
     ///
-    /// If a complete header + payload is present, decodes and returns the
-    /// message. If the buffer contains a partial frame, returns `None`
-    /// without consuming any bytes — the next `drain_socket` call will
-    /// append more data.
+    /// If a complete header + payload is present, consumes the frame bytes
+    /// and decodes the protobuf message. The frame is consumed regardless
+    /// of decode success — a corrupt or unexpected frame must not poison
+    /// subsequent reads. If only a partial frame is buffered, returns
+    /// `None` without consuming bytes.
     fn try_parse_frame(&mut self) -> Result<Option<IncomingMessage>, IpcError> {
         if self.read_buf.len() < HEADER_SIZE {
             return Ok(None);
@@ -592,7 +594,16 @@ impl IpcConnection {
                 source: io::Error::new(io::ErrorKind::InvalidData, "header slice too short"),
             })?;
 
-        let header = decode_header(header_arr)?;
+        let header = match decode_header(header_arr) {
+            Ok(h) => h,
+            Err(err) => {
+                // Drain the invalid header so the reader can attempt resync
+                // on the next byte instead of re-parsing the same bad header
+                // on every call.
+                self.read_buf.drain(..HEADER_SIZE);
+                return Err(err);
+            }
+        };
         let payload_len =
             usize::try_from(header.length).map_err(|_err| IpcError::MessageTooLarge {
                 size: header.length,
@@ -614,13 +625,14 @@ impl IpcConnection {
                 source: io::Error::new(io::ErrorKind::InvalidData, "payload slice out of bounds"),
             })?;
 
-        let msg = decode_incoming(header.wire_type, payload)?;
+        let result = decode_incoming(header.wire_type, payload);
 
-        // Remove the consumed frame from the front of the buffer.
-        // Use drain to shift remaining bytes to the front efficiently.
+        // Drain the consumed frame regardless of decode success. A decode
+        // error (corrupt protobuf, unexpected wire type) must not leave
+        // stale bytes that poison subsequent reads.
         self.read_buf.drain(..frame_len);
 
-        Ok(Some(msg))
+        result.map(Some)
     }
 }
 
@@ -1248,6 +1260,119 @@ mod tests {
             matches!(result, Err(IpcError::UnexpectedWireType { .. })),
             "outbound-only wire type must be rejected, got {result:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Connection: error recovery (buffer not poisoned)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_wire_type_drains_header_and_recovers() {
+        let (server, _dir) = test_server();
+        let mut client = raw_client(&server);
+        let mut conn = accept_connection(&server);
+
+        // Send an invalid wire type (byte 0) with zero-length payload,
+        // followed by a valid BehaviorCommand.
+        let bad_header: [u8; HEADER_SIZE] = [0, 0, 0, 0, 0];
+        let cmd = BehaviorCommand {
+            target_track_id: 99_u32,
+            ..Default::default()
+        };
+        let payload = cmd.encode_to_vec();
+        let mut valid_frame = Vec::new();
+        encode_frame(WireType::BehaviorCommand, &payload, &mut valid_frame)
+            .expect("encode must succeed");
+
+        client
+            .write_all(&bad_header)
+            .expect("write bad header must succeed");
+        client
+            .write_all(&valid_frame)
+            .expect("write valid frame must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // First recv errors on the invalid header.
+        let result = conn.try_recv();
+        assert!(
+            matches!(result, Err(IpcError::InvalidWireType(0))),
+            "must reject invalid wire type, got {result:?}"
+        );
+
+        // Second recv succeeds — the bad header was drained, not re-parsed.
+        let msg = conn
+            .try_recv()
+            .expect("recv must not fail after recovery")
+            .expect("valid message must be available after recovery");
+        match msg {
+            IncomingMessage::BehaviorCommand(received) => {
+                assert_eq!(
+                    received.target_track_id, 99_u32,
+                    "track_id must survive recovery"
+                );
+            }
+            other => panic!("expected BehaviorCommand after recovery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unexpected_wire_type_drains_full_frame_and_recovers() {
+        let (server, _dir) = test_server();
+        let mut client = raw_client(&server);
+        let mut conn = accept_connection(&server);
+
+        // Send a DetectionFrame (outbound-only, rejected by decode_incoming)
+        // followed by a valid BehaviorCommand.
+        let outbound = DetectionFrame::default();
+        let outbound_payload = outbound.encode_to_vec();
+        let mut outbound_frame = Vec::new();
+        encode_frame(
+            WireType::DetectionFrame,
+            &outbound_payload,
+            &mut outbound_frame,
+        )
+        .expect("encode must succeed");
+
+        let cmd = BehaviorCommand {
+            target_track_id: 77_u32,
+            laser_on: true,
+            ..Default::default()
+        };
+        let cmd_payload = cmd.encode_to_vec();
+        let mut cmd_frame = Vec::new();
+        encode_frame(WireType::BehaviorCommand, &cmd_payload, &mut cmd_frame)
+            .expect("encode must succeed");
+
+        client
+            .write_all(&outbound_frame)
+            .expect("write outbound frame must succeed");
+        client
+            .write_all(&cmd_frame)
+            .expect("write cmd frame must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // First recv rejects the outbound-only wire type.
+        let result = conn.try_recv();
+        assert!(
+            matches!(result, Err(IpcError::UnexpectedWireType { .. })),
+            "must reject outbound wire type, got {result:?}"
+        );
+
+        // Second recv succeeds — the full rejected frame was drained.
+        let msg = conn
+            .try_recv()
+            .expect("recv must not fail after recovery")
+            .expect("valid message must be available after recovery");
+        match msg {
+            IncomingMessage::BehaviorCommand(received) => {
+                assert_eq!(
+                    received.target_track_id, 77_u32,
+                    "track_id must survive recovery"
+                );
+                assert!(received.laser_on, "laser_on must survive recovery");
+            }
+            other => panic!("expected BehaviorCommand after recovery, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
