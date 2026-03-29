@@ -1,0 +1,620 @@
+"""Behavior engine state machine for play session management.
+
+Drives the laser through five play phases -- lure, chase, tease, cooldown,
+dispense -- producing targeting commands for the Rust vision daemon. The
+state machine is pure: time is injected, no I/O, no database access. The
+caller translates between IPC protobuf messages and engine types.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import enum
+import math
+import random
+from typing import Final
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
+class State(enum.Enum):
+    """Behavior engine play states."""
+
+    IDLE = "idle"
+    LURE = "lure"
+    CHASE = "chase"
+    TEASE = "tease"
+    COOLDOWN = "cooldown"
+    DISPENSE = "dispense"
+
+
+class ChuteSide(enum.Enum):
+    """Treat dispenser chute exit side."""
+
+    LEFT = "left"
+    RIGHT = "right"
+
+
+class TargetingMode(enum.Enum):
+    """Laser targeting modes sent to the Rust vision daemon.
+
+    Maps 1:1 to ``TargetingMode`` in detection.proto.
+    """
+
+    IDLE = "idle"
+    TRACK = "track"
+    LEAD_TO_POINT = "lead_to_point"
+    DISPENSE = "dispense"
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CatObservation:
+    """Position and velocity of the target cat from a DetectionFrame.
+
+    All values are in normalized frame coordinates (0.0--1.0).
+    """
+
+    center_x: float
+    center_y: float
+    velocity_x: float
+    velocity_y: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Command:
+    """Targeting command for the Rust vision daemon.
+
+    Fields mirror ``BehaviorCommand`` in detection.proto. The caller
+    constructs the protobuf message from this dataclass.
+    """
+
+    mode: TargetingMode
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    smoothing: float = 0.5
+    max_speed: float = 0.5
+    laser_on: bool = False
+    target_track_id: int = 0
+    lead_target_x: float = 0.0
+    lead_target_y: float = 0.0
+    dispense_rotations: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SessionResult:
+    """Summary emitted when a play session completes.
+
+    The caller records this to SQLite and sends ``SessionEnd`` over IPC.
+    """
+
+    engagement_score: float
+    dispense_tier: int
+    dispense_rotations: int
+    active_play_time: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class EngineOutput:
+    """Output from each state machine update.
+
+    Attributes:
+        command: Targeting command to send to Rust.
+        session_ended: Set on the DISPENSE-to-IDLE transition. ``None``
+            while the session is active or when idle.
+    """
+
+    command: Command
+    session_ended: SessionResult | None = None
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DISPENSE_ROTATIONS: Final[tuple[int, int, int]] = (3, 5, 7)
+"""Treat disc rotation counts indexed by engagement tier (0, 1, 2)."""
+
+_IDLE_COMMAND: Final[Command] = Command(mode=TargetingMode.IDLE)
+
+_IDLE_OUTPUT: Final[EngineOutput] = EngineOutput(command=_IDLE_COMMAND)
+
+_ACTIVE_PLAY_STATES: Final[frozenset[State]] = frozenset(
+    {
+        State.LURE,
+        State.CHASE,
+        State.TEASE,
+    }
+)
+"""States representing active play before cooldown/dispense."""
+
+_ENGAGEMENT_STATES: Final[frozenset[State]] = frozenset(
+    {
+        State.CHASE,
+        State.TEASE,
+    }
+)
+"""States in which engagement metrics are accumulated."""
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class EngineConfig:
+    """Tuning parameters for the behavior engine state machine.
+
+    All durations are in seconds. Speed and smoothing values are in
+    normalized units matching the ``BehaviorCommand`` proto fields.
+    Per-cat profile adaptation (BUILD step 3) overrides a subset of
+    these at session start.
+    """
+
+    # -- Lure phase --
+    lure_min_duration: float = 2.0
+    lure_max_duration: float = 15.0
+    lure_smoothing: float = 0.8
+    lure_max_speed: float = 0.15
+    lure_engagement_velocity: float = 0.05
+
+    # -- Chase phase --
+    chase_smoothing: float = 0.5
+    chase_max_speed: float = 0.5
+    chase_min_before_tease: float = 5.0
+    chase_tease_interval_min: float = 8.0
+    chase_tease_interval_max: float = 15.0
+
+    # -- Tease phase --
+    tease_duration_min: float = 2.0
+    tease_duration_max: float = 4.0
+    tease_smoothing: float = 0.3
+    tease_max_speed: float = 0.7
+
+    # -- Cooldown phase --
+    cooldown_timeout: float = 15.0
+    cooldown_smoothing: float = 0.9
+    cooldown_max_speed: float = 0.1
+    cooldown_arrival_tolerance: float = 0.05
+
+    # -- Dispense phase --
+    dispense_duration: float = 3.0
+
+    # -- Session limits --
+    session_timeout: float = 300.0
+
+    # -- Track loss --
+    track_lost_timeout: float = 5.0
+
+    # -- Chute exit targets (normalized coords near device base) --
+    chute_left_x: float = 0.3
+    chute_left_y: float = 0.9
+    chute_right_x: float = 0.7
+    chute_right_y: float = 0.9
+
+    # -- Engagement scoring --
+    pounce_velocity_threshold: float = 0.15
+    velocity_normalization: float = 0.2
+    pounce_rate_normalization: float = 1.0
+    velocity_weight: float = 0.6
+    pounce_weight: float = 0.4
+    tier_low_threshold: float = 0.33
+    tier_high_threshold: float = 0.66
+
+
+# ---------------------------------------------------------------------------
+# Internal mutable state
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(slots=True)
+class _EngagementMetrics:
+    velocity_sum: float = 0.0
+    pounce_count: int = 0
+    active_frames: int = 0
+    active_time: float = 0.0
+
+
+@dataclasses.dataclass(slots=True)
+class _SessionState:
+    session_start: float = 0.0
+    state_entered_at: float = 0.0
+    target_track_id: int = 0
+    chute_side: ChuteSide = ChuteSide.LEFT
+    target_absent_since: float | None = None
+    next_tease_at: float = 0.0
+    tease_ends_at: float = 0.0
+    engagement: _EngagementMetrics = dataclasses.field(
+        default_factory=_EngagementMetrics,
+    )
+    last_update_time: float = 0.0
+    dispense_tier: int = 0
+    dispense_rotations: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+class BehaviorEngine:
+    """Play session state machine.
+
+    Pure state machine driving laser behavior through five play phases:
+    lure, chase, tease, cooldown, dispense. Time is injected via the
+    ``now`` parameter, randomness via an injected ``random.Random``
+    instance, and no I/O occurs. The caller handles IPC translation and
+    database writes.
+
+    Args:
+        config: Tuning parameters for all phases.
+        rng: Random number generator for tease interval scheduling.
+    """
+
+    __slots__ = ("_config", "_rng", "_session", "_state")
+
+    def __init__(self, config: EngineConfig, rng: random.Random) -> None:
+        self._config = config
+        self._rng = rng
+        self._state = State.IDLE
+        self._session = _SessionState()
+
+    @property
+    def state(self) -> State:
+        """Current behavior engine state."""
+        return self._state
+
+    @property
+    def target_track_id(self) -> int:
+        """Track ID of the current target cat. Zero when idle."""
+        return self._session.target_track_id
+
+    # -------------------------------------------------------------------
+    # Public API
+    # -------------------------------------------------------------------
+
+    def start_session(
+        self,
+        target_track_id: int,
+        chute_side: ChuteSide,
+        now: float,
+    ) -> EngineOutput:
+        """Begin a new play session targeting a specific cat track.
+
+        Args:
+            target_track_id: SORT tracker ID to follow.
+            chute_side: Which chute to lead the cat toward at session end.
+            now: Monotonic timestamp in seconds.
+
+        Returns:
+            Initial lure-phase command.
+
+        Raises:
+            RuntimeError: If a session is already active.
+        """
+        if self._state is not State.IDLE:
+            msg = f"cannot start session: engine is in {self._state.value} state"
+            raise RuntimeError(msg)
+
+        self._session = _SessionState(
+            session_start=now,
+            state_entered_at=now,
+            target_track_id=target_track_id,
+            chute_side=chute_side,
+            last_update_time=now,
+        )
+        self._state = State.LURE
+
+        return EngineOutput(command=self._make_command())
+
+    def stop_session(self, now: float) -> EngineOutput:
+        """Request graceful session end (app-triggered or timeout).
+
+        Transitions to COOLDOWN if in an active play state. No-op if
+        already in COOLDOWN, DISPENSE, or IDLE.
+
+        Args:
+            now: Monotonic timestamp in seconds.
+
+        Returns:
+            Command for the resulting state.
+        """
+        if self._state in _ACTIVE_PLAY_STATES:
+            self._begin_cooldown(now)
+        return EngineOutput(command=self._make_command())
+
+    def update(self, cat: CatObservation | None, now: float) -> EngineOutput:
+        """Process a detection frame tick.
+
+        Called at frame rate (~15 FPS). Updates engagement metrics and
+        evaluates state transitions based on timing and cat behavior.
+
+        Args:
+            cat: Target cat observation, or ``None`` if the target track
+                was not present in this frame.
+            now: Monotonic timestamp in seconds.
+
+        Returns:
+            Command for the current (possibly transitioned) state.
+        """
+        if self._state is State.IDLE:
+            return _IDLE_OUTPUT
+
+        s = self._session
+        dt = now - s.last_update_time
+        s.last_update_time = now
+
+        self._track_presence(cat, now)
+
+        if self._state in _ENGAGEMENT_STATES and cat is not None:
+            self._update_engagement(cat, dt)
+
+        if self._check_session_limits(now):
+            return EngineOutput(command=self._make_command())
+
+        tick_result = self._dispatch_tick(cat, now)
+        if tick_result is not None:
+            return tick_result
+
+        return EngineOutput(command=self._make_command())
+
+    def on_track_lost(self, track_id: int, now: float) -> EngineOutput:
+        """Handle a definitive track loss event from the SORT tracker.
+
+        If the lost track is the current target and the engine is in an
+        active play state, transitions to COOLDOWN for graceful session
+        end with treat dispensing.
+
+        Args:
+            track_id: The track that was lost.
+            now: Monotonic timestamp in seconds.
+
+        Returns:
+            Command for the resulting state.
+        """
+        if track_id == self._session.target_track_id and self._state in _ACTIVE_PLAY_STATES:
+            self._begin_cooldown(now)
+
+        return EngineOutput(command=self._make_command())
+
+    # -------------------------------------------------------------------
+    # Update helpers (extracted to keep update() under C901 threshold)
+    # -------------------------------------------------------------------
+
+    def _track_presence(
+        self,
+        cat: CatObservation | None,
+        now: float,
+    ) -> None:
+        s = self._session
+        if cat is not None:
+            s.target_absent_since = None
+        elif s.target_absent_since is None:
+            s.target_absent_since = now
+
+    def _check_session_limits(self, now: float) -> bool:
+        s = self._session
+        if (
+            self._state in _ACTIVE_PLAY_STATES
+            and now - s.session_start >= self._config.session_timeout
+        ):
+            self._begin_cooldown(now)
+            return True
+        if (
+            self._state in _ACTIVE_PLAY_STATES
+            and s.target_absent_since is not None
+            and now - s.target_absent_since >= self._config.track_lost_timeout
+        ):
+            self._begin_cooldown(now)
+            return True
+        return False
+
+    def _dispatch_tick(
+        self,
+        cat: CatObservation | None,
+        now: float,
+    ) -> EngineOutput | None:
+        match self._state:
+            case State.LURE:
+                self._tick_lure(cat, now)
+            case State.CHASE:
+                self._tick_chase(now)
+            case State.TEASE:
+                self._tick_tease(now)
+            case State.COOLDOWN:
+                return self._tick_cooldown(cat, now)
+            case State.DISPENSE:
+                return self._tick_dispense(now)
+            case State.IDLE:
+                pass
+        return None
+
+    # -------------------------------------------------------------------
+    # State transitions
+    # -------------------------------------------------------------------
+
+    def _transition(self, new_state: State, now: float) -> None:
+        self._state = new_state
+        self._session.state_entered_at = now
+
+    def _begin_cooldown(self, now: float) -> None:
+        tier = self._compute_dispense_tier()
+        self._session.dispense_tier = tier
+        self._session.dispense_rotations = DISPENSE_ROTATIONS[tier]
+        self._transition(State.COOLDOWN, now)
+
+    def _begin_chase(self, now: float) -> None:
+        self._transition(State.CHASE, now)
+        self._schedule_next_tease(now)
+
+    def _schedule_next_tease(self, now: float) -> None:
+        cfg = self._config
+        interval = self._rng.uniform(
+            cfg.chase_tease_interval_min,
+            cfg.chase_tease_interval_max,
+        )
+        self._session.next_tease_at = now + interval
+
+    # -------------------------------------------------------------------
+    # Per-state tick logic
+    # -------------------------------------------------------------------
+
+    def _tick_lure(self, cat: CatObservation | None, now: float) -> None:
+        time_in_lure = now - self._session.state_entered_at
+        cfg = self._config
+
+        if time_in_lure >= cfg.lure_max_duration:
+            self._begin_chase(now)
+            return
+
+        if time_in_lure >= cfg.lure_min_duration and cat is not None:
+            speed = math.hypot(cat.velocity_x, cat.velocity_y)
+            if speed >= cfg.lure_engagement_velocity:
+                self._begin_chase(now)
+
+    def _tick_chase(self, now: float) -> None:
+        time_in_chase = now - self._session.state_entered_at
+        cfg = self._config
+
+        if time_in_chase >= cfg.chase_min_before_tease and now >= self._session.next_tease_at:
+            duration = self._rng.uniform(
+                cfg.tease_duration_min,
+                cfg.tease_duration_max,
+            )
+            self._session.tease_ends_at = now + duration
+            self._transition(State.TEASE, now)
+
+    def _tick_tease(self, now: float) -> None:
+        if now >= self._session.tease_ends_at:
+            self._begin_chase(now)
+
+    def _tick_cooldown(
+        self,
+        cat: CatObservation | None,
+        now: float,
+    ) -> EngineOutput:
+        time_in_cooldown = now - self._session.state_entered_at
+
+        if time_in_cooldown >= self._config.cooldown_timeout:
+            self._transition(State.DISPENSE, now)
+            return EngineOutput(command=self._make_command())
+
+        if cat is not None:
+            tx, ty = self._chute_target()
+            distance = math.hypot(cat.center_x - tx, cat.center_y - ty)
+            if distance <= self._config.cooldown_arrival_tolerance:
+                self._transition(State.DISPENSE, now)
+                return EngineOutput(command=self._make_command())
+
+        return EngineOutput(command=self._make_command())
+
+    def _tick_dispense(self, now: float) -> EngineOutput:
+        if now - self._session.state_entered_at >= self._config.dispense_duration:
+            s = self._session
+            result = SessionResult(
+                engagement_score=self._compute_engagement_score(),
+                dispense_tier=s.dispense_tier,
+                dispense_rotations=s.dispense_rotations,
+                active_play_time=s.engagement.active_time,
+            )
+            self._state = State.IDLE
+            self._session = _SessionState()
+            return EngineOutput(command=_IDLE_COMMAND, session_ended=result)
+
+        return EngineOutput(command=self._make_command())
+
+    # -------------------------------------------------------------------
+    # Command construction
+    # -------------------------------------------------------------------
+
+    def _make_command(self) -> Command:
+        match self._state:
+            case State.IDLE:
+                return _IDLE_COMMAND
+            case State.LURE:
+                return Command(
+                    mode=TargetingMode.TRACK,
+                    smoothing=self._config.lure_smoothing,
+                    max_speed=self._config.lure_max_speed,
+                    laser_on=True,
+                    target_track_id=self._session.target_track_id,
+                )
+            case State.CHASE:
+                return Command(
+                    mode=TargetingMode.TRACK,
+                    smoothing=self._config.chase_smoothing,
+                    max_speed=self._config.chase_max_speed,
+                    laser_on=True,
+                    target_track_id=self._session.target_track_id,
+                )
+            case State.TEASE:
+                return Command(
+                    mode=TargetingMode.TRACK,
+                    smoothing=self._config.tease_smoothing,
+                    max_speed=self._config.tease_max_speed,
+                    laser_on=True,
+                    target_track_id=self._session.target_track_id,
+                )
+            case State.COOLDOWN:
+                tx, ty = self._chute_target()
+                return Command(
+                    mode=TargetingMode.LEAD_TO_POINT,
+                    smoothing=self._config.cooldown_smoothing,
+                    max_speed=self._config.cooldown_max_speed,
+                    laser_on=True,
+                    target_track_id=self._session.target_track_id,
+                    lead_target_x=tx,
+                    lead_target_y=ty,
+                )
+            case State.DISPENSE:
+                return Command(
+                    mode=TargetingMode.DISPENSE,
+                    laser_on=False,
+                    dispense_rotations=self._session.dispense_rotations,
+                )
+
+    def _chute_target(self) -> tuple[float, float]:
+        cfg = self._config
+        if self._session.chute_side is ChuteSide.LEFT:
+            return cfg.chute_left_x, cfg.chute_left_y
+        return cfg.chute_right_x, cfg.chute_right_y
+
+    # -------------------------------------------------------------------
+    # Engagement scoring
+    # -------------------------------------------------------------------
+
+    def _update_engagement(self, cat: CatObservation, dt: float) -> None:
+        speed = math.hypot(cat.velocity_x, cat.velocity_y)
+        m = self._session.engagement
+        m.velocity_sum += speed
+        m.active_frames += 1
+        m.active_time += dt
+        if speed >= self._config.pounce_velocity_threshold:
+            m.pounce_count += 1
+
+    def _compute_engagement_score(self) -> float:
+        m = self._session.engagement
+        cfg = self._config
+        if m.active_frames == 0 or m.active_time < 1.0:
+            return 0.0
+        avg_velocity = m.velocity_sum / m.active_frames
+        pounce_rate = m.pounce_count / m.active_time
+        vel_score = min(avg_velocity / cfg.velocity_normalization, 1.0)
+        pounce_score = min(pounce_rate / cfg.pounce_rate_normalization, 1.0)
+        return cfg.velocity_weight * vel_score + cfg.pounce_weight * pounce_score
+
+    def _compute_dispense_tier(self) -> int:
+        score = self._compute_engagement_score()
+        cfg = self._config
+        if score >= cfg.tier_high_threshold:
+            return 2
+        if score >= cfg.tier_low_threshold:
+            return 1
+        return 0

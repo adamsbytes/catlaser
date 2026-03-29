@@ -39,7 +39,7 @@
   - [X] Embedding comparison + catalog matching (Python side)
 
 [ ] Behavior Engine (catlaser_brain)
-  - [ ] State machine (lure / chase / tease / cooldown / dispense)
+  - [X] State machine (lure / chase / tease / cooldown / dispense)
   - [ ] Engagement tracking (cat velocity, pounce count, time-on-target)
   - [ ] Per-cat profile adaptation (speed, smoothing, pattern randomness)
   - [ ] Pattern generation (offset streaming per-frame to Rust)
