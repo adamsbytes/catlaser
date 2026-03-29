@@ -303,20 +303,21 @@ const fn baud_to_speed(baud: u32) -> libc::speed_t {
 ///
 /// A single `libc::write` for 8 bytes on a blocking UART completes
 /// atomically in practice, but a signal delivered during the transfer
-/// can cause a short write. This loop retries until all bytes are sent.
-/// Returns [`SerialError::WriteStall`] if a write returns zero bytes
-/// (device gone / broken pipe).
+/// can cause a short write or an `EINTR`. This loop retries both cases
+/// until all bytes are sent. Returns [`SerialError::WriteStall`] if a
+/// write returns zero bytes (device gone / broken pipe).
 fn write_all_fd(fd: &OwnedFd, buf: &[u8]) -> Result<(), SerialError> {
     let mut writer = fd_to_write(fd);
     let mut sent = 0_usize;
     while sent < buf.len() {
-        let n = writer
-            .write(buf.get(sent..).unwrap_or_default())
-            .map_err(SerialError::Write)?;
-        if n == 0_usize {
-            return Err(SerialError::WriteStall { sent });
+        match writer.write(buf.get(sent..).unwrap_or_default()) {
+            Ok(0_usize) => return Err(SerialError::WriteStall { sent }),
+            Ok(n) => sent = sent.saturating_add(n),
+            // Signal interrupted the write before any bytes transferred.
+            // Retry at the same offset — standard POSIX pattern.
+            Err(err) if err.raw_os_error() == Some(libc::EINTR) => {}
+            Err(err) => return Err(SerialError::Write(err)),
         }
-        sent = sent.saturating_add(n);
     }
     Ok(())
 }

@@ -177,17 +177,61 @@ pub(crate) struct FrameResult {
 // Pure logic
 // ---------------------------------------------------------------------------
 
-/// Selects the target track from active tracks.
+/// Hysteresis bonus for the current target's score. A competing cat
+/// must exceed the current target's raw score by this margin to steal
+/// targeting, preventing frame-to-frame ping-pong between cats with
+/// similar activity levels.
+const TARGET_SWITCH_MARGIN: f32 = 2.0_f32;
+
+/// Engagement score for a confirmed track.
 ///
-/// Returns the confirmed track with the lowest ID (most established).
-/// Returns `None` when no confirmed tracks exist — only confirmed
-/// tracks are eligible for targeting because tentative tracks may be
-/// false positives and coasting tracks have no current observation.
-pub(crate) fn select_target(tracks: &[Track]) -> Option<&Track> {
-    tracks
-        .iter()
-        .filter(|t| t.state() == TrackState::Confirmed)
-        .min_by_key(|t| t.id())
+/// Components:
+/// - **Speed**: positional velocity magnitude. Faster cats are more
+///   engaged. Dominates the score — a fast cat is clearly playing.
+/// - **Freshness**: consecutive hit count (capped at 10). More hits
+///   means more reliable tracking, slight tiebreaker for equally
+///   active cats.
+///
+/// Scale: speed is ~0-0.15 per frame for an active cat; freshness
+/// adds 0-1.0. The hysteresis margin (2.0) dwarfs both, ensuring
+/// switches only happen on sustained, obvious engagement differences.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "hits clamped to 10 then cast u32→u8→f32; value 0-10 is exact in all types"
+)]
+pub(crate) fn track_score(track: &Track) -> f32 {
+    let vel = track.velocity();
+    let speed = vel[0].hypot(vel[1]);
+    let freshness = f32::from(track.hits().min(10_u32) as u8) * 0.1_f32;
+    speed + freshness
+}
+
+/// Selects the target track with engagement-based scoring and hysteresis.
+///
+/// With a single confirmed cat, always selects it (identical to the
+/// previous lowest-ID strategy). With multiple cats, prefers the most
+/// active cat but strongly resists switching away from the current
+/// target to prevent distracting ping-pong.
+///
+/// Returns `None` when no confirmed tracks exist.
+pub(crate) fn select_target(tracks: &[Track], current_target_id: Option<u32>) -> Option<&Track> {
+    let mut best: Option<(&Track, f32)> = None;
+
+    for track in tracks.iter().filter(|t| t.state() == TrackState::Confirmed) {
+        let mut score = track_score(track);
+
+        if Some(track.id()) == current_target_id {
+            score += TARGET_SWITCH_MARGIN;
+        }
+
+        if best.is_none_or(|(_, s)| score > s) {
+            best = Some((track, score));
+        }
+    }
+
+    best.map(|(track, _)| track)
 }
 
 /// Default behavior parameters when no Python behavior engine is connected.
@@ -265,6 +309,14 @@ pub(crate) struct Pipeline {
     current_pan: i16,
     /// Current tilt angle (centidegrees). Tracks what was last commanded.
     current_tilt: i16,
+    /// Track ID of the currently targeted cat, for switch hysteresis.
+    current_target_id: Option<u32>,
+    /// Person-in-frame flag from the previous frame. On the true→false
+    /// transition, the MCU hasn't yet received the relaxed command, so
+    /// state clamping must use the stricter person limit for one frame.
+    prev_person_in_frame: bool,
+    /// Stale frames drained since pipeline init (diagnostic counter).
+    frames_drained: u64,
     /// Total frames processed since pipeline init.
     frame_count: u64,
 }
@@ -325,6 +377,9 @@ impl Pipeline {
             serial,
             current_pan: PAN_HOME,
             current_tilt: TILT_HOME,
+            current_target_id: None,
+            prev_person_in_frame: false,
+            frames_drained: 0_u64,
             frame_count: 0_u64,
         })
     }
@@ -338,16 +393,38 @@ impl Pipeline {
     /// by the caller; other errors are fatal.
     pub(crate) fn run_frame(&mut self) -> Result<FrameResult, PipelineError> {
         // --- Capture ---
-        // Scope the frame borrow: extract metadata and copy pixels to the
-        // NPU, then end the borrow so the buffer can be re-queued.
-        let (sequence, frame_index) = {
-            let frame = self.camera.capture_frame()?;
-            let seq = frame.sequence();
-            let idx = frame.index();
-            self.model.set_input(frame.data())?;
-            (seq, idx)
+        // Capture the freshest available frame by draining any stale
+        // frames queued in the V4L2 buffer ring. When inference is slow
+        // (thermal throttle), multiple frames accumulate; processing the
+        // oldest would cause oscillation because the camera has moved
+        // since capture. Each drain iteration costs one NV12 memcpy
+        // (~100 us) but avoids the ~30-60 ms NPU inference on stale data.
+        const MAX_DRAIN: u32 = 3_u32;
+        let mut drained = 0_u32;
+
+        let sequence = loop {
+            let (seq, idx) = {
+                let frame = self.camera.capture_frame()?;
+                let s = frame.sequence();
+                let i = frame.index();
+                self.model.set_input(frame.data())?;
+                (s, i)
+            };
+            self.camera.return_frame(idx)?;
+
+            if drained < MAX_DRAIN && self.camera.has_pending_frame()? {
+                tracing::warn!(
+                    seq,
+                    drain = drained.saturating_add(1_u32),
+                    "replacing stale frame"
+                );
+                self.frames_drained = self.frames_drained.saturating_add(1_u64);
+                drained = drained.saturating_add(1_u32);
+                continue;
+            }
+
+            break seq;
         };
-        self.camera.return_frame(frame_index)?;
 
         // --- Inference ---
         self.model.run()?;
@@ -372,7 +449,7 @@ impl Pipeline {
         let track_count = self.tracker.tracks().len();
 
         // --- Targeting ---
-        let target = select_target(self.tracker.tracks());
+        let target = select_target(self.tracker.tracks(), self.current_target_id);
         let tracking = target.is_some();
         let target_track_id = target.map(Track::id);
 
@@ -395,8 +472,17 @@ impl Pipeline {
         // actually pointing.  Without this, commands beyond the MCU's
         // horizon limit cause `current_tilt` to diverge from the physical
         // servo position, producing oscillation/jitter near the limit.
+        //
+        // Use the stricter of current and previous person_in_frame for
+        // tilt clamping. On the true→false transition, the MCU is still
+        // executing the previous command under the person limit for one
+        // frame period (~67 ms). Clamping conservatively keeps
+        // current_tilt aligned with the MCU's actual servo position.
         self.current_pan = servo_math::clamp_pan(solution.pan);
-        self.current_tilt = servo_math::clamp_tilt(solution.tilt, safety.person_in_frame);
+        let clamp_person = self.prev_person_in_frame || safety.person_in_frame;
+        self.current_tilt = servo_math::clamp_tilt(solution.tilt, clamp_person);
+        self.prev_person_in_frame = safety.person_in_frame;
+        self.current_target_id = target_track_id;
         self.frame_count = self.frame_count.saturating_add(1_u64);
 
         Ok(FrameResult {
@@ -415,6 +501,11 @@ impl Pipeline {
     /// Returns the total number of frames processed since initialization.
     pub(crate) fn frame_count(&self) -> u64 {
         self.frame_count
+    }
+
+    /// Returns the total number of stale frames drained since initialization.
+    pub(crate) fn frames_drained(&self) -> u64 {
+        self.frames_drained
     }
 }
 
@@ -521,7 +612,7 @@ mod tests {
     #[test]
     fn test_select_target_empty_tracks() {
         assert!(
-            select_target(&[]).is_none(),
+            select_target(&[], None).is_none(),
             "no tracks must produce no target"
         );
     }
@@ -538,7 +629,7 @@ mod tests {
             "tracker must have created a tentative track"
         );
         assert!(
-            select_target(tracks).is_none(),
+            select_target(tracks, None).is_none(),
             "tentative tracks must not be selected as target"
         );
     }
@@ -550,7 +641,7 @@ mod tests {
         let tracker = run_tracker(&[&[det], &[det], &[det]]);
         let tracks = tracker.tracks();
 
-        let target = select_target(tracks);
+        let target = select_target(tracks, None);
         assert!(
             target.is_some(),
             "confirmed track must be selected as target"
@@ -563,35 +654,30 @@ mod tests {
     }
 
     #[test]
-    fn test_select_target_multiple_confirmed_picks_lowest_id() {
+    fn test_select_target_multiple_confirmed_picks_one() {
         // Two detections at different positions, both confirmed.
+        // Without hysteresis, the highest-scoring confirmed track wins.
         let det_a = cat_detection(100.0_f32, 100.0_f32, 50.0_f32);
         let det_b = cat_detection(500.0_f32, 400.0_f32, 50.0_f32);
         let both = [det_a, det_b];
         let tracker = run_tracker(&[&both, &both, &both]);
         let tracks = tracker.tracks();
 
-        let confirmed: Vec<_> = tracks
+        let confirmed_count = tracks
             .iter()
             .filter(|t| t.state() == TrackState::Confirmed)
-            .collect();
+            .count();
         assert!(
-            confirmed.len() >= 2_usize,
+            confirmed_count >= 2_usize,
             "must have at least 2 confirmed tracks"
         );
 
-        let target = select_target(tracks);
+        let target = select_target(tracks, None);
         assert!(target.is_some(), "must select a target");
-
-        let min_id = confirmed
-            .iter()
-            .map(|t| t.id())
-            .min()
-            .expect_or_log("confirmed tracks must be non-empty");
         assert_eq!(
-            target.map(Track::id),
-            Some(min_id),
-            "must select the confirmed track with lowest ID"
+            target.map(Track::state),
+            Some(TrackState::Confirmed),
+            "selected track must be confirmed"
         );
     }
 
@@ -608,7 +694,7 @@ mod tests {
         }
 
         // Verify confirmed.
-        let pre_coast = select_target(tracker.tracks());
+        let pre_coast = select_target(tracker.tracks(), None);
         assert!(
             pre_coast.is_some(),
             "track must be confirmed before coasting test"
@@ -622,7 +708,7 @@ mod tests {
         assert!(has_coasting, "track must have transitioned to coasting");
 
         assert!(
-            select_target(tracks).is_none(),
+            select_target(tracks, None).is_none(),
             "coasting tracks must not be selected as target"
         );
     }
@@ -656,12 +742,114 @@ mod tests {
             "must have both confirmed and coasting tracks for this test"
         );
 
-        let target = select_target(tracks);
+        let target = select_target(tracks, None);
         assert!(target.is_some(), "must select a target");
         assert_eq!(
             target.map(Track::state),
             Some(TrackState::Confirmed),
             "must select the confirmed track, not the coasting one"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-cat engagement scoring and hysteresis
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_track_score_stationary_uses_freshness() {
+        // A confirmed track that has been stationary for 3 frames should
+        // have a score based only on freshness: 3 * 0.1 = 0.3.
+        let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
+        let tracker = run_tracker(&[&[det], &[det], &[det]]);
+        let target = select_target(tracker.tracks(), None);
+        let track = target.expect_or_log("must have a confirmed target");
+
+        let score = track_score(track);
+        assert!(
+            score >= 0.0_f32,
+            "stationary track must have non-negative score, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_select_target_hysteresis_retains_current() {
+        // Two confirmed cats at different positions. When one is the
+        // current target, hysteresis should retain it even though both
+        // have similar activity levels (both stationary).
+        let det_a = cat_detection(100.0_f32, 100.0_f32, 50.0_f32);
+        let det_b = cat_detection(500.0_f32, 400.0_f32, 50.0_f32);
+        let both = [det_a, det_b];
+        let tracker = run_tracker(&[&both, &both, &both]);
+        let tracks = tracker.tracks();
+
+        let confirmed: Vec<_> = tracks
+            .iter()
+            .filter(|t| t.state() == TrackState::Confirmed)
+            .collect();
+        assert!(
+            confirmed.len() >= 2_usize,
+            "must have at least 2 confirmed tracks"
+        );
+
+        // First selection without hysteresis picks whatever scores highest.
+        let first = select_target(tracks, None);
+        assert!(first.is_some(), "must select a target");
+        let first_id = first.map(Track::id);
+
+        // Second selection with hysteresis on the same target retains it.
+        let second = select_target(tracks, first_id);
+        assert_eq!(
+            second.map(Track::id),
+            first_id,
+            "hysteresis must retain the current target"
+        );
+
+        // Third selection with hysteresis on the OTHER target retains that one.
+        let other_id = confirmed
+            .iter()
+            .map(|t| t.id())
+            .find(|&id| Some(id) != first_id);
+        let third = select_target(tracks, other_id);
+        assert_eq!(
+            third.map(Track::id),
+            other_id,
+            "hysteresis must retain whichever track is current"
+        );
+    }
+
+    #[test]
+    fn test_select_target_dead_target_switches() {
+        // When the current target's track dies (removed from tracks),
+        // the best remaining track is selected without hysteresis penalty.
+        let det_a = cat_detection(100.0_f32, 100.0_f32, 50.0_f32);
+        let det_b = cat_detection(500.0_f32, 400.0_f32, 50.0_f32);
+        let both = [det_a, det_b];
+        let mut tracker = Tracker::new(TrackerConfig::default());
+
+        // Confirm both tracks.
+        for _ in 0_u32..3_u32 {
+            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32);
+        }
+
+        let first = select_target(tracker.tracks(), None);
+        let first_id = first.map(Track::id);
+
+        // Feed only det_b — det_a's track starts coasting, then dies.
+        for _ in 0_u32..31_u32 {
+            tracker.update(&[det_b], 640.0_f32, 480.0_f32);
+        }
+
+        // The old target is gone. Selection with the dead ID should
+        // still pick the surviving track.
+        let surviving = select_target(tracker.tracks(), first_id);
+        assert!(
+            surviving.is_some(),
+            "must select the surviving confirmed track"
+        );
+        assert_ne!(
+            surviving.map(Track::id),
+            first_id,
+            "must switch away from the dead target"
         );
     }
 
@@ -738,7 +926,7 @@ mod tests {
         // Create a confirmed track at frame center.
         let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
         let tracker = run_tracker(&[&[det], &[det], &[det]]);
-        let target = select_target(tracker.tracks());
+        let target = select_target(tracker.tracks(), None);
         assert!(
             target.is_some(),
             "must have a confirmed target for this test"
@@ -778,7 +966,7 @@ mod tests {
         // Create a confirmed track near the top of the frame (low y = above ceiling).
         let det = cat_detection(320.0_f32, 48.0_f32, 50.0_f32);
         let tracker = run_tracker(&[&[det], &[det], &[det]]);
-        let target = select_target(tracker.tracks());
+        let target = select_target(tracker.tracks(), None);
         assert!(target.is_some(), "must have a confirmed target");
 
         let solution = compute_solution(&targeter, target, safety, 0_i16, 4500_i16);
@@ -813,7 +1001,7 @@ mod tests {
         // Confirmed track near bottom-right of frame.
         let det = cat_detection(500.0_f32, 400.0_f32, 60.0_f32);
         let tracker = run_tracker(&[&[det], &[det], &[det]]);
-        let target = select_target(tracker.tracks());
+        let target = select_target(tracker.tracks(), None);
         assert!(target.is_some(), "must have a confirmed target");
         let tracking = target.is_some();
 
@@ -904,7 +1092,7 @@ mod tests {
 
         let det = cat_detection(200.0_f32, 300.0_f32, 80.0_f32);
         let tracker = run_tracker(&[&[det], &[det], &[det]]);
-        let target = select_target(tracker.tracks());
+        let target = select_target(tracker.tracks(), None);
         let tracking = target.is_some();
 
         let solution = compute_solution(&targeter, target, safety, 1000_i16, 2000_i16);
@@ -1001,7 +1189,7 @@ mod tests {
         // Confirmed track near top of frame.
         let det = cat_detection(320.0_f32, 10.0_f32, 30.0_f32);
         let tracker = run_tracker(&[&[det], &[det], &[det]]);
-        let target = select_target(tracker.tracks());
+        let target = select_target(tracker.tracks(), None);
         assert!(target.is_some(), "must have confirmed target");
 
         // Start with tilt near the horizon limit.
@@ -1027,10 +1215,105 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Person-transition conservative clamping
+    // -----------------------------------------------------------------------
+
+    /// Simulates the pipeline's conservative tilt clamping that accounts
+    /// for the one-frame MCU command latency on person-detected transitions.
+    fn conservative_clamp_tilt(solution_tilt: i16, prev_person: bool, current_person: bool) -> i16 {
+        servo_math::clamp_tilt(solution_tilt, prev_person || current_person)
+    }
+
+    #[test]
+    fn test_state_tilt_conservative_on_person_transition() {
+        // When person_in_frame transitions true→false, the MCU is still
+        // executing the previous command under the person limit. Tilt at
+        // 0 (horizontal) must clamp to TILT_HORIZON_LIMIT_PERSON (500).
+        let clamped = conservative_clamp_tilt(0_i16, true, false);
+
+        assert_eq!(
+            clamped, TILT_HORIZON_LIMIT_PERSON,
+            "transition frame must use person limit"
+        );
+    }
+
+    #[test]
+    fn test_state_tilt_relaxes_after_transition() {
+        // One frame after the transition, prev_person is false and
+        // the MCU has had time to process the relaxed command.
+        let clamped = conservative_clamp_tilt(0_i16, false, false);
+
+        assert_eq!(
+            clamped, 0_i16,
+            "post-transition frame must use relaxed limit"
+        );
+    }
+
+    #[test]
+    fn test_state_tilt_no_effect_sustained_person() {
+        // Both frames have person — person limit applies as usual.
+        let clamped = conservative_clamp_tilt(200_i16, true, true);
+
+        assert_eq!(
+            clamped, TILT_HORIZON_LIMIT_PERSON,
+            "sustained person must use person limit"
+        );
+    }
+
+    #[test]
+    fn test_state_tilt_no_effect_no_person() {
+        // Neither frame has person — relaxed limit.
+        let clamped = conservative_clamp_tilt(-500_i16, false, false);
+
+        assert_eq!(clamped, -500_i16, "no person must use relaxed limit");
+    }
+
+    #[test]
+    fn test_state_tilt_person_appearing_uses_person_limit() {
+        // Person appears this frame (false→true). The command sent
+        // this frame has person_detected=true, so the person limit
+        // is correct for both the MCU (which will receive it shortly)
+        // and the conservative clamp.
+        let clamped = conservative_clamp_tilt(0_i16, false, true);
+
+        assert_eq!(
+            clamped, TILT_HORIZON_LIMIT_PERSON,
+            "person appearing must use person limit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Proptests
     // -----------------------------------------------------------------------
 
     proptest! {
+        #[test]
+        fn test_conservative_clamp_always_safe_for_both_states(
+            solution_tilt in any::<i16>(),
+            prev_person in any::<bool>(),
+            current_person in any::<bool>(),
+        ) {
+            let clamped = conservative_clamp_tilt(solution_tilt, prev_person, current_person);
+
+            // The clamped value must satisfy the strictest limit that either
+            // the previous or current command imposes — because the MCU may
+            // be executing either one during the transition window.
+            let prev_min = if prev_person { TILT_HORIZON_LIMIT_PERSON } else { TILT_HORIZON_LIMIT };
+            let curr_min = if current_person { TILT_HORIZON_LIMIT_PERSON } else { TILT_HORIZON_LIMIT };
+            let strictest_min = prev_min.max(curr_min);
+
+            prop_assert!(
+                clamped >= strictest_min,
+                "conservative clamp {} must be >= strictest limit {} (prev={}, curr={})",
+                clamped, strictest_min, prev_person, current_person,
+            );
+            prop_assert!(
+                clamped <= TILT_LIMIT_MAX,
+                "conservative clamp {} must be <= TILT_LIMIT_MAX {}",
+                clamped, TILT_LIMIT_MAX,
+            );
+        }
+
         #[test]
         fn test_select_target_never_returns_non_confirmed(
             n_frames in 1_usize..=10_usize,
@@ -1040,7 +1323,7 @@ mod tests {
             let refs: Vec<&[Detection]> = (0..n_frames).map(|_| dets.as_slice()).collect();
             let tracker = run_tracker(&refs);
 
-            if let Some(target) = select_target(tracker.tracks()) {
+            if let Some(target) = select_target(tracker.tracks(), None) {
                 prop_assert_eq!(
                     target.state(),
                     TrackState::Confirmed,
@@ -1050,7 +1333,7 @@ mod tests {
         }
 
         #[test]
-        fn test_select_target_returns_minimum_confirmed_id(
+        fn test_select_target_always_confirmed_with_multiple(
             n_extra_frames in 0_usize..=5_usize,
         ) {
             // Two tracks, confirmed (3 + extra frames).
@@ -1069,13 +1352,15 @@ mod tests {
                 .map(Track::id)
                 .collect();
 
-            if let (Some(target), Some(&min_id)) =
-                (select_target(tracker.tracks()), confirmed_ids.iter().min())
-            {
+            if let Some(target) = select_target(tracker.tracks(), None) {
                 prop_assert_eq!(
-                    target.id(),
-                    min_id,
-                    "must select confirmed track with minimum ID",
+                    target.state(),
+                    TrackState::Confirmed,
+                    "must select a confirmed track",
+                );
+                prop_assert!(
+                    confirmed_ids.contains(&target.id()),
+                    "selected track ID must be in confirmed set",
                 );
             }
         }
@@ -1108,7 +1393,7 @@ mod tests {
             // Track at a fixed position — we're testing angle bounds, not tracking.
             let det = cat_detection(320.0_f32, 240.0_f32, 50.0_f32);
             let tracker = run_tracker(&[&[det], &[det], &[det]]);
-            let target = select_target(tracker.tracks());
+            let target = select_target(tracker.tracks(), None);
 
             let solution = compute_solution(
                 &targeter,
@@ -1174,7 +1459,7 @@ mod tests {
             let target = if has_cat {
                 let det = cat_detection(400.0_f32, 350.0_f32, 60.0_f32);
                 let tracker = run_tracker(&[&[det], &[det], &[det]]);
-                select_target(tracker.tracks()).map(Track::id)
+                select_target(tracker.tracks(), None).map(Track::id)
             } else {
                 None
             };
@@ -1186,7 +1471,7 @@ mod tests {
                 let tracker = run_tracker(&[&[det], &[det], &[det]]);
                 compute_solution(
                     &targeter,
-                    select_target(tracker.tracks()),
+                    select_target(tracker.tracks(), None),
                     safety,
                     current_pan,
                     current_tilt,

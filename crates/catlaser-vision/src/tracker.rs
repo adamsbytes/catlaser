@@ -1145,6 +1145,16 @@ impl Track {
     pub(crate) const fn class_id(&self) -> u16 {
         self.class_id
     }
+
+    /// Consecutive frames with a matched detection (reset to 0 on coast).
+    pub(crate) const fn hits(&self) -> u32 {
+        self.hits
+    }
+
+    /// Consecutive frames without a matched detection (0 when confirmed).
+    pub(crate) const fn coast_frames(&self) -> u32 {
+        self.coast_frames
+    }
 }
 
 // ---------------------------------------------------------------------------

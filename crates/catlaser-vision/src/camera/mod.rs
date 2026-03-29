@@ -303,6 +303,22 @@ impl Camera {
         Ok(())
     }
 
+    /// Returns `true` if a completed frame is immediately available.
+    ///
+    /// Uses a zero-timeout poll — returns instantly without blocking.
+    /// Detects frames queued in the V4L2 buffer ring that are fresher
+    /// than the one just captured. EINTR from signal delivery during
+    /// the poll is treated as "not ready" (safe, non-blocking).
+    pub(crate) fn has_pending_frame(&self) -> Result<bool, CameraError> {
+        match v4l2::poll_frame(self.device_fd.as_fd(), 0_i32) {
+            Ok(ready) => Ok(ready),
+            Err(CameraError::Poll { source }) if source.raw_os_error() == Some(libc::EINTR) => {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Stops the capture stream and implicitly dequeues all buffers.
     pub(crate) fn stop_streaming(&mut self) -> Result<(), CameraError> {
         if !self.streaming {

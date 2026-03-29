@@ -128,7 +128,8 @@ fn run() -> Result<(), PipelineError> {
     }
 
     let frames = pipeline.frame_count();
-    tracing::info!(frames, "shutdown requested, cleaning up");
+    let drained = pipeline.frames_drained();
+    tracing::info!(frames, drained, "shutdown requested, cleaning up");
     drop(pipeline);
     tracing::info!("shutdown complete");
     Ok(())
