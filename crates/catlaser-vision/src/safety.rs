@@ -44,6 +44,18 @@ const CEILING_HEIGHT_FRACTION: f32 = 0.75_f32;
 /// safety constraint.
 const CEILING_HOLD_FRAMES: u32 = 30_u32;
 
+/// Exponential smoothing factor for ceiling relaxation.
+///
+/// When a new frame's ceiling is less restrictive (lower y) than the
+/// held value, the ceiling blends toward it at this rate rather than
+/// jumping immediately. This filters single-frame INT8 bbox size
+/// flicker that would cause visible laser jitter near the boundary.
+///
+/// At ~15 FPS with alpha = 0.3 the time constant is ~3 frames (~200ms)
+/// — fast enough to track real person movement, slow enough to absorb
+/// quantization noise. Tightening is always immediate (safety-critical).
+const CEILING_RELAX_ALPHA: f32 = 0.3_f32;
+
 // ---------------------------------------------------------------------------
 // Safety result
 // ---------------------------------------------------------------------------
@@ -70,6 +82,10 @@ pub(crate) struct SafetyResult {
 /// restrictive (highest y) value. This guarantees the laser stays below
 /// the 75% line of *all* detected persons — a close, tall person cannot
 /// mask a smaller person sitting on the floor further away.
+///
+/// Uses asymmetric smoothing on the ceiling value: tightening (more
+/// restrictive) is immediate, while relaxation (less restrictive) is
+/// blended via an EMA to filter INT8 bbox size flicker.
 ///
 /// Maintains a temporal hold-off so the ceiling persists for
 /// [`CEILING_HOLD_FRAMES`] after the last person detection, preventing
@@ -108,9 +124,12 @@ impl SafetyComputer {
     /// The ceiling is the most restrictive (highest y) value across all
     /// detected persons. This ensures the laser stays below the 75% line
     /// of every person in the frame — not just the one closest to the
-    /// floor. When no person is detected, the previously computed ceiling
-    /// and `person_in_frame` flag are held for up to
-    /// [`CEILING_HOLD_FRAMES`] before relaxing.
+    /// floor. When the new ceiling is more restrictive than the held
+    /// value, it is applied immediately. When less restrictive, it is
+    /// blended via [`CEILING_RELAX_ALPHA`] to filter INT8 bbox flicker.
+    /// When no person is detected, the previously computed ceiling and
+    /// `person_in_frame` flag are held for up to [`CEILING_HOLD_FRAMES`]
+    /// before relaxing.
     pub(crate) fn process(&mut self, detections: &[Detection], model_height: f32) -> SafetyResult {
         self.cat_detections.clear();
 
@@ -133,8 +152,15 @@ impl SafetyComputer {
         }
 
         if let Some(ceiling_y) = max_ceiling {
-            // Person detected — update held ceiling and reset hold timer.
-            self.held_ceiling_y = ceiling_y;
+            // Person detected — update ceiling with asymmetric smoothing.
+            // Tighten immediately (safety-critical), relax gradually
+            // (filters INT8 bbox size flicker that causes laser jitter).
+            if ceiling_y >= self.held_ceiling_y {
+                self.held_ceiling_y = ceiling_y;
+            } else {
+                self.held_ceiling_y = CEILING_RELAX_ALPHA
+                    .mul_add(ceiling_y - self.held_ceiling_y, self.held_ceiling_y);
+            }
             self.hold_remaining = CEILING_HOLD_FRAMES;
             self.ceiling_active = true;
         } else if self.hold_remaining > 0 {
@@ -634,6 +660,105 @@ mod tests {
             sc.cat_detections().len(),
             2,
             "frame 2 should have 2 cats, not carry over from frame 1"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Asymmetric smoothing
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_ceiling_tightens_immediately() {
+        let mut sc = SafetyComputer::new();
+        // First person high in frame (less restrictive ceiling).
+        let high_person = [person(100.0_f32, 50.0_f32, 300.0_f32, 200.0_f32)];
+        let r1 = sc.process(&high_person, MODEL_H);
+        let low_ceiling = r1.ceiling_y;
+
+        // Second person near floor (more restrictive ceiling).
+        let floor_person = [person(100.0_f32, 300.0_f32, 300.0_f32, 450.0_f32)];
+        let r2 = sc.process(&floor_person, MODEL_H);
+
+        let expected = person_ceiling_y(&floor_person[0].bbox, MODEL_H);
+        assert!(
+            (r2.ceiling_y - expected).abs() < 1e-6_f32,
+            "more restrictive ceiling should be applied immediately, \
+             expected {expected}, got {}",
+            r2.ceiling_y,
+        );
+        assert!(
+            r2.ceiling_y > low_ceiling,
+            "new ceiling should be more restrictive (higher y)"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_relaxes_gradually() {
+        let mut sc = SafetyComputer::new();
+        // Person near floor (restrictive ceiling).
+        let floor_person = [person(100.0_f32, 350.0_f32, 300.0_f32, 460.0_f32)];
+        let r1 = sc.process(&floor_person, MODEL_H);
+        let restrictive_ceiling = r1.ceiling_y;
+
+        // Same person stands up (less restrictive ceiling).
+        let standing_person = [person(100.0_f32, 50.0_f32, 300.0_f32, 300.0_f32)];
+        let r2 = sc.process(&standing_person, MODEL_H);
+        let relaxed_target = person_ceiling_y(&standing_person[0].bbox, MODEL_H);
+
+        // Should blend, not jump to the new value.
+        assert!(
+            r2.ceiling_y > relaxed_target,
+            "ceiling should not relax immediately to {relaxed_target}, got {}",
+            r2.ceiling_y,
+        );
+        assert!(
+            r2.ceiling_y < restrictive_ceiling,
+            "ceiling should start relaxing from {restrictive_ceiling}, got {}",
+            r2.ceiling_y,
+        );
+    }
+
+    #[test]
+    fn test_ceiling_relaxation_converges() {
+        let mut sc = SafetyComputer::new();
+        // Start with a restrictive ceiling.
+        let floor_person = [person(100.0_f32, 350.0_f32, 300.0_f32, 460.0_f32)];
+        let _ = sc.process(&floor_person, MODEL_H);
+
+        // Repeatedly detect person higher in frame.
+        let standing_person = [person(100.0_f32, 50.0_f32, 300.0_f32, 300.0_f32)];
+        let target = person_ceiling_y(&standing_person[0].bbox, MODEL_H);
+        for _ in 0_i32..30_i32 {
+            let _ = sc.process(&standing_person, MODEL_H);
+        }
+
+        let final_result = sc.process(&standing_person, MODEL_H);
+        assert!(
+            (final_result.ceiling_y - target).abs() < 0.01_f32,
+            "ceiling should converge to target {target} after many frames, got {}",
+            final_result.ceiling_y,
+        );
+    }
+
+    #[test]
+    fn test_ceiling_smoothing_exact_ema_value() {
+        let mut sc = SafetyComputer::new();
+        // First frame: floor person, ceiling is high (restrictive).
+        let floor_person = [person(100.0_f32, 350.0_f32, 300.0_f32, 460.0_f32)];
+        let r1 = sc.process(&floor_person, MODEL_H);
+        let held = r1.ceiling_y;
+
+        // Second frame: standing person, less restrictive.
+        let standing_person = [person(100.0_f32, 50.0_f32, 300.0_f32, 300.0_f32)];
+        let r2 = sc.process(&standing_person, MODEL_H);
+        let target = person_ceiling_y(&standing_person[0].bbox, MODEL_H);
+
+        // Verify exact EMA: held + alpha * (target - held)
+        let expected = CEILING_RELAX_ALPHA.mul_add(target - held, held);
+        assert!(
+            (r2.ceiling_y - expected).abs() < 1e-6_f32,
+            "ceiling should match EMA formula, expected {expected}, got {}",
+            r2.ceiling_y,
         );
     }
 

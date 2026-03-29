@@ -6,7 +6,9 @@
 //! existing track or spawns a new one. Tracks follow a lifecycle:
 //!
 //! `Tentative` (new) → `Confirmed` (3+ hits) → `Coasting` (no match,
-//! Kalman predicts) → removed (30 frames unmatched).
+//! Kalman predicts) → removed (30 frames unmatched). Tentative tracks
+//! that miss a match are removed immediately — only confirmed tracks
+//! are allowed to coast.
 //!
 //! The tracker outputs normalized coordinates (0.0–1.0) ready for IPC to
 //! the Python behavior engine.
@@ -1223,8 +1225,13 @@ impl Tracker {
         self.apply_matches();
         self.coast_unmatched();
         self.spawn_new_tracks(detections);
-        self.tracks
-            .retain(|track| track.coast_frames <= self.config.max_coast_frames);
+        self.tracks.retain(|track| match track.state {
+            // Tentative tracks are removed on first miss — they haven't
+            // accumulated enough consecutive hits to prove they're real.
+            TrackState::Tentative => track.coast_frames == 0,
+            TrackState::Confirmed => true,
+            TrackState::Coasting => track.coast_frames <= self.config.max_coast_frames,
+        });
     }
 
     /// Builds the `IoU`-based cost matrix (tracks x detections).
@@ -1312,7 +1319,12 @@ impl Tracker {
         }
     }
 
-    /// Marks unmatched tracks as coasting.
+    /// Increments coast counters for unmatched tracks.
+    ///
+    /// Only confirmed tracks transition to coasting — tentative tracks
+    /// stay tentative and are pruned in the retain step. This prevents
+    /// unconfirmed detections from bypassing `min_hits_to_confirm` via
+    /// the `Coasting → Confirmed` re-acquisition path.
     fn coast_unmatched(&mut self) {
         for (t, track) in self.tracks.iter_mut().enumerate() {
             if self.matched_tracks.get(t).copied().unwrap_or(false) {
@@ -1320,7 +1332,7 @@ impl Tracker {
             }
             track.coast_frames = track.coast_frames.saturating_add(1_u32);
             track.hits = 0_u32;
-            if track.state != TrackState::Coasting {
+            if track.state == TrackState::Confirmed {
                 track.state = TrackState::Coasting;
             }
         }
@@ -1868,13 +1880,28 @@ mod tests {
             100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
         )];
 
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
-        assert_eq!(tracker.tracks().len(), 1, "should have one track");
+        // Confirm the track first (3 hits). Only confirmed tracks coast.
+        for _ in 0_i32..3_i32 {
+            tracker.update(&dets, 640.0_f32, 480.0_f32);
+        }
+        assert_eq!(
+            tracker.tracks()[0].state(),
+            TrackState::Confirmed,
+            "track should be confirmed"
+        );
 
-        for _ in 0_i32..6_i32 {
+        // Coast for max_coast_frames — track should survive.
+        for _ in 0_u32..5_u32 {
             tracker.update(&[], 640.0_f32, 480.0_f32);
         }
+        assert_eq!(
+            tracker.tracks().len(),
+            1,
+            "track should survive during coast period"
+        );
 
+        // One more frame exceeds max_coast_frames — track removed.
+        tracker.update(&[], 640.0_f32, 480.0_f32);
         assert!(
             tracker.tracks().is_empty(),
             "track should be removed after exceeding max coast frames"
@@ -1908,6 +1935,63 @@ mod tests {
             tracker.tracks()[0].state(),
             TrackState::Confirmed,
             "should return to confirmed on re-acquisition"
+        );
+    }
+
+    #[test]
+    fn test_tracker_tentative_removed_on_first_miss() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // One frame: tentative track created.
+        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        assert_eq!(tracker.tracks().len(), 1, "should have one tentative track");
+        assert_eq!(
+            tracker.tracks()[0].state(),
+            TrackState::Tentative,
+            "track should be tentative"
+        );
+
+        // Empty frame: tentative track removed immediately.
+        tracker.update(&[], 640.0_f32, 480.0_f32);
+        assert!(
+            tracker.tracks().is_empty(),
+            "tentative track should be removed on first miss"
+        );
+    }
+
+    #[test]
+    fn test_tracker_tentative_miss_gap_does_not_confirm() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Two hits: tentative (needs 3 for confirmation).
+        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        assert_eq!(
+            tracker.tracks()[0].state(),
+            TrackState::Tentative,
+            "should still be tentative after 2 hits"
+        );
+
+        // Miss: tentative track removed.
+        tracker.update(&[], 640.0_f32, 480.0_f32);
+        assert!(
+            tracker.tracks().is_empty(),
+            "tentative track should be removed on miss, not allowed to coast"
+        );
+
+        // Re-detection starts a fresh track.
+        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        assert_eq!(tracker.tracks().len(), 1, "should have a new track");
+        assert_eq!(
+            tracker.tracks()[0].state(),
+            TrackState::Tentative,
+            "re-detection should start fresh as tentative, not confirmed"
         );
     }
 
