@@ -1289,4 +1289,340 @@ mod tests {
             prop_assert_eq!(header.wire_type, WireType::BehaviorCommand);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Outbound: send TrackEvent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_send_track_event_new_track_and_receive_raw() {
+        use crate::proto::detection::{NewTrack, TrackEvent, track_event};
+
+        let (server, _dir) = test_server();
+        let mut client = raw_client(&server);
+        let mut conn = accept_connection(&server);
+
+        let event = TrackEvent {
+            event: Some(track_event::Event::NewTrack(Box::new(NewTrack {
+                track_id: 5_u32,
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+
+        conn.send_track_event(&event).expect("send must succeed");
+
+        client
+            .set_nonblocking(false)
+            .expect("set_nonblocking must succeed");
+
+        let mut header_buf = [0_u8; HEADER_SIZE];
+        client
+            .read_exact(&mut header_buf)
+            .expect("read header must succeed");
+
+        let header = decode_header(header_buf).expect("header must decode");
+        assert_eq!(
+            header.wire_type,
+            WireType::TrackEvent,
+            "wire type must be TrackEvent"
+        );
+
+        let mut payload_buf = vec![0_u8; header.length as usize];
+        client
+            .read_exact(&mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = decode_options()
+            .decode_from_slice::<TrackEvent>(&payload_buf)
+            .expect("protobuf decode must succeed");
+
+        match &decoded.event {
+            Some(track_event::Event::NewTrack(nt)) => {
+                assert_eq!(nt.track_id, 5_u32, "track_id mismatch");
+            }
+            other => panic!("expected NewTrack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_send_track_event_track_lost_and_receive_raw() {
+        use crate::proto::detection::{TrackEvent, TrackLost, track_event};
+
+        let (server, _dir) = test_server();
+        let mut client = raw_client(&server);
+        let mut conn = accept_connection(&server);
+
+        let event = TrackEvent {
+            event: Some(track_event::Event::TrackLost(Box::new(TrackLost {
+                track_id: 2_u32,
+                duration_ms: 7500_u32,
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+
+        conn.send_track_event(&event).expect("send must succeed");
+
+        client
+            .set_nonblocking(false)
+            .expect("set_nonblocking must succeed");
+
+        let mut header_buf = [0_u8; HEADER_SIZE];
+        client
+            .read_exact(&mut header_buf)
+            .expect("read header must succeed");
+
+        let header = decode_header(header_buf).expect("header must decode");
+        assert_eq!(
+            header.wire_type,
+            WireType::TrackEvent,
+            "wire type must be TrackEvent"
+        );
+
+        let mut payload_buf = vec![0_u8; header.length as usize];
+        client
+            .read_exact(&mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = decode_options()
+            .decode_from_slice::<TrackEvent>(&payload_buf)
+            .expect("protobuf decode must succeed");
+
+        match &decoded.event {
+            Some(track_event::Event::TrackLost(tl)) => {
+                assert_eq!(tl.track_id, 2_u32, "track_id mismatch");
+                assert_eq!(tl.duration_ms, 7500_u32, "duration_ms mismatch");
+            }
+            other => panic!("expected TrackLost, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Outbound: send SessionRequest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_send_session_request_and_receive_raw() {
+        let (server, _dir) = test_server();
+        let mut client = raw_client(&server);
+        let mut conn = accept_connection(&server);
+
+        let request = SessionRequest {
+            trigger: detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED.into(),
+            track_id: Some(8_u32),
+            ..Default::default()
+        };
+
+        conn.send_session_request(&request)
+            .expect("send must succeed");
+
+        client
+            .set_nonblocking(false)
+            .expect("set_nonblocking must succeed");
+
+        let mut header_buf = [0_u8; HEADER_SIZE];
+        client
+            .read_exact(&mut header_buf)
+            .expect("read header must succeed");
+
+        let header = decode_header(header_buf).expect("header must decode");
+        assert_eq!(
+            header.wire_type,
+            WireType::SessionRequest,
+            "wire type must be SessionRequest"
+        );
+
+        let mut payload_buf = vec![0_u8; header.length as usize];
+        client
+            .read_exact(&mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = decode_options()
+            .decode_from_slice::<SessionRequest>(&payload_buf)
+            .expect("protobuf decode must succeed");
+        assert_eq!(
+            decoded.trigger,
+            detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+            "trigger mismatch"
+        );
+        assert_eq!(decoded.track_id, Some(8_u32), "track_id mismatch");
+    }
+
+    // -----------------------------------------------------------------------
+    // Insta snapshots: TrackEvent + SessionRequest wire bytes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_track_event_new_track_wire_bytes() {
+        use crate::proto::detection::{NewTrack, TrackEvent, track_event};
+
+        let event = TrackEvent {
+            event: Some(track_event::Event::NewTrack(Box::new(NewTrack {
+                track_id: 1_u32,
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+
+        let payload = event.encode_to_vec();
+        let mut wire = Vec::new();
+        encode_frame(WireType::TrackEvent, &payload, &mut wire).expect("encode must succeed");
+
+        insta::assert_yaml_snapshot!("track_event_new_track_wire", wire);
+    }
+
+    #[test]
+    fn test_snapshot_track_event_track_lost_wire_bytes() {
+        use crate::proto::detection::{TrackEvent, TrackLost, track_event};
+
+        let event = TrackEvent {
+            event: Some(track_event::Event::TrackLost(Box::new(TrackLost {
+                track_id: 3_u32,
+                duration_ms: 12500_u32,
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+
+        let payload = event.encode_to_vec();
+        let mut wire = Vec::new();
+        encode_frame(WireType::TrackEvent, &payload, &mut wire).expect("encode must succeed");
+
+        insta::assert_yaml_snapshot!("track_event_track_lost_wire", wire);
+    }
+
+    #[test]
+    fn test_snapshot_session_request_wire_bytes() {
+        let request = SessionRequest {
+            trigger: detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED.into(),
+            track_id: Some(2_u32),
+            ..Default::default()
+        };
+
+        let payload = request.encode_to_vec();
+        let mut wire = Vec::new();
+        encode_frame(WireType::SessionRequest, &payload, &mut wire).expect("encode must succeed");
+
+        insta::assert_yaml_snapshot!("session_request_wire", wire);
+    }
+
+    // -----------------------------------------------------------------------
+    // Proptest: TrackEvent wire round-trip
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #[test]
+        fn test_track_event_new_track_wire_round_trip(
+            track_id in 0..1000_u32,
+        ) {
+            use crate::proto::detection::{track_event, NewTrack, TrackEvent};
+
+            let event = TrackEvent {
+                event: Some(track_event::Event::NewTrack(Box::new(NewTrack {
+                    track_id,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            };
+
+            let payload = event.encode_to_vec();
+            let mut frame_buf = Vec::new();
+            encode_frame(WireType::TrackEvent, &payload, &mut frame_buf)
+                .expect("encode must succeed");
+
+            let header_arr: [u8; HEADER_SIZE] = frame_buf
+                .get(..HEADER_SIZE)
+                .and_then(|s| <[u8; HEADER_SIZE]>::try_from(s).ok())
+                .expect("header must exist");
+            let header = decode_header(header_arr).expect("header must decode");
+            let decoded_payload = frame_buf.get(HEADER_SIZE..).expect("payload exists");
+
+            let decoded = decode_options()
+                .decode_from_slice::<TrackEvent>(decoded_payload)
+                .expect("decode must succeed");
+
+            prop_assert_eq!(header.wire_type, WireType::TrackEvent);
+            match &decoded.event {
+                Some(track_event::Event::NewTrack(nt)) => {
+                    prop_assert_eq!(nt.track_id, track_id);
+                }
+                other => prop_assert!(false, "expected NewTrack, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn test_track_event_track_lost_wire_round_trip(
+            track_id in 0..1000_u32,
+            duration_ms in 0..100_000_u32,
+        ) {
+            use crate::proto::detection::{track_event, TrackEvent, TrackLost};
+
+            let event = TrackEvent {
+                event: Some(track_event::Event::TrackLost(Box::new(TrackLost {
+                    track_id,
+                    duration_ms,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            };
+
+            let payload = event.encode_to_vec();
+            let mut frame_buf = Vec::new();
+            encode_frame(WireType::TrackEvent, &payload, &mut frame_buf)
+                .expect("encode must succeed");
+
+            let header_arr: [u8; HEADER_SIZE] = frame_buf
+                .get(..HEADER_SIZE)
+                .and_then(|s| <[u8; HEADER_SIZE]>::try_from(s).ok())
+                .expect("header must exist");
+            let header = decode_header(header_arr).expect("header must decode");
+            let decoded_payload = frame_buf.get(HEADER_SIZE..).expect("payload exists");
+
+            let decoded = decode_options()
+                .decode_from_slice::<TrackEvent>(decoded_payload)
+                .expect("decode must succeed");
+
+            prop_assert_eq!(header.wire_type, WireType::TrackEvent);
+            match &decoded.event {
+                Some(track_event::Event::TrackLost(tl)) => {
+                    prop_assert_eq!(tl.track_id, track_id);
+                    prop_assert_eq!(tl.duration_ms, duration_ms);
+                }
+                other => prop_assert!(false, "expected TrackLost, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn test_session_request_wire_round_trip(
+            track_id in proptest::option::of(0..1000_u32),
+        ) {
+            let trigger = detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED;
+            let request = SessionRequest {
+                trigger: trigger.into(),
+                track_id,
+                ..Default::default()
+            };
+
+            let payload = request.encode_to_vec();
+            let mut frame_buf = Vec::new();
+            encode_frame(WireType::SessionRequest, &payload, &mut frame_buf)
+                .expect("encode must succeed");
+
+            let header_arr: [u8; HEADER_SIZE] = frame_buf
+                .get(..HEADER_SIZE)
+                .and_then(|s| <[u8; HEADER_SIZE]>::try_from(s).ok())
+                .expect("header must exist");
+            let header = decode_header(header_arr).expect("header must decode");
+            let decoded_payload = frame_buf.get(HEADER_SIZE..).expect("payload exists");
+
+            let decoded = decode_options()
+                .decode_from_slice::<SessionRequest>(decoded_payload)
+                .expect("decode must succeed");
+
+            prop_assert_eq!(header.wire_type, WireType::SessionRequest);
+            prop_assert_eq!(decoded.trigger, trigger);
+            prop_assert_eq!(decoded.track_id, track_id);
+        }
+    }
 }

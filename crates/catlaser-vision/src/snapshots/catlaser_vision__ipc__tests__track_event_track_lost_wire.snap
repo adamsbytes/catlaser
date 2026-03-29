@@ -1,0 +1,16 @@
+---
+source: crates/catlaser-vision/src/ipc.rs
+expression: wire
+---
+- 2
+- 7
+- 0
+- 0
+- 0
+- 18
+- 5
+- 8
+- 3
+- 16
+- 212
+- 97

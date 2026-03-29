@@ -1,0 +1,8 @@
+---
+source: crates/catlaser-vision/src/pipeline.rs
+expression: payload
+---
+- 8
+- 2
+- 16
+- 2

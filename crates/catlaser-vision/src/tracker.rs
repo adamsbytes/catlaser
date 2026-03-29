@@ -56,6 +56,37 @@ pub(crate) enum TrackState {
     Coasting,
 }
 
+/// Lifecycle event emitted by the tracker during [`Tracker::update`].
+///
+/// Events are accumulated per-frame and cleared at the start of the next
+/// `update()` call. The pipeline reads them via [`Tracker::events`] to send
+/// IPC messages to the Python behavior engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackUpdate {
+    /// A tentative track was promoted to confirmed (reached
+    /// `min_hits_to_confirm` consecutive matches). Maps to `NewTrack`
+    /// in the IPC proto.
+    Confirmed {
+        /// Track ID of the newly confirmed track.
+        track_id: u32,
+    },
+    /// A coasting track was removed after exceeding `max_coast_frames`
+    /// without a match. Maps to `TrackLost` in the IPC proto.
+    Lost {
+        /// Track ID of the lost track.
+        track_id: u32,
+        /// How long this track was alive, in milliseconds.
+        duration_ms: u32,
+    },
+    /// A coasting track was re-acquired (matched after a gap). Signals
+    /// that identity re-verification should be performed to prevent
+    /// cat ID swaps during occlusion.
+    Reacquired {
+        /// Track ID of the re-acquired track.
+        track_id: u32,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Kalman filter (8-state constant-velocity model)
 // ---------------------------------------------------------------------------
@@ -1116,6 +1147,9 @@ pub(crate) struct Track {
     coast_frames: u32,
     /// COCO class ID of the initial detection (used for class filtering).
     class_id: u16,
+    /// Monotonic timestamp (microseconds) when this track was created.
+    /// Used to compute `duration_ms` for `TrackLost` events.
+    created_timestamp_us: u64,
 }
 
 impl Track {
@@ -1178,6 +1212,9 @@ pub(crate) struct Tracker {
     matched_detections: Vec<bool>,
     normalized: Vec<[f32; MEAS_DIM]>,
     hungarian_work: HungarianWork,
+    /// Lifecycle events emitted during the current frame's `update()`.
+    /// Cleared at the start of each `update()` call.
+    events: Vec<TrackUpdate>,
 }
 
 impl Tracker {
@@ -1193,6 +1230,7 @@ impl Tracker {
             matched_detections: Vec::new(),
             normalized: Vec::new(),
             hungarian_work: HungarianWork::new(),
+            events: Vec::new(),
         }
     }
 
@@ -1201,12 +1239,28 @@ impl Tracker {
         &self.tracks
     }
 
+    /// Returns lifecycle events emitted during the most recent `update()`.
+    ///
+    /// Events are cleared at the start of each `update()` call. The caller
+    /// must read them before the next `update()`.
+    pub(crate) fn events(&self) -> &[TrackUpdate] {
+        &self.events
+    }
+
     /// Processes a frame's detections and updates all tracks.
     ///
     /// `detections` are in pixel coordinates from the detector.
     /// `model_width` and `model_height` are the detector's input dimensions
     /// used to normalize coordinates to 0.0–1.0.
-    pub(crate) fn update(&mut self, detections: &[Detection], model_width: f32, model_height: f32) {
+    pub(crate) fn update(
+        &mut self,
+        detections: &[Detection],
+        model_width: f32,
+        model_height: f32,
+        timestamp_us: u64,
+    ) {
+        self.events.clear();
+
         // Normalize detections to [cx, cy, w, h] in 0.0-1.0 range.
         self.normalized.clear();
         for det in detections {
@@ -1231,10 +1285,11 @@ impl Tracker {
         );
         self.classify_matches(n_tracks, n_dets);
 
-        // Apply matches, coast unmatched, spawn new, prune dead.
+        // Apply matches, coast unmatched, spawn new, emit lost, prune dead.
         self.apply_matches();
         self.coast_unmatched();
-        self.spawn_new_tracks(detections);
+        self.spawn_new_tracks(detections, timestamp_us);
+        self.emit_lost_events(timestamp_us);
         self.tracks.retain(|track| match track.state {
             // Tentative tracks are removed on first miss — they haven't
             // accumulated enough consecutive hits to prove they're real.
@@ -1302,6 +1357,9 @@ impl Tracker {
     }
 
     /// Updates matched tracks with their assigned detections.
+    ///
+    /// Emits [`TrackUpdate::Confirmed`] when a tentative track is promoted,
+    /// and [`TrackUpdate::Reacquired`] when a coasting track resumes.
     fn apply_matches(&mut self) {
         // Clone assignments to avoid borrow conflict with self.tracks.
         let assignments = self.assignments.clone();
@@ -1312,6 +1370,8 @@ impl Tracker {
             if let (Some(track), Some(measurement)) =
                 (self.tracks.get_mut(t), self.normalized.get(d))
             {
+                let prev_state = track.state;
+
                 let _ = track.kf.update(*measurement);
                 track.hits = track.hits.saturating_add(1_u32);
                 track.coast_frames = 0_u32;
@@ -1324,6 +1384,16 @@ impl Tracker {
 
                 if track.state == TrackState::Coasting {
                     track.state = TrackState::Confirmed;
+                }
+
+                // Emit lifecycle events for state transitions.
+                if prev_state == TrackState::Tentative && track.state == TrackState::Confirmed {
+                    self.events
+                        .push(TrackUpdate::Confirmed { track_id: track.id });
+                } else if prev_state == TrackState::Coasting && track.state == TrackState::Confirmed
+                {
+                    self.events
+                        .push(TrackUpdate::Reacquired { track_id: track.id });
                 }
             }
         }
@@ -1349,7 +1419,7 @@ impl Tracker {
     }
 
     /// Spawns new tentative tracks for unmatched detections.
-    fn spawn_new_tracks(&mut self, detections: &[Detection]) {
+    fn spawn_new_tracks(&mut self, detections: &[Detection], timestamp_us: u64) {
         for (d, det) in detections.iter().enumerate() {
             if self.matched_detections.get(d).copied().unwrap_or(true) {
                 continue;
@@ -1364,6 +1434,38 @@ impl Tracker {
                     hits: 1_u32,
                     coast_frames: 0_u32,
                     class_id: det.class_id,
+                    created_timestamp_us: timestamp_us,
+                });
+            }
+        }
+    }
+
+    /// Emits [`TrackUpdate::Lost`] for coasting tracks about to be pruned.
+    ///
+    /// Must be called after [`coast_unmatched`](Self::coast_unmatched) and
+    /// before `retain()`. Only coasting tracks that exceed `max_coast_frames`
+    /// emit Lost events — tentative tracks were never confirmed, so no
+    /// `NewTrack` was sent for them and no `TrackLost` is needed.
+    fn emit_lost_events(&mut self, timestamp_us: u64) {
+        for track in &self.tracks {
+            if track.state == TrackState::Coasting
+                && track.coast_frames > self.config.max_coast_frames
+            {
+                let elapsed_us = timestamp_us.saturating_sub(track.created_timestamp_us);
+
+                // Microseconds to milliseconds. Divisor 1000 is a non-zero
+                // constant: cannot panic, quotient always <= dividend.
+                #[expect(
+                    clippy::integer_division,
+                    clippy::arithmetic_side_effects,
+                    reason = "us→ms: constant divisor 1000 is non-zero, quotient ≤ dividend, \
+                              no precision concern for play duration stats"
+                )]
+                let duration_ms = u32::try_from(elapsed_us / 1000_u64).unwrap_or(u32::MAX);
+
+                self.events.push(TrackUpdate::Lost {
+                    track_id: track.id,
+                    duration_ms,
                 });
             }
         }
@@ -1815,7 +1917,7 @@ mod tests {
         let dets = [make_detection(
             100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
         )];
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
 
         assert_eq!(
             tracker.tracks().len(),
@@ -1838,7 +1940,7 @@ mod tests {
         )];
 
         for _ in 0_i32..3_i32 {
-            tracker.update(&dets, 640.0_f32, 480.0_f32);
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         }
 
         assert_eq!(
@@ -1862,7 +1964,7 @@ mod tests {
 
         // 3 frames to confirm.
         for _ in 0_i32..3_i32 {
-            tracker.update(&dets, 640.0_f32, 480.0_f32);
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         }
         assert_eq!(
             tracker.tracks()[0].state(),
@@ -1871,7 +1973,7 @@ mod tests {
         );
 
         // Empty frame.
-        tracker.update(&[], 640.0_f32, 480.0_f32);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(
             tracker.tracks()[0].state(),
             TrackState::Coasting,
@@ -1892,7 +1994,7 @@ mod tests {
 
         // Confirm the track first (3 hits). Only confirmed tracks coast.
         for _ in 0_i32..3_i32 {
-            tracker.update(&dets, 640.0_f32, 480.0_f32);
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         }
         assert_eq!(
             tracker.tracks()[0].state(),
@@ -1902,7 +2004,7 @@ mod tests {
 
         // Coast for max_coast_frames — track should survive.
         for _ in 0_u32..5_u32 {
-            tracker.update(&[], 640.0_f32, 480.0_f32);
+            tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
         }
         assert_eq!(
             tracker.tracks().len(),
@@ -1911,7 +2013,7 @@ mod tests {
         );
 
         // One more frame exceeds max_coast_frames — track removed.
-        tracker.update(&[], 640.0_f32, 480.0_f32);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
         assert!(
             tracker.tracks().is_empty(),
             "track should be removed after exceeding max coast frames"
@@ -1927,12 +2029,12 @@ mod tests {
 
         // Confirm the track.
         for _ in 0_i32..3_i32 {
-            tracker.update(&dets, 640.0_f32, 480.0_f32);
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         }
 
         // Coast for 2 frames.
-        tracker.update(&[], 640.0_f32, 480.0_f32);
-        tracker.update(&[], 640.0_f32, 480.0_f32);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(
             tracker.tracks()[0].state(),
             TrackState::Coasting,
@@ -1940,7 +2042,7 @@ mod tests {
         );
 
         // Re-acquire.
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(
             tracker.tracks()[0].state(),
             TrackState::Confirmed,
@@ -1956,7 +2058,7 @@ mod tests {
         )];
 
         // One frame: tentative track created.
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(tracker.tracks().len(), 1, "should have one tentative track");
         assert_eq!(
             tracker.tracks()[0].state(),
@@ -1965,7 +2067,7 @@ mod tests {
         );
 
         // Empty frame: tentative track removed immediately.
-        tracker.update(&[], 640.0_f32, 480.0_f32);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
         assert!(
             tracker.tracks().is_empty(),
             "tentative track should be removed on first miss"
@@ -1980,8 +2082,8 @@ mod tests {
         )];
 
         // Two hits: tentative (needs 3 for confirmation).
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(
             tracker.tracks()[0].state(),
             TrackState::Tentative,
@@ -1989,14 +2091,14 @@ mod tests {
         );
 
         // Miss: tentative track removed.
-        tracker.update(&[], 640.0_f32, 480.0_f32);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
         assert!(
             tracker.tracks().is_empty(),
             "tentative track should be removed on miss, not allowed to coast"
         );
 
         // Re-detection starts a fresh track.
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(tracker.tracks().len(), 1, "should have a new track");
         assert_eq!(
             tracker.tracks()[0].state(),
@@ -2013,7 +2115,7 @@ mod tests {
             make_detection(400.0_f32, 300.0_f32, 500.0_f32, 400.0_f32, 15),
         ];
 
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         assert_eq!(
             tracker.tracks().len(),
             2,
@@ -2035,7 +2137,7 @@ mod tests {
             make_detection(50.0_f32, 50.0_f32, 150.0_f32, 150.0_f32, 15),
             make_detection(400.0_f32, 300.0_f32, 500.0_f32, 400.0_f32, 15),
         ];
-        tracker.update(&dets1, 640.0_f32, 480.0_f32);
+        tracker.update(&dets1, 640.0_f32, 480.0_f32, 0_u64);
 
         // Frame 2: new detection far from existing tracks.
         let dets2 = [
@@ -2043,7 +2145,7 @@ mod tests {
             make_detection(400.0_f32, 300.0_f32, 500.0_f32, 400.0_f32, 15),
             make_detection(300.0_f32, 200.0_f32, 350.0_f32, 250.0_f32, 15),
         ];
-        tracker.update(&dets2, 640.0_f32, 480.0_f32);
+        tracker.update(&dets2, 640.0_f32, 480.0_f32, 0_u64);
 
         let ids: Vec<u32> = tracker.tracks().iter().map(Track::id).collect();
         for window in ids.windows(2) {
@@ -2060,7 +2162,7 @@ mod tests {
         let dets = [make_detection(
             100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 42,
         )];
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
 
         assert_eq!(
             tracker.tracks()[0].class_id(),
@@ -2075,7 +2177,7 @@ mod tests {
         let dets = [make_detection(
             100.0_f32, 50.0_f32, 300.0_f32, 200.0_f32, 15,
         )];
-        tracker.update(&dets, 640.0_f32, 480.0_f32);
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
 
         let bbox = tracker.tracks()[0].bbox();
         for (i, &val) in bbox.iter().enumerate() {
@@ -2094,7 +2196,7 @@ mod tests {
         )];
 
         for _ in 0_i32..50_i32 {
-            tracker.update(&dets, 640.0_f32, 480.0_f32);
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         }
 
         assert_eq!(
@@ -2128,7 +2230,7 @@ mod tests {
                 200.0_f32,
                 15,
             )];
-            tracker.update(&dets, 640.0_f32, 480.0_f32);
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
         }
 
         assert_eq!(
@@ -2272,7 +2374,7 @@ mod tests {
             ];
 
             for _ in 0..n_frames {
-                tracker.update(&dets, 640.0_f32, 480.0_f32);
+                tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
             }
 
             let ids: Vec<u32> = tracker.tracks().iter().map(Track::id).collect();
@@ -2317,5 +2419,268 @@ mod tests {
                 used_cols[c] = true;
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // TrackUpdate lifecycle event tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_tracker_emits_confirmed_on_promotion() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Frames 1-2: tentative, no events.
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "no events on first frame (tentative)"
+        );
+
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "no events on second frame (still tentative)"
+        );
+
+        // Frame 3: promoted to confirmed.
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert_eq!(
+            tracker.events().len(),
+            1,
+            "exactly one event on confirmation frame"
+        );
+        assert_eq!(
+            tracker.events()[0],
+            TrackUpdate::Confirmed { track_id: 0_u32 },
+            "event must be Confirmed with track_id 0"
+        );
+    }
+
+    #[test]
+    fn test_tracker_no_duplicate_confirmed_events() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Confirm the track (3 frames).
+        for _ in 0_i32..3_i32 {
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        }
+        assert_eq!(
+            tracker.events().len(),
+            1,
+            "one Confirmed event on promotion frame"
+        );
+
+        // Subsequent frames: already confirmed, no more events.
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "no events for already-confirmed track"
+        );
+
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "no events for already-confirmed track (frame 5)"
+        );
+    }
+
+    #[test]
+    fn test_tracker_emits_lost_on_coast_death() {
+        let config = TrackerConfig {
+            max_coast_frames: 5_u32,
+            ..TrackerConfig::default()
+        };
+        let mut tracker = Tracker::new(config);
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Confirm the track.
+        for _ in 0_i32..3_i32 {
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 1_000_000_u64);
+        }
+
+        // Coast for max_coast_frames (5 frames) — track survives.
+        for _ in 0_u32..5_u32 {
+            tracker.update(&[], 640.0_f32, 480.0_f32, 1_000_000_u64);
+        }
+        assert!(
+            !tracker
+                .events()
+                .iter()
+                .any(|e| matches!(e, TrackUpdate::Lost { .. })),
+            "no Lost event while coasting within limit"
+        );
+
+        // One more frame: track dies. Lost event emitted.
+        tracker.update(&[], 640.0_f32, 480.0_f32, 2_000_000_u64);
+        let lost_events: Vec<_> = tracker
+            .events()
+            .iter()
+            .filter(|e| matches!(e, TrackUpdate::Lost { .. }))
+            .collect();
+        assert_eq!(lost_events.len(), 1, "exactly one Lost event on death");
+        assert!(
+            matches!(
+                lost_events[0],
+                TrackUpdate::Lost {
+                    track_id: 0_u32,
+                    ..
+                }
+            ),
+            "Lost event must reference the correct track_id"
+        );
+    }
+
+    #[test]
+    fn test_tracker_lost_duration_reflects_timestamps() {
+        let config = TrackerConfig {
+            max_coast_frames: 2_u32,
+            ..TrackerConfig::default()
+        };
+        let mut tracker = Tracker::new(config);
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Track created at t=1_000_000 us (1 second).
+        let created_us = 1_000_000_u64;
+        for _ in 0_i32..3_i32 {
+            tracker.update(&dets, 640.0_f32, 480.0_f32, created_us);
+        }
+
+        // Coast for 2 frames (within limit).
+        tracker.update(&[], 640.0_f32, 480.0_f32, 1_500_000_u64);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 1_600_000_u64);
+
+        // Death frame at t=2_000_000 us (2 seconds). Duration = 1 second = 1000 ms.
+        let death_us = 2_000_000_u64;
+        tracker.update(&[], 640.0_f32, 480.0_f32, death_us);
+
+        let lost = tracker
+            .events()
+            .iter()
+            .find(|e| matches!(e, TrackUpdate::Lost { .. }));
+        assert!(lost.is_some(), "Lost event must be emitted on death");
+
+        if let Some(TrackUpdate::Lost {
+            track_id,
+            duration_ms,
+        }) = lost
+        {
+            assert_eq!(*track_id, 0_u32, "track_id must be 0");
+            assert_eq!(*duration_ms, 1000_u32, "duration must be 1000 ms (2s - 1s)");
+        }
+    }
+
+    #[test]
+    fn test_tracker_emits_reacquired_on_coast_resume() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Confirm the track.
+        for _ in 0_i32..3_i32 {
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        }
+
+        // Coast for 2 frames.
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
+        assert_eq!(
+            tracker.tracks()[0].state(),
+            TrackState::Coasting,
+            "track must be coasting"
+        );
+
+        // Re-acquire.
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert_eq!(
+            tracker.events().len(),
+            1,
+            "exactly one event on re-acquisition"
+        );
+        assert_eq!(
+            tracker.events()[0],
+            TrackUpdate::Reacquired { track_id: 0_u32 },
+            "event must be Reacquired with track_id 0"
+        );
+    }
+
+    #[test]
+    fn test_tracker_events_cleared_each_frame() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // Frame 3: confirmation event.
+        for _ in 0_i32..3_i32 {
+            tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        }
+        assert_eq!(tracker.events().len(), 1, "event on confirmation frame");
+
+        // Frame 4: events cleared.
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "events must be cleared on next update"
+        );
+    }
+
+    #[test]
+    fn test_tracker_no_lost_for_tentative_death() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let dets = [make_detection(
+            100.0_f32, 100.0_f32, 200.0_f32, 200.0_f32, 15,
+        )];
+
+        // One frame: tentative track.
+        tracker.update(&dets, 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "no events for tentative creation"
+        );
+
+        // Empty frame: tentative track dies.
+        tracker.update(&[], 640.0_f32, 480.0_f32, 0_u64);
+        assert!(
+            tracker.events().is_empty(),
+            "no Lost event for tentative track death"
+        );
+        assert!(
+            tracker.tracks().is_empty(),
+            "tentative track must be removed"
+        );
+    }
+
+    #[test]
+    fn test_tracker_multiple_events_single_frame() {
+        let mut tracker = Tracker::new(TrackerConfig::default());
+        let det_a = make_detection(50.0_f32, 50.0_f32, 150.0_f32, 150.0_f32, 15);
+        let det_b = make_detection(400.0_f32, 300.0_f32, 500.0_f32, 400.0_f32, 15);
+
+        // Both tracks hit 3 frames on the same frame → both confirm.
+        for _ in 0_i32..3_i32 {
+            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32, 0_u64);
+        }
+
+        let confirmed_events: Vec<_> = tracker
+            .events()
+            .iter()
+            .filter(|e| matches!(e, TrackUpdate::Confirmed { .. }))
+            .collect();
+        assert_eq!(
+            confirmed_events.len(),
+            2,
+            "two tracks confirmed in same frame must produce two events"
+        );
     }
 }

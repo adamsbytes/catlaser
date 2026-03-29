@@ -20,11 +20,13 @@ use crate::camera::{Camera, CameraConfig, IspConfig, IspController};
 use crate::detect::{DetectionConfig, Detector};
 use crate::ipc::{IpcConnection, IpcServer};
 use crate::npu::{Model, ModelPriority, NpuConfig};
-use crate::proto::detection::{self, DetectionFrame, TrackedCat};
+use crate::proto::detection::{
+    self, DetectionFrame, NewTrack, SessionRequest, TrackEvent, TrackLost, TrackedCat, track_event,
+};
 use crate::safety::{SafetyComputer, SafetyResult};
 use crate::serial::{self, CommandParams, SerialPort};
 use crate::targeting::{Targeter, TargetingConfig, TargetingSolution};
-use crate::tracker::{Track, TrackState, Tracker, TrackerConfig};
+use crate::tracker::{Track, TrackState, TrackUpdate, Tracker, TrackerConfig};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -396,6 +398,77 @@ pub(crate) fn build_detection_frame(
 }
 
 // ---------------------------------------------------------------------------
+// IPC: TrackEvent construction
+// ---------------------------------------------------------------------------
+
+/// Converts tracker lifecycle events into protobuf [`TrackEvent`] messages
+/// ready for IPC transmission.
+///
+/// [`TrackUpdate::Confirmed`] maps to `NewTrack`, [`TrackUpdate::Lost`]
+/// maps to `TrackLost`. [`TrackUpdate::Reacquired`] is filtered out — it
+/// will produce an `IdentityRequest` once the embedding model is integrated.
+pub(crate) fn build_track_events(updates: &[TrackUpdate]) -> Vec<TrackEvent> {
+    updates
+        .iter()
+        .filter_map(|update| match *update {
+            TrackUpdate::Confirmed { track_id } => Some(TrackEvent {
+                event: Some(track_event::Event::NewTrack(Box::new(NewTrack {
+                    track_id,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            }),
+            TrackUpdate::Lost {
+                track_id,
+                duration_ms,
+            } => Some(TrackEvent {
+                event: Some(track_event::Event::TrackLost(Box::new(TrackLost {
+                    track_id,
+                    duration_ms,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            }),
+            TrackUpdate::Reacquired { .. } => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// IPC: SessionRequest construction
+// ---------------------------------------------------------------------------
+
+/// Builds a [`SessionRequest`] for autonomous session initiation.
+pub(crate) fn build_session_request(
+    trigger: detection::SessionTrigger,
+    track_id: Option<u32>,
+) -> SessionRequest {
+    SessionRequest {
+        trigger: trigger.into(),
+        track_id,
+        ..Default::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session state
+// ---------------------------------------------------------------------------
+
+/// Tracks the autonomous session lifecycle on the Rust side.
+///
+/// Prevents duplicate `SessionRequest` messages while one is pending.
+/// The `AwaitingAck → Idle` and `AwaitingAck → Active` transitions are
+/// handled by the receive path (Part 5, step 5: `BehaviorCommand +
+/// SessionAck + IdentityResult`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    /// No session in progress or pending. A `SessionRequest` can be sent.
+    Idle,
+    /// A `SessionRequest` has been sent; waiting for `SessionAck` from Python.
+    AwaitingAck,
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
 
@@ -437,6 +510,9 @@ pub(crate) struct Pipeline {
     /// transition, the MCU hasn't yet received the relaxed command, so
     /// state clamping must use the stricter person limit for one frame.
     prev_person_in_frame: bool,
+    /// Autonomous session lifecycle state. Prevents duplicate
+    /// `SessionRequest` messages while one is pending.
+    session_state: SessionState,
     /// V4L2 timestamp of the previously processed frame. Used to compute
     /// inter-frame delta for velocity-to-per-second conversion.
     prev_frame_timestamp: Option<Duration>,
@@ -528,6 +604,7 @@ impl Pipeline {
             current_tilt: TILT_HOME,
             current_target_id: None,
             prev_person_in_frame: false,
+            session_state: SessionState::Idle,
             prev_frame_timestamp: None,
             y_plane_size,
             frames_drained: 0_u64,
@@ -596,9 +673,14 @@ impl Pipeline {
         let cat_detections = self.safety.cat_detections();
         let cat_count = cat_detections.len();
 
+        // --- Timestamp ---
+        // V4L2 kernel timestamp → monotonic microseconds for IPC and tracker.
+        // Duration::as_micros() returns u128; overflow requires >584K years uptime.
+        let timestamp_us = u64::try_from(frame_timestamp.as_micros()).unwrap_or(u64::MAX);
+
         // --- Tracking ---
         self.tracker
-            .update(cat_detections, model_width, model_height);
+            .update(cat_detections, model_width, model_height, timestamp_us);
         let track_count = self.tracker.tracks().len();
 
         // --- Targeting ---
@@ -620,8 +702,13 @@ impl Pipeline {
         self.serial.send(cmd)?;
 
         // --- IPC ---
-        let (ipc_connected, timestamp_us) =
-            self.stream_ipc(frame_timestamp, safety, ambient_brightness);
+        let ipc_connected = self.stream_ipc(
+            frame_timestamp,
+            safety,
+            ambient_brightness,
+            timestamp_us,
+            target_track_id,
+        );
 
         // --- State update ---
         // Clamp to the MCU's effective range so that on the next frame the
@@ -659,19 +746,23 @@ impl Pipeline {
         })
     }
 
-    /// Streams a [`DetectionFrame`] to the Python behavior engine over IPC.
+    /// Streams IPC messages to the Python behavior engine.
+    ///
+    /// Sends a [`DetectionFrame`] every frame (~15/sec), plus sporadic
+    /// [`TrackEvent`] and [`SessionRequest`] messages when track lifecycle
+    /// transitions occur or an autonomous session should start.
     ///
     /// Computes the FPS estimate from inter-frame timestamps, accepts new
-    /// clients, builds the proto message, and sends it. Handles disconnects
-    /// gracefully — a lost client reverts to autonomous mode.
-    ///
-    /// Returns `(ipc_connected, timestamp_us)`.
+    /// clients, and handles disconnects gracefully — a lost client reverts
+    /// to autonomous mode and resets session state.
     fn stream_ipc(
         &mut self,
         frame_timestamp: Duration,
         safety: SafetyResult,
         ambient_brightness: f32,
-    ) -> (bool, u64) {
+        timestamp_us: u64,
+        target_track_id: Option<u32>,
+    ) -> bool {
         // Compute FPS estimate from V4L2 monotonic timestamps for
         // velocity-per-frame → velocity-per-second conversion.
         let fps_estimate = match self.prev_frame_timestamp {
@@ -693,10 +784,6 @@ impl Pipeline {
             None => DEFAULT_FPS,
         };
 
-        // V4L2 kernel timestamp → proto `timestamp_us`. Duration::as_micros()
-        // returns u128; overflow requires >584K years uptime.
-        let timestamp_us = u64::try_from(frame_timestamp.as_micros()).unwrap_or(u64::MAX);
-
         // Accept a new IPC client if none is connected.
         if self.ipc_connection.is_none() {
             match self.ipc_server.try_accept() {
@@ -706,26 +793,56 @@ impl Pipeline {
             }
         }
 
-        // Stream DetectionFrame to the behavior engine.
-        if let Some(conn) = &mut self.ipc_connection {
-            let detection_frame = build_detection_frame(
-                self.tracker.tracks(),
-                safety,
-                timestamp_us,
-                self.frame_count,
-                ambient_brightness,
-                fps_estimate,
-            );
-            if let Err(err) = conn.send_detection_frame(&detection_frame) {
-                tracing::warn!(
-                    %err,
-                    "IPC client disconnected, reverting to autonomous mode"
-                );
+        let Some(conn) = &mut self.ipc_connection else {
+            return false;
+        };
+
+        // --- DetectionFrame (steady ~15/sec) ---
+        let detection_frame = build_detection_frame(
+            self.tracker.tracks(),
+            safety,
+            timestamp_us,
+            self.frame_count,
+            ambient_brightness,
+            fps_estimate,
+        );
+        if let Err(err) = conn.send_detection_frame(&detection_frame) {
+            tracing::warn!(%err, "IPC client disconnected, reverting to autonomous mode");
+            self.ipc_connection = None;
+            self.session_state = SessionState::Idle;
+            return false;
+        }
+
+        // --- TrackEvents (sporadic) ---
+        let track_events = build_track_events(self.tracker.events());
+        for event in &track_events {
+            if let Err(err) = conn.send_track_event(event) {
+                tracing::warn!(%err, "IPC client disconnected during track event send");
                 self.ipc_connection = None;
+                self.session_state = SessionState::Idle;
+                return false;
             }
         }
 
-        (self.ipc_connection.is_some(), timestamp_us)
+        // --- SessionRequest (sporadic, at most once per session) ---
+        if self.session_state == SessionState::Idle
+            && let Some(track_id) = target_track_id
+        {
+            let request = build_session_request(
+                detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+                Some(track_id),
+            );
+            if let Err(err) = conn.send_session_request(&request) {
+                tracing::warn!(%err, "IPC client disconnected during session request");
+                self.ipc_connection = None;
+                self.session_state = SessionState::Idle;
+                return false;
+            }
+            self.session_state = SessionState::AwaitingAck;
+            tracing::info!(track_id, "session request sent (cat detected)");
+        }
+
+        true
     }
 
     /// Returns the total number of frames processed since initialization.
@@ -788,7 +905,7 @@ mod tests {
     fn run_tracker(frames: &[&[Detection]]) -> Tracker {
         let mut tracker = Tracker::new(TrackerConfig::default());
         for dets in frames {
-            tracker.update(dets, 640.0_f32, 480.0_f32);
+            tracker.update(dets, 640.0_f32, 480.0_f32, 0_u64);
         }
         tracker
     }
@@ -920,7 +1037,7 @@ mod tests {
 
         // 3 frames to confirm.
         for _ in 0_u32..3_u32 {
-            tracker.update(&[det], 640.0_f32, 480.0_f32);
+            tracker.update(&[det], 640.0_f32, 480.0_f32, 0_u64);
         }
 
         // Verify confirmed.
@@ -931,7 +1048,7 @@ mod tests {
         );
 
         // Feed empty frames to transition to coasting.
-        tracker.update(empty, 640.0_f32, 480.0_f32);
+        tracker.update(empty, 640.0_f32, 480.0_f32, 0_u64);
         let tracks = tracker.tracks();
 
         let has_coasting = tracks.iter().any(|t| t.state() == TrackState::Coasting);
@@ -952,11 +1069,11 @@ mod tests {
 
         // Confirm both tracks.
         for _ in 0_u32..3_u32 {
-            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32);
+            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32, 0_u64);
         }
 
         // Feed only det_a — det_b's track starts coasting.
-        tracker.update(&[det_a], 640.0_f32, 480.0_f32);
+        tracker.update(&[det_a], 640.0_f32, 480.0_f32, 0_u64);
         let tracks = tracker.tracks();
 
         let confirmed_count = tracks
@@ -1058,7 +1175,7 @@ mod tests {
 
         // Confirm both tracks.
         for _ in 0_u32..3_u32 {
-            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32);
+            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32, 0_u64);
         }
 
         let first = select_target(tracker.tracks(), None);
@@ -1066,7 +1183,7 @@ mod tests {
 
         // Feed only det_b — det_a's track starts coasting, then dies.
         for _ in 0_u32..31_u32 {
-            tracker.update(&[det_b], 640.0_f32, 480.0_f32);
+            tracker.update(&[det_b], 640.0_f32, 480.0_f32, 0_u64);
         }
 
         // The old target is gone. Selection with the dead ID should
@@ -1997,10 +2114,10 @@ mod tests {
 
         // Confirm both tracks.
         for _ in 0_u32..3_u32 {
-            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32);
+            tracker.update(&[det_a, det_b], 640.0_f32, 480.0_f32, 0_u64);
         }
         // Feed only det_a to make det_b coast.
-        tracker.update(&[det_a], 640.0_f32, 480.0_f32);
+        tracker.update(&[det_a], 640.0_f32, 480.0_f32, 0_u64);
 
         let safety = SafetyResult {
             ceiling_y: 0.75_f32,
@@ -2427,5 +2544,296 @@ mod tests {
                 pixel_val,
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // build_track_events
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_track_events_empty() {
+        let events = build_track_events(&[]);
+        assert!(events.is_empty(), "no updates must produce no events");
+    }
+
+    #[test]
+    fn test_build_track_events_confirmed_produces_new_track() {
+        let updates = [TrackUpdate::Confirmed { track_id: 7_u32 }];
+        let events = build_track_events(&updates);
+        assert_eq!(events.len(), 1, "one Confirmed must produce one event");
+
+        let event = events.first().expect("event must exist");
+        match &event.event {
+            Some(track_event::Event::NewTrack(nt)) => {
+                assert_eq!(nt.track_id, 7_u32, "track_id must match");
+            }
+            other => panic!("expected NewTrack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_track_events_lost_produces_track_lost() {
+        let updates = [TrackUpdate::Lost {
+            track_id: 3_u32,
+            duration_ms: 5000_u32,
+        }];
+        let events = build_track_events(&updates);
+        assert_eq!(events.len(), 1, "one Lost must produce one event");
+
+        let event = events.first().expect("event must exist");
+        match &event.event {
+            Some(track_event::Event::TrackLost(tl)) => {
+                assert_eq!(tl.track_id, 3_u32, "track_id must match");
+                assert_eq!(tl.duration_ms, 5000_u32, "duration_ms must match");
+            }
+            other => panic!("expected TrackLost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_track_events_reacquired_filtered() {
+        let updates = [TrackUpdate::Reacquired { track_id: 1_u32 }];
+        let events = build_track_events(&updates);
+        assert!(
+            events.is_empty(),
+            "Reacquired must be filtered (no IPC message until embedding model)"
+        );
+    }
+
+    #[test]
+    fn test_build_track_events_mixed() {
+        let updates = [
+            TrackUpdate::Confirmed { track_id: 0_u32 },
+            TrackUpdate::Reacquired { track_id: 1_u32 },
+            TrackUpdate::Lost {
+                track_id: 2_u32,
+                duration_ms: 3000_u32,
+            },
+        ];
+        let events = build_track_events(&updates);
+        assert_eq!(
+            events.len(),
+            2,
+            "Confirmed + Lost = 2 events (Reacquired filtered)"
+        );
+
+        assert!(
+            matches!(
+                &events.first().expect("first event").event,
+                Some(track_event::Event::NewTrack(_))
+            ),
+            "first event must be NewTrack"
+        );
+        assert!(
+            matches!(
+                &events.get(1).expect("second event").event,
+                Some(track_event::Event::TrackLost(_))
+            ),
+            "second event must be TrackLost"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_session_request
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_session_request_cat_detected() {
+        let request = build_session_request(
+            detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+            Some(5_u32),
+        );
+        assert_eq!(
+            request.trigger,
+            detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+            "trigger must be CAT_DETECTED"
+        );
+        assert_eq!(
+            request.track_id,
+            Some(5_u32),
+            "track_id must be set for cat-detected trigger"
+        );
+    }
+
+    #[test]
+    fn test_build_session_request_scheduled() {
+        let request =
+            build_session_request(detection::SessionTrigger::SESSION_TRIGGER_SCHEDULED, None);
+        assert_eq!(
+            request.trigger,
+            detection::SessionTrigger::SESSION_TRIGGER_SCHEDULED,
+            "trigger must be SCHEDULED"
+        );
+        assert_eq!(
+            request.track_id, None,
+            "track_id must be None for scheduled trigger"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_track_events — insta snapshot
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_track_event_new_track() {
+        let updates = [TrackUpdate::Confirmed { track_id: 1_u32 }];
+        let events = build_track_events(&updates);
+        let event = events.first().expect("event must exist");
+        let payload = event.encode_to_vec();
+        insta::assert_yaml_snapshot!("track_event_new_track", payload);
+    }
+
+    #[test]
+    fn test_snapshot_track_event_track_lost() {
+        let updates = [TrackUpdate::Lost {
+            track_id: 3_u32,
+            duration_ms: 12500_u32,
+        }];
+        let events = build_track_events(&updates);
+        let event = events.first().expect("event must exist");
+        let payload = event.encode_to_vec();
+        insta::assert_yaml_snapshot!("track_event_track_lost", payload);
+    }
+
+    #[test]
+    fn test_snapshot_session_request_cat_detected() {
+        let request = build_session_request(
+            detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+            Some(2_u32),
+        );
+        let payload = request.encode_to_vec();
+        insta::assert_yaml_snapshot!("session_request_cat_detected", payload);
+    }
+
+    // -----------------------------------------------------------------------
+    // IPC: TrackEvent + SessionRequest over real Unix socket
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ipc_track_event_new_track_round_trip() {
+        let (server, _dir) = ipc_test_server();
+        let mut client = ipc_raw_client(&server);
+        let mut conn = ipc_accept_connection(&server);
+
+        let updates = [TrackUpdate::Confirmed { track_id: 42_u32 }];
+        let events = build_track_events(&updates);
+        let event = events.first().expect("event must exist");
+
+        conn.send_track_event(event).expect("send must succeed");
+
+        client
+            .set_nonblocking(false)
+            .expect("set blocking must succeed");
+
+        let mut header_buf = [0_u8; 5_usize];
+        std::io::Read::read_exact(&mut client, &mut header_buf).expect("read header must succeed");
+
+        let header = crate::ipc::decode_header(header_buf).expect("header must decode");
+        assert_eq!(
+            header.wire_type,
+            crate::ipc::WireType::TrackEvent,
+            "wire type must be TrackEvent"
+        );
+
+        let payload_len = usize::try_from(header.length).expect("length fits usize in tests");
+        let mut payload_buf = vec![0_u8; payload_len];
+        std::io::Read::read_exact(&mut client, &mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = buffa::DecodeOptions::new()
+            .decode_from_slice::<TrackEvent>(&payload_buf)
+            .expect("protobuf decode must succeed");
+
+        match &decoded.event {
+            Some(track_event::Event::NewTrack(nt)) => {
+                assert_eq!(nt.track_id, 42_u32, "track_id must match");
+            }
+            other => panic!("expected NewTrack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ipc_track_event_track_lost_round_trip() {
+        let (server, _dir) = ipc_test_server();
+        let mut client = ipc_raw_client(&server);
+        let mut conn = ipc_accept_connection(&server);
+
+        let updates = [TrackUpdate::Lost {
+            track_id: 7_u32,
+            duration_ms: 8500_u32,
+        }];
+        let events = build_track_events(&updates);
+        let event = events.first().expect("event must exist");
+
+        conn.send_track_event(event).expect("send must succeed");
+
+        client
+            .set_nonblocking(false)
+            .expect("set blocking must succeed");
+
+        let mut header_buf = [0_u8; 5_usize];
+        std::io::Read::read_exact(&mut client, &mut header_buf).expect("read header must succeed");
+        let header = crate::ipc::decode_header(header_buf).expect("header must decode");
+
+        let payload_len = usize::try_from(header.length).expect("length fits usize");
+        let mut payload_buf = vec![0_u8; payload_len];
+        std::io::Read::read_exact(&mut client, &mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = buffa::DecodeOptions::new()
+            .decode_from_slice::<TrackEvent>(&payload_buf)
+            .expect("decode must succeed");
+
+        match &decoded.event {
+            Some(track_event::Event::TrackLost(tl)) => {
+                assert_eq!(tl.track_id, 7_u32, "track_id must match");
+                assert_eq!(tl.duration_ms, 8500_u32, "duration_ms must match");
+            }
+            other => panic!("expected TrackLost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ipc_session_request_round_trip() {
+        let (server, _dir) = ipc_test_server();
+        let mut client = ipc_raw_client(&server);
+        let mut conn = ipc_accept_connection(&server);
+
+        let request = build_session_request(
+            detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+            Some(10_u32),
+        );
+
+        conn.send_session_request(&request)
+            .expect("send must succeed");
+
+        client
+            .set_nonblocking(false)
+            .expect("set blocking must succeed");
+
+        let mut header_buf = [0_u8; 5_usize];
+        std::io::Read::read_exact(&mut client, &mut header_buf).expect("read header must succeed");
+        let header = crate::ipc::decode_header(header_buf).expect("header must decode");
+        assert_eq!(
+            header.wire_type,
+            crate::ipc::WireType::SessionRequest,
+            "wire type must be SessionRequest"
+        );
+
+        let payload_len = usize::try_from(header.length).expect("length fits usize");
+        let mut payload_buf = vec![0_u8; payload_len];
+        std::io::Read::read_exact(&mut client, &mut payload_buf)
+            .expect("read payload must succeed");
+
+        let decoded = buffa::DecodeOptions::new()
+            .decode_from_slice::<SessionRequest>(&payload_buf)
+            .expect("decode must succeed");
+
+        assert_eq!(
+            decoded.trigger,
+            detection::SessionTrigger::SESSION_TRIGGER_CAT_DETECTED,
+            "trigger must match"
+        );
+        assert_eq!(decoded.track_id, Some(10_u32), "track_id must match");
     }
 }
