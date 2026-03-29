@@ -40,6 +40,7 @@ class MsgType(IntEnum):
     BEHAVIOR_COMMAND = 4
     SESSION_ACK = 5
     IDENTITY_RESULT = 6
+    SESSION_END = 7
 
 
 # ---------------------------------------------------------------------------

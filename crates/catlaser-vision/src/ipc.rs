@@ -20,6 +20,7 @@
 //! | Python → Rust   | `BehaviorCommand`  | 1-5/sec      |
 //! | Python → Rust   | `SessionAck`       | sporadic     |
 //! | Python → Rust   | `IdentityResult`   | sporadic     |
+//! | Python → Rust   | `SessionEnd`       | sporadic     |
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,7 +30,8 @@ use std::time::Duration;
 use buffa::{DecodeOptions, Message};
 
 use crate::proto::detection::{
-    BehaviorCommand, DetectionFrame, IdentityResult, SessionAck, SessionRequest, TrackEvent,
+    BehaviorCommand, DetectionFrame, IdentityResult, SessionAck, SessionEnd, SessionRequest,
+    TrackEvent,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,13 +98,15 @@ pub(crate) enum WireType {
     SessionAck = 5,
     /// `IdentityResult` — Python → Rust, sporadic.
     IdentityResult = 6,
+    /// `SessionEnd` — Python → Rust, sporadic.
+    SessionEnd = 7,
 }
 
 impl WireType {
     /// Converts to the on-wire byte value.
     #[expect(
         clippy::as_conversions,
-        reason = "repr(u8) enum to u8 is a no-op cast — values are 1-6, always valid"
+        reason = "repr(u8) enum to u8 is a no-op cast — values are 1-7, always valid"
     )]
     pub(crate) const fn to_byte(self) -> u8 {
         self as u8
@@ -117,6 +121,7 @@ impl WireType {
             4 => Ok(Self::BehaviorCommand),
             5 => Ok(Self::SessionAck),
             6 => Ok(Self::IdentityResult),
+            7 => Ok(Self::SessionEnd),
             _ => Err(IpcError::InvalidWireType(byte)),
         }
     }
@@ -283,6 +288,8 @@ pub(crate) enum IncomingMessage {
     SessionAck(SessionAck),
     /// Response to an `IdentityRequest`.
     IdentityResult(IdentityResult),
+    /// The behavior engine has finished the current session.
+    SessionEnd,
 }
 
 /// Decodes a payload into an [`IncomingMessage`] based on the wire type.
@@ -306,6 +313,12 @@ fn decode_incoming(wire_type: WireType, payload: &[u8]) -> Result<IncomingMessag
                 .decode_from_slice::<IdentityResult>(payload)
                 .map_err(|source| IpcError::Decode { source })?;
             Ok(IncomingMessage::IdentityResult(msg))
+        }
+        WireType::SessionEnd => {
+            // Decode to validate the payload, even though SessionEnd has no fields.
+            opts.decode_from_slice::<SessionEnd>(payload)
+                .map_err(|source| IpcError::Decode { source })?;
+            Ok(IncomingMessage::SessionEnd)
         }
         // DetectionFrame, TrackEvent, SessionRequest are outbound-only.
         wire_type
@@ -709,6 +722,7 @@ mod tests {
             WireType::BehaviorCommand,
             WireType::SessionAck,
             WireType::IdentityResult,
+            WireType::SessionEnd,
         ];
         for wt in variants {
             let byte = wt.to_byte();
@@ -724,7 +738,7 @@ mod tests {
             WireType::from_byte(0).is_err(),
             "0 (UNSPECIFIED) must be rejected"
         );
-        assert!(WireType::from_byte(7).is_err(), "7 must be rejected");
+        assert!(WireType::from_byte(8).is_err(), "8 must be rejected");
         assert!(WireType::from_byte(255).is_err(), "255 must be rejected");
     }
 
@@ -821,6 +835,7 @@ mod tests {
             Just(WireType::BehaviorCommand),
             Just(WireType::SessionAck),
             Just(WireType::IdentityResult),
+            Just(WireType::SessionEnd),
         ]
     }
 
@@ -1099,6 +1114,33 @@ mod tests {
             }
             other => panic!("expected IdentityResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_receive_session_end_from_client() {
+        let (server, _dir) = test_server();
+        let mut client = raw_client(&server);
+        let mut conn = accept_connection(&server);
+
+        let end = detection::SessionEnd::default();
+        let payload = end.encode_to_vec();
+        let mut frame_buf = Vec::new();
+        encode_frame(WireType::SessionEnd, &payload, &mut frame_buf).expect("encode must succeed");
+        client
+            .write_all(&frame_buf)
+            .expect("client write must succeed");
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let msg = conn
+            .try_recv()
+            .expect("recv must not fail")
+            .expect("message must be available");
+
+        assert!(
+            matches!(msg, IncomingMessage::SessionEnd),
+            "expected SessionEnd, got {msg:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

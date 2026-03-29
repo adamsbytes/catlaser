@@ -60,6 +60,23 @@ const DEFAULT_FPS: f32 = 15.0_f32;
 /// disabling session initiation.
 const SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Cooldown after Python rejects a session with `SKIP_REASON_COOLDOWN`.
+/// Short — the cat is likely still in frame and the previous session just
+/// ended. Python tracks its own cooldown window; this just prevents
+/// Rust from immediately re-requesting.
+const REJECT_COOLDOWN_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Cooldown after Python rejects with `SKIP_REASON_QUIET_HOURS`.
+/// The owner set quiet hours for a reason. 5 minutes avoids pointless
+/// IPC churn while still picking up when quiet hours end.
+const REJECT_COOLDOWN_QUIET_HOURS: Duration = Duration::from_secs(300);
+
+/// Cooldown after Python rejects with `SKIP_REASON_HOPPER_EMPTY`.
+/// Requires physical intervention (owner refills treats). 5 minutes
+/// keeps Rust from spamming while still resuming reasonably quickly
+/// after a refill.
+const REJECT_COOLDOWN_HOPPER_EMPTY: Duration = Duration::from_secs(300);
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -456,6 +473,112 @@ pub(crate) fn build_session_request(
     }
 }
 
+/// Maps a [`SkipReason`](detection::SkipReason) to the appropriate cooldown
+/// duration before Rust retries a `SessionRequest`.
+///
+/// Each reason has a different expected resolution time: cooldown is brief
+/// (previous session just ended), quiet hours and hopper empty are long
+/// (require time passage or owner intervention).
+pub(crate) fn reject_cooldown(reason: buffa::EnumValue<detection::SkipReason>) -> Duration {
+    match reason.as_known() {
+        Some(detection::SkipReason::SKIP_REASON_QUIET_HOURS) => REJECT_COOLDOWN_QUIET_HOURS,
+        Some(detection::SkipReason::SKIP_REASON_HOPPER_EMPTY) => REJECT_COOLDOWN_HOPPER_EMPTY,
+        // COOLDOWN, UNSPECIFIED, and unknown future variants: use the
+        // shortest cooldown to avoid permanently blocking session initiation.
+        Some(_) | None => REJECT_COOLDOWN_COOLDOWN,
+    }
+}
+
+/// Advances session state timeouts and cooldowns.
+///
+/// Times out stale `AwaitingAck` states so a stuck Python doesn't permanently
+/// disable session initiation. Expires cooldowns so Rust can attempt new
+/// sessions.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Instant + Duration panics only beyond ~500 billion years; \
+              SESSION_ACK_TIMEOUT is 5 seconds"
+)]
+fn advance_session_state(state: &mut SessionState) {
+    if let SessionState::AwaitingAck { sent_at } = *state
+        && sent_at.elapsed() >= SESSION_ACK_TIMEOUT
+    {
+        tracing::warn!(
+            elapsed_ms = sent_at.elapsed().as_millis(),
+            "session ack timed out, cooling down"
+        );
+        *state = SessionState::Cooldown {
+            until: Instant::now() + SESSION_ACK_TIMEOUT,
+        };
+    }
+
+    if let SessionState::Cooldown { until } = *state
+        && Instant::now() >= until
+    {
+        *state = SessionState::Idle;
+    }
+}
+
+/// Dispatches a single incoming IPC message to the appropriate session state
+/// handler.
+///
+/// Free function (not a method) to avoid borrowing `self` while `conn`
+/// (from `self.ipc_connection`) is in use. Only mutates `session_state`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Instant + Duration panics only beyond ~500 billion years; \
+              reject cooldowns are ≤ 300 seconds"
+)]
+fn handle_incoming(msg: IncomingMessage, session_state: &mut SessionState) {
+    match msg {
+        IncomingMessage::SessionAck(ack) => {
+            if let SessionState::AwaitingAck { .. } = *session_state {
+                if ack.accept {
+                    tracing::info!("session accepted");
+                    *session_state = SessionState::Active;
+                } else {
+                    let cooldown = reject_cooldown(ack.skip_reason);
+                    tracing::info!(
+                        skip_reason = ?ack.skip_reason,
+                        cooldown_secs = cooldown.as_secs(),
+                        "session rejected"
+                    );
+                    *session_state = SessionState::Cooldown {
+                        until: Instant::now() + cooldown,
+                    };
+                }
+            } else {
+                tracing::debug!("received stale SessionAck, ignoring");
+            }
+        }
+        IncomingMessage::SessionEnd => {
+            if matches!(*session_state, SessionState::Active) {
+                tracing::info!("session ended by behavior engine");
+                *session_state = SessionState::Idle;
+            } else {
+                tracing::debug!(
+                    state = ?session_state,
+                    "received SessionEnd outside Active state, ignoring"
+                );
+            }
+        }
+        IncomingMessage::BehaviorCommand(cmd) => {
+            tracing::debug!(
+                mode = ?cmd.mode,
+                track_id = cmd.target_track_id,
+                "received BehaviorCommand, behavior integration pending"
+            );
+        }
+        IncomingMessage::IdentityResult(result) => {
+            tracing::debug!(
+                track_id = result.track_id,
+                cat_id = %result.cat_id,
+                "received IdentityResult, identity integration pending"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session state
 // ---------------------------------------------------------------------------
@@ -844,40 +967,10 @@ impl Pipeline {
             }
         }
 
-        // --- Drain incoming messages (Python → Rust) ---
+        // --- Drain incoming messages ---
         loop {
             match conn.try_recv() {
-                Ok(Some(msg)) => match msg {
-                    IncomingMessage::SessionAck(ack) => {
-                        if let SessionState::AwaitingAck { .. } = self.session_state {
-                            if ack.accept {
-                                tracing::info!("session accepted");
-                                self.session_state = SessionState::Active;
-                            } else {
-                                tracing::info!(skip_reason = ?ack.skip_reason, "session rejected");
-                                self.session_state = SessionState::Cooldown {
-                                    until: Instant::now() + SESSION_ACK_TIMEOUT,
-                                };
-                            }
-                        } else {
-                            tracing::debug!("received stale SessionAck, ignoring");
-                        }
-                    }
-                    IncomingMessage::BehaviorCommand(cmd) => {
-                        tracing::debug!(
-                            mode = ?cmd.mode,
-                            track_id = cmd.target_track_id,
-                            "received BehaviorCommand, behavior integration pending"
-                        );
-                    }
-                    IncomingMessage::IdentityResult(result) => {
-                        tracing::debug!(
-                            track_id = result.track_id,
-                            cat_id = %result.cat_id,
-                            "received IdentityResult, identity integration pending"
-                        );
-                    }
-                },
+                Ok(Some(msg)) => handle_incoming(msg, &mut self.session_state),
                 Ok(None) => break,
                 Err(err) => {
                     tracing::warn!(%err, "IPC recv error, disconnecting");
@@ -889,27 +982,7 @@ impl Pipeline {
         }
 
         // --- Session state transitions ---
-        // Time out stale AwaitingAck so a stuck Python doesn't permanently
-        // disable session initiation. Transitions to Cooldown (not Idle) to
-        // prevent immediate re-fire on the next frame.
-        if let SessionState::AwaitingAck { sent_at } = self.session_state
-            && sent_at.elapsed() >= SESSION_ACK_TIMEOUT
-        {
-            tracing::warn!(
-                elapsed_ms = sent_at.elapsed().as_millis(),
-                "session ack timed out, cooling down"
-            );
-            self.session_state = SessionState::Cooldown {
-                until: Instant::now() + SESSION_ACK_TIMEOUT,
-            };
-        }
-
-        // Expire cooldown — ready for a new session attempt.
-        if let SessionState::Cooldown { until } = self.session_state
-            && Instant::now() >= until
-        {
-            self.session_state = SessionState::Idle;
-        }
+        advance_session_state(&mut self.session_state);
 
         // --- SessionRequest (sporadic, at most once per session) ---
         if matches!(self.session_state, SessionState::Idle)

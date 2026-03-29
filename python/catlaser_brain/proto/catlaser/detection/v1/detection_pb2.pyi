@@ -15,6 +15,7 @@ MSG_TYPE_BEHAVIOR_COMMAND: MsgType
 MSG_TYPE_DETECTION_FRAME: MsgType
 MSG_TYPE_IDENTITY_RESULT: MsgType
 MSG_TYPE_SESSION_ACK: MsgType
+MSG_TYPE_SESSION_END: MsgType
 MSG_TYPE_SESSION_REQUEST: MsgType
 MSG_TYPE_TRACK_EVENT: MsgType
 MSG_TYPE_UNSPECIFIED: MsgType
@@ -158,6 +159,10 @@ class SessionAck(_message.Message):
     def __init__(
         self, accept: bool = ..., skip_reason: _Optional[_Union[SkipReason, str]] = ...
     ) -> None: ...
+
+class SessionEnd(_message.Message):
+    __slots__ = []
+    def __init__(self) -> None: ...
 
 class SessionRequest(_message.Message):
     __slots__ = ["track_id", "trigger"]

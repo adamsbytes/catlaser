@@ -16,6 +16,7 @@ enum MsgType {
   MSG_TYPE_BEHAVIOR_COMMAND = 4;
   MSG_TYPE_SESSION_ACK = 5;
   MSG_TYPE_IDENTITY_RESULT = 6;
+  MSG_TYPE_SESSION_END = 7;
 }
 
 // SORT tracker lifecycle states.
@@ -167,6 +168,11 @@ message SessionAck {
   // Set when accept is false. Tells Rust why the session was skipped.
   SkipReason skip_reason = 2;
 }
+
+// Sent by Python when the behavior engine finishes a session. Rust transitions
+// from Active back to Idle, enabling future SessionRequest initiation on the
+// next cat detection or scheduled trigger.
+message SessionEnd {}
 
 // Response to IdentityRequest. Python resolves the embedding against the
 // cat profile catalog in SQLite.

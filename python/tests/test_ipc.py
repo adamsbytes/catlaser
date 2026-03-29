@@ -331,6 +331,23 @@ class TestIpcClient:
                 client_sock.close()
                 peer_sock.close()
 
+    def test_send_session_end(self):
+        with TemporaryDirectory() as tmpdir:
+            _, client_sock, peer_sock = _make_socket_pair(tmpdir)
+            try:
+                client = IpcClient(client_sock)
+                client.send_session_end()
+
+                header = peer_sock.recv(HEADER_SIZE)
+                type_byte, length = struct.unpack("<BI", header)
+                assert type_byte == MsgType.SESSION_END
+                payload = peer_sock.recv(length)
+                decoded = pb.SessionEnd()
+                decoded.ParseFromString(payload)
+            finally:
+                client_sock.close()
+                peer_sock.close()
+
     def test_recv_detection_frame(self):
         with TemporaryDirectory() as tmpdir:
             _, client_sock, peer_sock = _make_socket_pair(tmpdir)
