@@ -161,8 +161,9 @@ impl Targeter {
     /// in hundredths of a degree — the camera is pointing in this
     /// direction, so the frame coordinates are relative to it.
     ///
-    /// Returns servo angles clamped to mechanical limits. Safety
-    /// ceiling enforcement is a separate downstream step.
+    /// Returns servo angles clamped to mechanical limits. Call
+    /// [`enforce_ceiling()`](Self::enforce_ceiling) on the result to
+    /// apply the person-detection safety constraint.
     pub(crate) fn compute(
         &self,
         target_x: f32,
@@ -184,6 +185,52 @@ impl Targeter {
         TargetingSolution {
             pan: f32_to_clamped_centideg(raw_pan, PAN_LIMIT_MIN, PAN_LIMIT_MAX),
             tilt: f32_to_clamped_centideg(raw_tilt, TILT_LIMIT_MIN, TILT_LIMIT_MAX),
+        }
+    }
+
+    /// Enforces the safety ceiling on a targeting solution.
+    ///
+    /// Converts the normalized `ceiling_y` (0.0 = top of frame, 1.0 =
+    /// bottom) to an absolute tilt angle and clamps the solution's tilt
+    /// to stay at or below the ceiling line. Higher tilt values point
+    /// further downward, so "below the ceiling" means
+    /// `tilt >= ceiling_tilt`.
+    ///
+    /// `ceiling_y` is the pre-computed safety ceiling from person
+    /// detection. A negative value (the no-person sentinel) means no
+    /// constraint — the solution passes through unchanged.
+    ///
+    /// `current_tilt` is the same value passed to
+    /// [`compute()`](Self::compute) — it anchors the frame-to-angle
+    /// conversion because frame coordinates are relative to the current
+    /// camera pointing direction.
+    ///
+    /// Parallax correction is applied because the constraint is on
+    /// where the *laser dot* appears in the camera image, not where
+    /// the servo points the mount.
+    pub(crate) fn enforce_ceiling(
+        &self,
+        solution: TargetingSolution,
+        ceiling_y: f32,
+        current_tilt: i16,
+    ) -> TargetingSolution {
+        if ceiling_y < 0.0_f32 {
+            return solution;
+        }
+
+        // Same pinhole model as compute(): frame displacement from
+        // center maps to angular offset proportional to FOV. The
+        // ceiling line is where a person's 75% height appears in the
+        // frame — the laser dot must never appear above it.
+        let ceiling_tilt_raw =
+            f32::from(current_tilt) + (ceiling_y - 0.5_f32) * self.vfov - self.parallax_tilt;
+
+        let ceiling_tilt =
+            f32_to_clamped_centideg(ceiling_tilt_raw, TILT_LIMIT_MIN, TILT_LIMIT_MAX);
+
+        TargetingSolution {
+            pan: solution.pan,
+            tilt: solution.tilt.max(ceiling_tilt),
         }
     }
 }
@@ -874,6 +921,483 @@ mod tests {
             prop_assert_eq!(
                 s1.pan, s2.pan,
                 "pan must be independent of target_y",
+            );
+        }
+    }
+
+    // ---- safety ceiling enforcement ----
+    //
+    // VFOV 64 deg = 6400 centideg. Half = 3200 centideg.
+    // ceiling_tilt = current_tilt + (ceiling_y - 0.5) * vfov - parallax_tilt
+
+    #[test]
+    fn test_ceiling_no_person_passes_through() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        let solution = TargetingSolution {
+            pan: 2000_i16,
+            tilt: -500_i16,
+        };
+        let result = t.enforce_ceiling(solution, -1.0_f32, 0_i16);
+        assert_eq!(
+            result, solution,
+            "negative ceiling_y must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_clamps_tilt_above_ceiling() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.5 (center), current_tilt = 4500, no parallax.
+        // ceiling_tilt = 4500 + (0.5 - 0.5) * 6400 = 4500.
+        // Target tilt of 2000 is above ceiling -> clamp to 4500.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 2000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.5_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 4500_i16,
+            "target above ceiling must be clamped to ceiling tilt"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_preserves_target_below() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_tilt = 4500. Target tilt of 6000 is below -> no change.
+        let solution = TargetingSolution {
+            pan: 1000_i16,
+            tilt: 6000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.5_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 6000_i16,
+            "target below ceiling must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_does_not_affect_pan() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        let solution = TargetingSolution {
+            pan: -3000_i16,
+            tilt: 0_i16,
+        };
+        // ceiling_tilt = 4500 -> tilt gets clamped, pan must not change.
+        let result = t.enforce_ceiling(solution, 0.5_f32, 4500_i16);
+        assert_eq!(
+            result.pan, -3000_i16,
+            "ceiling enforcement must never modify pan"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_at_frame_top_permissive() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.0 (top edge), current_tilt = 4500.
+        // ceiling_tilt = 4500 + (0.0 - 0.5) * 6400 = 4500 - 3200 = 1300.
+        // Person visible at top of frame -> ceiling is high up, laser
+        // has most of the frame to play in.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 2000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.0_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 2000_i16,
+            "target at 2000 is below ceiling at 1300, must pass through"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_at_frame_top_still_clamps_above() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_tilt = 1300 (from above). Target at 500 is above -> clamp.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 500_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.0_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 1300_i16,
+            "target above ceiling at frame top must clamp to 1300"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_at_frame_bottom_restrictive() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 1.0 (bottom edge), current_tilt = 4500.
+        // ceiling_tilt = 4500 + (1.0 - 0.5) * 6400 = 4500 + 3200 = 7700.
+        // Person at bottom of frame -> ceiling is low, very restrictive.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 5000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 1.0_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 7700_i16,
+            "target above ceiling at frame bottom must clamp to 7700"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_at_frame_bottom_passes_below() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_tilt = 7700. Target at 8000 is below -> passes through.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 8000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 1.0_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 8000_i16,
+            "target below ceiling at frame bottom must pass through"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_at_exact_boundary_passes_through() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.5, current_tilt = 4500. ceiling_tilt = 4500.
+        // Target exactly at ceiling -> passes through (max is identity).
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 4500_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.5_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 4500_i16,
+            "target exactly at ceiling must pass through"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_clamps_to_servo_limits() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.0, current_tilt = -4500 (TILT_LIMIT_MIN).
+        // ceiling_tilt_raw = -4500 + (0.0 - 0.5) * 6400 = -4500 - 3200 = -7700.
+        // Clamped to TILT_LIMIT_MIN (-4500). Target also at -4500 -> no change.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: TILT_LIMIT_MIN,
+        };
+        let result = t.enforce_ceiling(solution, 0.0_f32, TILT_LIMIT_MIN);
+        assert_eq!(
+            result.tilt, TILT_LIMIT_MIN,
+            "ceiling below TILT_LIMIT_MIN must clamp, not produce out-of-range tilt"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_high_value_clamps_to_tilt_max() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 1.0, current_tilt = 9000 (TILT_LIMIT_MAX).
+        // ceiling_tilt_raw = 9000 + 3200 = 12200. Clamped to 9000.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 8000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 1.0_f32, TILT_LIMIT_MAX);
+        assert_eq!(
+            result.tilt, TILT_LIMIT_MAX,
+            "ceiling exceeding TILT_LIMIT_MAX must clamp to maximum"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_with_parallax_shifts_angle() {
+        let no_parallax = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        let with_parallax = Targeter::new(&offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+
+        // Both at ceiling_y = 0.5, current_tilt = 4500.
+        // No parallax: ceiling_tilt = 4500 + 0 - 0 = 4500.
+        // With parallax (laser_offset_y = 10mm at 2000mm):
+        //   parallax_tilt ~ 29 centideg.
+        //   ceiling_tilt = 4500 + 0 - 29 = 4471.
+        // The laser is physically below the camera, so it naturally
+        // hits lower in the image — the ceiling constraint can be
+        // less restrictive (lower minimum tilt).
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 0_i16,
+        };
+
+        let r_no = no_parallax.enforce_ceiling(solution, 0.5_f32, 4500_i16);
+        let r_with = with_parallax.enforce_ceiling(solution, 0.5_f32, 4500_i16);
+
+        assert_eq!(
+            r_no.tilt, 4500_i16,
+            "no-parallax ceiling at center must be 4500"
+        );
+        assert!(
+            r_with.tilt < r_no.tilt,
+            "positive y-parallax must produce lower ceiling tilt: with={}, without={}",
+            r_with.tilt,
+            r_no.tilt,
+        );
+    }
+
+    #[test]
+    fn test_ceiling_zero_at_origin() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.5, current_tilt = 0. ceiling_tilt = 0.
+        // Target at -2000 is above -> clamp to 0.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: -2000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.5_f32, 0_i16);
+        assert_eq!(
+            result.tilt, 0_i16,
+            "ceiling at frame center with current_tilt=0 must clamp to 0"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_quarter_offset() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.25, current_tilt = 4500.
+        // ceiling_tilt = 4500 + (0.25 - 0.5) * 6400 = 4500 - 1600 = 2900.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 1000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.25_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 2900_i16,
+            "ceiling at y=0.25 must produce ceiling_tilt of 2900"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_three_quarter_offset() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.75, current_tilt = 4500.
+        // ceiling_tilt = 4500 + (0.75 - 0.5) * 6400 = 4500 + 1600 = 6100.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 5000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.75_f32, 4500_i16);
+        assert_eq!(
+            result.tilt, 6100_i16,
+            "ceiling at y=0.75 must produce ceiling_tilt of 6100"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_negative_current_tilt() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.5, current_tilt = -1000.
+        // ceiling_tilt = -1000 + 0 = -1000.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: -2000_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.5_f32, -1000_i16);
+        assert_eq!(
+            result.tilt, -1000_i16,
+            "ceiling with negative current_tilt must compute correctly"
+        );
+    }
+
+    #[test]
+    fn test_ceiling_zero_sentinel_is_valid_constraint() {
+        let t = Targeter::new(&zero_offset_config())
+            .ok()
+            .unwrap_or_else(|| unreachable!());
+        // ceiling_y = 0.0 is a valid constraint (person at top of frame),
+        // not a no-person sentinel. Only negative values mean no constraint.
+        let solution = TargetingSolution {
+            pan: 0_i16,
+            tilt: 500_i16,
+        };
+        let result = t.enforce_ceiling(solution, 0.0_f32, 4500_i16);
+        // ceiling_tilt = 4500 - 3200 = 1300. 500 < 1300 -> clamp.
+        assert_eq!(
+            result.tilt, 1300_i16,
+            "ceiling_y=0.0 is a valid constraint, not a sentinel"
+        );
+    }
+
+    // ---- safety ceiling proptest ----
+
+    proptest! {
+        /// Output tilt must be at or below the ceiling when a person
+        /// is present (ceiling_y >= 0).
+        #[test]
+        fn test_ceiling_output_at_or_below(
+            ceiling_y in 0.0_f32..=1.0_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            target_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&zero_offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt: target_tilt };
+            let result = t.enforce_ceiling(solution, ceiling_y, current_tilt);
+
+            let ceiling_tilt_raw = f32::from(current_tilt)
+                + (ceiling_y - 0.5_f32) * 6400.0_f32;
+            let ceiling_tilt = f32_to_clamped_centideg(
+                ceiling_tilt_raw, TILT_LIMIT_MIN, TILT_LIMIT_MAX,
+            );
+
+            prop_assert!(
+                result.tilt >= ceiling_tilt,
+                "output tilt {} must be >= ceiling tilt {} \
+                 (ceiling_y={}, current_tilt={}, target_tilt={})",
+                result.tilt, ceiling_tilt, ceiling_y, current_tilt, target_tilt,
+            );
+        }
+
+        /// Pan is never modified by ceiling enforcement.
+        #[test]
+        fn test_ceiling_pan_unchanged(
+            ceiling_y in -1.5_f32..=1.5_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+            tilt in -4500_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&zero_offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt };
+            let result = t.enforce_ceiling(solution, ceiling_y, current_tilt);
+            prop_assert_eq!(
+                result.pan, pan,
+                "ceiling enforcement must never modify pan",
+            );
+        }
+
+        /// Output tilt stays within servo limits regardless of inputs.
+        #[test]
+        fn test_ceiling_output_within_servo_limits(
+            ceiling_y in -1.5_f32..=1.5_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+            tilt in -4500_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&zero_offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt };
+            let result = t.enforce_ceiling(solution, ceiling_y, current_tilt);
+            prop_assert!(
+                result.tilt >= TILT_LIMIT_MIN && result.tilt <= TILT_LIMIT_MAX,
+                "output tilt {} outside [{}, {}]",
+                result.tilt, TILT_LIMIT_MIN, TILT_LIMIT_MAX,
+            );
+        }
+
+        /// Negative ceiling_y (no person) never modifies the solution.
+        #[test]
+        fn test_ceiling_negative_is_identity(
+            ceiling_y in -10.0_f32..-0.001_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+            tilt in -4500_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&zero_offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt };
+            let result = t.enforce_ceiling(solution, ceiling_y, current_tilt);
+            prop_assert_eq!(
+                result, solution,
+                "negative ceiling_y must return solution unchanged",
+            );
+        }
+
+        /// Higher ceiling_y (lower in frame, more restrictive) produces
+        /// equal or higher output tilt. This is the monotonicity
+        /// invariant: the safety constraint tightens as the person's
+        /// bounding box extends further down the frame.
+        #[test]
+        fn test_ceiling_monotonic_in_ceiling_y(
+            cy1 in 0.0_f32..=1.0_f32,
+            cy2 in 0.0_f32..=1.0_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+            tilt in -4500_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&zero_offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt };
+            let r1 = t.enforce_ceiling(solution, cy1, current_tilt);
+            let r2 = t.enforce_ceiling(solution, cy2, current_tilt);
+            if cy1 <= cy2 {
+                prop_assert!(
+                    r1.tilt <= r2.tilt,
+                    "higher ceiling_y must produce >= tilt: \
+                     cy1={} -> tilt={}, cy2={} -> tilt={}",
+                    cy1, r1.tilt, cy2, r2.tilt,
+                );
+            }
+        }
+
+        /// Ceiling enforcement with parallax must still keep the output
+        /// within servo limits.
+        #[test]
+        fn test_ceiling_with_parallax_within_limits(
+            ceiling_y in 0.0_f32..=1.0_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+            tilt in -4500_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt };
+            let result = t.enforce_ceiling(solution, ceiling_y, current_tilt);
+            prop_assert!(
+                result.tilt >= TILT_LIMIT_MIN && result.tilt <= TILT_LIMIT_MAX,
+                "output tilt {} outside [{}, {}] with parallax",
+                result.tilt, TILT_LIMIT_MIN, TILT_LIMIT_MAX,
+            );
+        }
+
+        /// Ceiling enforcement is idempotent: applying it twice with the
+        /// same inputs produces the same result as applying it once.
+        #[test]
+        fn test_ceiling_idempotent(
+            ceiling_y in 0.0_f32..=1.0_f32,
+            current_tilt in -4500_i16..=9000_i16,
+            pan in -9000_i16..=9000_i16,
+            tilt in -4500_i16..=9000_i16,
+        ) {
+            let t = Targeter::new(&zero_offset_config()).ok().unwrap_or_else(|| unreachable!());
+            let solution = TargetingSolution { pan, tilt };
+            let once = t.enforce_ceiling(solution, ceiling_y, current_tilt);
+            let twice = t.enforce_ceiling(once, ceiling_y, current_tilt);
+            prop_assert_eq!(
+                once, twice,
+                "ceiling enforcement must be idempotent",
             );
         }
     }
