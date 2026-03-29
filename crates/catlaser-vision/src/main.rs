@@ -5,7 +5,7 @@
 //!
 //! Entry point for the `catlaser-vision` binary. Initializes tracing,
 //! installs signal handlers for graceful shutdown, constructs the
-//! [`Pipeline`](pipeline::Pipeline), and runs the frame processing loop
+//! [`Pipeline`], and runs the frame processing loop
 //! until SIGTERM or SIGINT is received.
 
 mod camera;

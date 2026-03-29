@@ -93,19 +93,19 @@ pub(crate) struct DispenseRequest {
 /// a valid XOR checksum and is ready for UART transmission.
 ///
 /// The flags byte is wired as follows:
-/// - **laser_on**: from `params.laser_on`
-/// - **person_detected**: from `safety.person_in_frame`
-/// - **dispense direction + tier**: from `params.dispense` if present
+/// - `laser_on`: from `params.laser_on`
+/// - `person_detected`: from `safety.person_in_frame`
+/// - dispense direction + tier: from `params.dispense` if present
 pub(crate) fn build_command(
-    solution: &TargetingSolution,
-    safety: &SafetyResult,
-    params: &CommandParams,
+    solution: TargetingSolution,
+    safety: SafetyResult,
+    params: CommandParams,
 ) -> ServoCommand {
     let mut flags = Flags::new()
         .with_laser(params.laser_on)
         .with_person_detected(safety.person_in_frame);
 
-    if let Some(dispense) = &params.dispense {
+    if let Some(dispense) = params.dispense {
         flags = match dispense.direction {
             DispenseDirection::Left => flags.with_dispense_left(true),
             DispenseDirection::Right => flags.with_dispense_right(true),
@@ -154,7 +154,7 @@ impl SerialPort {
     /// full frame in one `write()` call. Returns [`SerialError::ShortWrite`]
     /// if the OS accepts fewer than 8 bytes (should not happen on a
     /// properly configured blocking UART, but the invariant is enforced).
-    pub(crate) fn send(&mut self, cmd: &ServoCommand) -> Result<(), SerialError> {
+    pub(crate) fn send(&self, cmd: ServoCommand) -> Result<(), SerialError> {
         let bytes = cmd.to_bytes();
         let written = write_all_fd(&self.fd, &bytes)?;
         if written < SERVO_CMD_SIZE {
@@ -243,7 +243,7 @@ fn configure_termios(fd: &OwnedFd, path: &Path) -> Result<(), SerialError> {
     )]
     // SAFETY: termios is a valid, initialized termios struct. baud is a
     // valid libc speed constant.
-    let ret = unsafe { libc::cfsetispeed(&mut termios, baud) };
+    let ret = unsafe { libc::cfsetispeed(std::ptr::from_mut(&mut termios), baud) };
     if ret != 0_i32 {
         return Err(SerialError::Termios {
             path: path_str,
@@ -256,7 +256,7 @@ fn configure_termios(fd: &OwnedFd, path: &Path) -> Result<(), SerialError> {
         reason = "libc::cfsetospeed on a valid termios struct — ADR-003"
     )]
     // SAFETY: same as cfsetispeed above.
-    let ret = unsafe { libc::cfsetospeed(&mut termios, baud) };
+    let ret = unsafe { libc::cfsetospeed(std::ptr::from_mut(&mut termios), baud) };
     if ret != 0_i32 {
         return Err(SerialError::Termios {
             path: path_str,
@@ -275,7 +275,7 @@ fn configure_termios(fd: &OwnedFd, path: &Path) -> Result<(), SerialError> {
     )]
     // SAFETY: raw_fd is valid. termios is fully configured. TCSANOW
     // applies immediately.
-    let ret = unsafe { libc::tcsetattr(raw_fd, libc::TCSANOW, &termios) };
+    let ret = unsafe { libc::tcsetattr(raw_fd, libc::TCSANOW, std::ptr::from_ref(&termios)) };
     if ret != 0_i32 {
         return Err(SerialError::Termios {
             path: path_str,
@@ -293,6 +293,11 @@ fn configure_termios(fd: &OwnedFd, path: &Path) -> Result<(), SerialError> {
 const fn baud_to_speed(baud: u32) -> libc::speed_t {
     match baud {
         115_200_u32 => libc::B115200,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "explicit fallback documents that only 115200 is supported; \
+                      other rates intentionally map to the same default"
+        )]
         _ => libc::B115200,
     }
 }
@@ -306,9 +311,8 @@ fn write_all_fd(fd: &OwnedFd, buf: &[u8]) -> Result<usize, SerialError> {
 /// Borrows an `OwnedFd` as a writable `std::fs::File` reference without
 /// taking ownership.
 ///
-/// Uses `File::from` on a dup'd fd — no, simpler: we use the raw fd
-/// through `libc::write` wrapped in a safe interface. Actually the simplest
-/// approach is to write through libc::write directly.
+/// Wraps the raw fd in a thin [`Write`] adapter that calls `libc::write`
+/// directly.
 fn fd_to_write(fd: &OwnedFd) -> impl Write + '_ {
     struct FdWriter<'a>(&'a OwnedFd);
 
@@ -392,7 +396,7 @@ mod tests {
             pan: 4523_i16,
             tilt: -1000_i16,
         };
-        let cmd = build_command(&solution, &no_person_safety(), &default_params());
+        let cmd = build_command(solution, no_person_safety(), default_params());
 
         assert_eq!(cmd.pan(), 4523_i16, "pan must come from targeting solution");
         assert_eq!(
@@ -404,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_build_command_home_position() {
-        let cmd = build_command(&home_solution(), &no_person_safety(), &default_params());
+        let cmd = build_command(home_solution(), no_person_safety(), default_params());
 
         assert_eq!(cmd.pan(), PAN_HOME, "pan must be PAN_HOME");
         assert_eq!(cmd.tilt(), TILT_HOME, "tilt must be TILT_HOME");
@@ -416,7 +420,7 @@ mod tests {
             pan: i16::MIN,
             tilt: i16::MAX,
         };
-        let cmd = build_command(&solution, &no_person_safety(), &default_params());
+        let cmd = build_command(solution, no_person_safety(), default_params());
 
         assert_eq!(
             cmd.pan(),
@@ -440,7 +444,7 @@ mod tests {
             max_slew: 150_u8,
             dispense: None,
         };
-        let cmd = build_command(&home_solution(), &no_person_safety(), &params);
+        let cmd = build_command(home_solution(), no_person_safety(), params);
 
         assert_eq!(cmd.smoothing(), 200_u8, "smoothing must pass through");
         assert_eq!(cmd.max_slew(), 150_u8, "max_slew must pass through");
@@ -454,7 +458,7 @@ mod tests {
             laser_on: true,
             ..default_params()
         };
-        let cmd = build_command(&home_solution(), &no_person_safety(), &params);
+        let cmd = build_command(home_solution(), no_person_safety(), params);
 
         assert!(
             cmd.flags().laser_on(),
@@ -468,7 +472,7 @@ mod tests {
             laser_on: false,
             ..default_params()
         };
-        let cmd = build_command(&home_solution(), &no_person_safety(), &params);
+        let cmd = build_command(home_solution(), no_person_safety(), params);
 
         assert!(
             !cmd.flags().laser_on(),
@@ -480,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_build_command_person_detected_from_safety() {
-        let cmd = build_command(&home_solution(), &person_safety(), &default_params());
+        let cmd = build_command(home_solution(), person_safety(), default_params());
 
         assert!(
             cmd.flags().person_detected(),
@@ -490,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_build_command_no_person_detected() {
-        let cmd = build_command(&home_solution(), &no_person_safety(), &default_params());
+        let cmd = build_command(home_solution(), no_person_safety(), default_params());
 
         assert!(
             !cmd.flags().person_detected(),
@@ -509,7 +513,7 @@ mod tests {
             }),
             ..default_params()
         };
-        let cmd = build_command(&home_solution(), &no_person_safety(), &params);
+        let cmd = build_command(home_solution(), no_person_safety(), params);
 
         assert!(
             cmd.flags().dispense_left(),
@@ -540,7 +544,7 @@ mod tests {
             }),
             ..default_params()
         };
-        let cmd = build_command(&home_solution(), &no_person_safety(), &params);
+        let cmd = build_command(home_solution(), no_person_safety(), params);
 
         assert!(
             !cmd.flags().dispense_left(),
@@ -564,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_build_command_no_dispense() {
-        let cmd = build_command(&home_solution(), &no_person_safety(), &default_params());
+        let cmd = build_command(home_solution(), no_person_safety(), default_params());
 
         assert!(
             !cmd.flags().dispense_left(),
@@ -596,7 +600,7 @@ mod tests {
                 }),
                 ..default_params()
             };
-            let cmd = build_command(&home_solution(), &no_person_safety(), &params);
+            let cmd = build_command(home_solution(), no_person_safety(), params);
 
             assert_eq!(
                 cmd.flags().dispense_tier(),
@@ -619,7 +623,7 @@ mod tests {
                 tier: 2_u8,
             }),
         };
-        let cmd = build_command(&home_solution(), &person_safety(), &params);
+        let cmd = build_command(home_solution(), person_safety(), params);
 
         assert!(cmd.flags().laser_on(), "laser must be on");
         assert!(cmd.flags().person_detected(), "person must be detected");
@@ -631,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_build_command_valid_checksum() {
-        let cmd = build_command(&home_solution(), &person_safety(), &default_params());
+        let cmd = build_command(home_solution(), person_safety(), default_params());
 
         assert!(
             cmd.verify_checksum(),
@@ -654,7 +658,7 @@ mod tests {
             pan: -3500_i16,
             tilt: 6000_i16,
         };
-        let cmd = build_command(&solution, &person_safety(), &params);
+        let cmd = build_command(solution, person_safety(), params);
         let bytes = cmd.to_bytes();
         let recovered = ServoCommand::from_bytes(bytes);
 
@@ -714,7 +718,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             prop_assert!(
                 cmd.verify_checksum(),
                 "built command must always have valid checksum",
@@ -727,7 +731,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             let bytes = cmd.to_bytes();
             let recovered = ServoCommand::from_bytes(bytes);
             prop_assert_eq!(
@@ -743,7 +747,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             prop_assert_eq!(cmd.pan(), solution.pan, "pan must equal solution.pan");
             prop_assert_eq!(cmd.tilt(), solution.tilt, "tilt must equal solution.tilt");
         }
@@ -754,7 +758,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             prop_assert_eq!(
                 cmd.flags().person_detected(),
                 safety.person_in_frame,
@@ -768,7 +772,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             prop_assert_eq!(
                 cmd.flags().laser_on(),
                 params.laser_on,
@@ -782,7 +786,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             prop_assert_eq!(
                 cmd.smoothing(),
                 params.smoothing,
@@ -801,7 +805,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             let expected_direction = params.dispense.map(|d| d.direction);
             prop_assert_eq!(
                 cmd.flags().dispense_direction(),
@@ -816,7 +820,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             let expected_tier = params.dispense.map_or(0_u8, |d| d.tier);
             prop_assert_eq!(
                 cmd.flags().dispense_tier(),
@@ -831,7 +835,7 @@ mod tests {
             safety in arb_safety_result(),
             params in arb_command_params(),
         ) {
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
             let bytes = cmd.to_bytes();
 
             let mut parser = catlaser_common::FrameParser::new();

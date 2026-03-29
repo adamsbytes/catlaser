@@ -27,7 +27,7 @@
   - [X] Bbox center → servo angle transform (camera FOV, laser offset)
   - [X] Safety ceiling enforcement (clamp tilt above person threshold)
   - [X] ServoCommand packing + UART TX
-  - [ ] End-to-end: camera sees cat → laser tracks cat
+  - [X] End-to-end: camera sees cat → laser tracks cat
 
 [ ] IPC + Cat Identity
   - [ ] Unix socket server (Rust) + client (Python)

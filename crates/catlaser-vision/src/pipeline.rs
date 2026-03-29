@@ -3,7 +3,7 @@
 //! Orchestrates all vision subsystems into a single per-frame processing loop.
 //! Each call to [`Pipeline::run_frame`] captures a camera frame, runs NPU
 //! inference, processes detections through safety filtering and tracking,
-//! selects a target, computes servo angles, and transmits a [`ServoCommand`]
+//! selects a target, computes servo angles, and transmits a [`ServoCommand`](catlaser_common::ServoCommand)
 //! to the MCU over UART.
 //!
 //! Until the Python behavior engine is connected via IPC, the pipeline
@@ -100,9 +100,7 @@ impl PipelineError {
         use crate::camera::CameraError;
         matches!(
             self,
-            Self::Camera(
-                CameraError::PollTimeout { .. } | CameraError::CorruptFrame { .. }
-            )
+            Self::Camera(CameraError::PollTimeout { .. } | CameraError::CorruptFrame { .. })
         )
     }
 }
@@ -217,7 +215,7 @@ pub(crate) fn default_command_params(tracking: bool) -> CommandParams {
 pub(crate) fn compute_solution(
     targeter: &Targeter,
     target: Option<&Track>,
-    safety: &SafetyResult,
+    safety: SafetyResult,
     current_pan: i16,
     current_tilt: i16,
 ) -> TargetingSolution {
@@ -230,7 +228,7 @@ pub(crate) fn compute_solution(
 
     let bbox = track.bbox();
     // bbox is [cx, cy, w, h] in normalized 0.0-1.0 coordinates.
-    let cx = bbox.get(0).copied().unwrap_or(0.5_f32);
+    let cx = bbox.first().copied().unwrap_or(0.5_f32);
     let cy = bbox.get(1).copied().unwrap_or(0.5_f32);
 
     let raw = targeter.compute(cx, cy, current_pan, current_tilt);
@@ -339,14 +337,15 @@ impl Pipeline {
     /// by the caller; other errors are fatal.
     pub(crate) fn run_frame(&mut self) -> Result<FrameResult, PipelineError> {
         // --- Capture ---
-        let frame = self.camera.capture_frame()?;
-        let sequence = frame.sequence();
-        let frame_index = frame.index();
-
-        // Copy frame data into the NPU's DMA input buffer. After this
-        // completes the camera buffer can be returned for reuse.
-        self.model.set_input(frame.data())?;
-        drop(frame);
+        // Scope the frame borrow: extract metadata and copy pixels to the
+        // NPU, then end the borrow so the buffer can be re-queued.
+        let (sequence, frame_index) = {
+            let frame = self.camera.capture_frame()?;
+            let seq = frame.sequence();
+            let idx = frame.index();
+            self.model.set_input(frame.data())?;
+            (seq, idx)
+        };
         self.camera.return_frame(frame_index)?;
 
         // --- Inference ---
@@ -379,15 +378,15 @@ impl Pipeline {
         let solution = compute_solution(
             &self.targeter,
             target,
-            &safety,
+            safety,
             self.current_pan,
             self.current_tilt,
         );
 
         // --- Command ---
         let params = default_command_params(tracking);
-        let cmd = serial::build_command(&solution, &safety, &params);
-        self.serial.send(&cmd)?;
+        let cmd = serial::build_command(solution, safety, params);
+        self.serial.send(cmd)?;
 
         // --- State update ---
         self.current_pan = solution.pan;
@@ -713,7 +712,7 @@ mod tests {
             person_in_frame: false,
         };
 
-        let solution = compute_solution(&targeter, None, &safety, 0_i16, 0_i16);
+        let solution = compute_solution(&targeter, None, safety, 0_i16, 0_i16);
 
         assert_eq!(solution.pan, PAN_HOME, "idle pan must be PAN_HOME");
         assert_eq!(solution.tilt, TILT_HOME, "idle tilt must be TILT_HOME");
@@ -740,7 +739,7 @@ mod tests {
 
         let current_pan = 2000_i16;
         let current_tilt = 3000_i16;
-        let solution = compute_solution(&targeter, target, &safety, current_pan, current_tilt);
+        let solution = compute_solution(&targeter, target, safety, current_pan, current_tilt);
 
         // Track is near center (0.5, 0.5) so the angular offset is near zero.
         // The solution should be close to the current position.
@@ -775,7 +774,7 @@ mod tests {
         let target = select_target(tracker.tracks());
         assert!(target.is_some(), "must have a confirmed target");
 
-        let solution = compute_solution(&targeter, target, &safety, 0_i16, 4500_i16);
+        let solution = compute_solution(&targeter, target, safety, 0_i16, 4500_i16);
 
         // The ceiling should clamp the tilt to stay below the safety line.
         // With ceiling_y=0.8 and current_tilt=4500, the ceiling tilt is
@@ -811,9 +810,9 @@ mod tests {
         assert!(target.is_some(), "must have a confirmed target");
         let tracking = target.is_some();
 
-        let solution = compute_solution(&targeter, target, &safety, PAN_HOME, TILT_HOME);
+        let solution = compute_solution(&targeter, target, safety, PAN_HOME, TILT_HOME);
         let params = default_command_params(tracking);
-        let cmd = build_command(&solution, &safety, &params);
+        let cmd = build_command(solution, safety, params);
 
         assert!(
             cmd.verify_checksum(),
@@ -852,9 +851,9 @@ mod tests {
             person_in_frame: false,
         };
 
-        let solution = compute_solution(&targeter, None, &safety, PAN_HOME, TILT_HOME);
+        let solution = compute_solution(&targeter, None, safety, PAN_HOME, TILT_HOME);
         let params = default_command_params(false);
-        let cmd = build_command(&solution, &safety, &params);
+        let cmd = build_command(solution, safety, params);
 
         assert!(
             cmd.verify_checksum(),
@@ -878,9 +877,9 @@ mod tests {
             person_in_frame: true,
         };
 
-        let solution = compute_solution(&targeter, None, &safety, PAN_HOME, TILT_HOME);
+        let solution = compute_solution(&targeter, None, safety, PAN_HOME, TILT_HOME);
         let params = default_command_params(false);
-        let cmd = build_command(&solution, &safety, &params);
+        let cmd = build_command(solution, safety, params);
 
         assert!(
             cmd.flags().person_detected(),
@@ -901,9 +900,9 @@ mod tests {
         let target = select_target(tracker.tracks());
         let tracking = target.is_some();
 
-        let solution = compute_solution(&targeter, target, &safety, 1000_i16, 2000_i16);
+        let solution = compute_solution(&targeter, target, safety, 1000_i16, 2000_i16);
         let params = default_command_params(tracking);
-        let cmd = build_command(&solution, &safety, &params);
+        let cmd = build_command(solution, safety, params);
         let bytes = cmd.to_bytes();
 
         let mut parser = catlaser_common::FrameParser::new();
@@ -1007,7 +1006,7 @@ mod tests {
             let solution = compute_solution(
                 &targeter,
                 target,
-                &safety,
+                safety,
                 current_pan,
                 current_tilt,
             );
@@ -1038,7 +1037,7 @@ mod tests {
             let solution = compute_solution(
                 &targeter,
                 None,
-                &safety,
+                safety,
                 current_pan,
                 current_tilt,
             );
@@ -1081,16 +1080,16 @@ mod tests {
                 compute_solution(
                     &targeter,
                     select_target(tracker.tracks()),
-                    &safety,
+                    safety,
                     current_pan,
                     current_tilt,
                 )
             } else {
-                compute_solution(&targeter, None, &safety, current_pan, current_tilt)
+                compute_solution(&targeter, None, safety, current_pan, current_tilt)
             };
 
             let params = default_command_params(tracking);
-            let cmd = build_command(&solution, &safety, &params);
+            let cmd = build_command(solution, safety, params);
 
             prop_assert!(
                 cmd.verify_checksum(),

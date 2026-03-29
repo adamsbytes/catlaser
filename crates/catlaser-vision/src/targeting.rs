@@ -223,7 +223,7 @@ impl Targeter {
         // ceiling line is where a person's 75% height appears in the
         // frame — the laser dot must never appear above it.
         let ceiling_tilt_raw =
-            f32::from(current_tilt) + (ceiling_y - 0.5_f32) * self.vfov - self.parallax_tilt;
+            (ceiling_y - 0.5_f32).mul_add(self.vfov, f32::from(current_tilt)) - self.parallax_tilt;
 
         let ceiling_tilt =
             f32_to_clamped_centideg(ceiling_tilt_raw, TILT_LIMIT_MIN, TILT_LIMIT_MAX);
@@ -1271,8 +1271,8 @@ mod tests {
             let solution = TargetingSolution { pan, tilt: target_tilt };
             let result = t.enforce_ceiling(solution, ceiling_y, current_tilt);
 
-            let ceiling_tilt_raw = f32::from(current_tilt)
-                + (ceiling_y - 0.5_f32) * 6400.0_f32;
+            let ceiling_tilt_raw =
+                (ceiling_y - 0.5_f32).mul_add(6400.0_f32, f32::from(current_tilt));
             let ceiling_tilt = f32_to_clamped_centideg(
                 ceiling_tilt_raw, TILT_LIMIT_MIN, TILT_LIMIT_MAX,
             );
