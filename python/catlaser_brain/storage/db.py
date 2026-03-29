@@ -27,6 +27,7 @@ CREATE TABLE cats (
     total_sessions      INTEGER NOT NULL DEFAULT 0,
     total_play_time_sec INTEGER NOT NULL DEFAULT 0,
     total_treats        INTEGER NOT NULL DEFAULT 0,
+    embeddings_seen     INTEGER NOT NULL DEFAULT 0,
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;

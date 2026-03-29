@@ -6,6 +6,7 @@ import math
 import struct
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,7 @@ from catlaser_brain.identity.catalog import (
     EMBEDDING_BYTES,
     EMBEDDING_DIM,
     MATCH_THRESHOLD,
+    MAX_EMBEDDINGS_PER_CAT,
     CatCatalog,
     MatchResult,
     cosine_similarity,
@@ -59,6 +61,22 @@ def _db_with_catalog(tmpdir: str) -> tuple[Database, CatCatalog]:
     db = Database.connect(Path(tmpdir) / "test.db")
     catalog = CatCatalog(db)
     return db, catalog
+
+
+def _embedding_count(db: Database, cat_id: str) -> int:
+    """Count stored embeddings for a cat."""
+    row = db.conn.execute(
+        "SELECT COUNT(*) FROM cat_embeddings WHERE cat_id = ?", (cat_id,)
+    ).fetchone()
+    return row[0]
+
+
+def _embeddings_seen(db: Database, cat_id: str) -> int:
+    """Read the total embeddings_seen counter for a cat."""
+    row = db.conn.execute(
+        "SELECT embeddings_seen FROM cats WHERE cat_id = ?", (cat_id,)
+    ).fetchone()
+    return row["embeddings_seen"]
 
 
 # ---------------------------------------------------------------------------
@@ -284,20 +302,10 @@ class TestMultipleEmbeddings:
             try:
                 emb = _make_embedding(seed_dim=0)
                 catalog.add_cat("cat-1", "Gizmo", b"\xff\xd8gizmo", _to_bytes(emb))
-
-                count_before = db.conn.execute(
-                    "SELECT COUNT(*) FROM cat_embeddings WHERE cat_id = ?",
-                    ("cat-1",),
-                ).fetchone()[0]
-                assert count_before == 1
+                assert _embedding_count(db, "cat-1") == 1
 
                 catalog.store_embedding("cat-1", _to_bytes(emb))
-
-                count_after = db.conn.execute(
-                    "SELECT COUNT(*) FROM cat_embeddings WHERE cat_id = ?",
-                    ("cat-1",),
-                ).fetchone()[0]
-                assert count_after == 2
+                assert _embedding_count(db, "cat-1") == 2
             finally:
                 db.close()
 
@@ -351,6 +359,16 @@ class TestAddCat:
             try:
                 with pytest.raises(ValueError, match="512 bytes"):
                     catalog.add_cat("cat-1", "Bad", b"\xff\xd8thumb", b"\x00" * 100)
+            finally:
+                db.close()
+
+    def test_add_cat_initializes_embeddings_seen(self):
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                emb = _make_embedding()
+                catalog.add_cat("cat-1", "Boots", b"\xff\xd8boots", _to_bytes(emb))
+                assert _embeddings_seen(db, "cat-1") == 1
             finally:
                 db.close()
 
@@ -415,6 +433,221 @@ class TestThreeCatDisambiguation:
                 result = catalog.match_embedding(_to_bytes(query), 0.9)
 
                 assert result.cat_id == "cat-b"
+                assert result.similarity > MATCH_THRESHOLD
+            finally:
+                db.close()
+
+
+# ---------------------------------------------------------------------------
+# Reservoir sampling
+# ---------------------------------------------------------------------------
+
+
+class TestReservoirSampling:
+    def test_fills_reservoir_before_replacing(self):
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                emb = _make_embedding(seed_dim=0)
+                catalog.add_cat("cat-1", "Tank", b"\xff\xd8tank", _to_bytes(emb))
+
+                # Fill to MAX - 1 more (add_cat already inserted 1).
+                for i in range(MAX_EMBEDDINGS_PER_CAT - 1):
+                    catalog.store_embedding("cat-1", _to_bytes(_make_embedding(seed_dim=i)))
+
+                assert _embedding_count(db, "cat-1") == MAX_EMBEDDINGS_PER_CAT
+                assert _embeddings_seen(db, "cat-1") == MAX_EMBEDDINGS_PER_CAT
+            finally:
+                db.close()
+
+    def test_embeddings_seen_increments_beyond_reservoir(self):
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                emb = _make_embedding(seed_dim=0)
+                catalog.add_cat("cat-1", "Ace", b"\xff\xd8ace", _to_bytes(emb))
+
+                for i in range(MAX_EMBEDDINGS_PER_CAT - 1):
+                    catalog.store_embedding("cat-1", _to_bytes(_make_embedding(seed_dim=i)))
+
+                # Reservoir is full. Store 10 more.
+                for i in range(10):
+                    catalog.store_embedding("cat-1", _to_bytes(_make_embedding(seed_dim=i)))
+
+                assert _embeddings_seen(db, "cat-1") == MAX_EMBEDDINGS_PER_CAT + 10
+                assert _embedding_count(db, "cat-1") <= MAX_EMBEDDINGS_PER_CAT
+            finally:
+                db.close()
+
+    def test_stored_count_never_exceeds_max(self):
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                emb = _make_embedding(seed_dim=0)
+                catalog.add_cat("cat-1", "Max", b"\xff\xd8max", _to_bytes(emb))
+
+                # Store well beyond the reservoir capacity.
+                for i in range(MAX_EMBEDDINGS_PER_CAT + 50):
+                    catalog.store_embedding(
+                        "cat-1", _to_bytes(_make_embedding(seed_dim=i % EMBEDDING_DIM))
+                    )
+
+                assert _embedding_count(db, "cat-1") <= MAX_EMBEDDINGS_PER_CAT
+            finally:
+                db.close()
+
+    def test_replacement_changes_embedding_data(self):
+        """Force replacement via deterministic RNG and verify data changes."""
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                seed_emb = _make_embedding(seed_dim=0)
+                catalog.add_cat("cat-1", "Dice", b"\xff\xd8dice", _to_bytes(seed_emb))
+
+                # Fill reservoir with dim-0 embeddings.
+                for _ in range(MAX_EMBEDDINGS_PER_CAT - 1):
+                    catalog.store_embedding("cat-1", _to_bytes(seed_emb))
+
+                # Collect all stored embeddings before replacement.
+                rows_before = db.conn.execute(
+                    "SELECT id, embedding FROM cat_embeddings WHERE cat_id = ? ORDER BY id",
+                    ("cat-1",),
+                ).fetchall()
+
+                # Force acceptance (random() returns 0.0 < k/n) and deterministic
+                # choice (always pick first element).
+                new_emb = _make_embedding(seed_dim=50)
+                with (
+                    patch("catlaser_brain.identity.catalog.random.random", return_value=0.0),
+                    patch(
+                        "catlaser_brain.identity.catalog.random.choice",
+                        return_value=rows_before[0]["id"],
+                    ),
+                ):
+                    catalog.store_embedding("cat-1", _to_bytes(new_emb))
+
+                # The replaced row should now contain the new embedding.
+                replaced = db.conn.execute(
+                    "SELECT embedding FROM cat_embeddings WHERE id = ?",
+                    (rows_before[0]["id"],),
+                ).fetchone()
+                recovered = deserialize_embedding(replaced["embedding"])
+                for orig, rec in zip(new_emb, recovered, strict=True):
+                    assert abs(orig - rec) < _EPS
+
+                # Total count unchanged.
+                assert _embedding_count(db, "cat-1") == MAX_EMBEDDINGS_PER_CAT
+            finally:
+                db.close()
+
+    def test_rejection_leaves_reservoir_unchanged(self):
+        """Force rejection via deterministic RNG and verify no data changes."""
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                seed_emb = _make_embedding(seed_dim=0)
+                catalog.add_cat("cat-1", "Skip", b"\xff\xd8skip", _to_bytes(seed_emb))
+
+                for _ in range(MAX_EMBEDDINGS_PER_CAT - 1):
+                    catalog.store_embedding("cat-1", _to_bytes(seed_emb))
+
+                embeddings_before = {
+                    row["id"]: bytes(row["embedding"])
+                    for row in db.conn.execute(
+                        "SELECT id, embedding FROM cat_embeddings WHERE cat_id = ?",
+                        ("cat-1",),
+                    ).fetchall()
+                }
+
+                # Force rejection (random() returns 1.0 >= k/n for any n > k).
+                with patch("catlaser_brain.identity.catalog.random.random", return_value=1.0):
+                    catalog.store_embedding("cat-1", _to_bytes(_make_embedding(seed_dim=99)))
+
+                embeddings_after = {
+                    row["id"]: bytes(row["embedding"])
+                    for row in db.conn.execute(
+                        "SELECT id, embedding FROM cat_embeddings WHERE cat_id = ?",
+                        ("cat-1",),
+                    ).fetchall()
+                }
+
+                assert embeddings_before == embeddings_after
+                # But embeddings_seen still incremented.
+                assert _embeddings_seen(db, "cat-1") == MAX_EMBEDDINGS_PER_CAT + 1
+            finally:
+                db.close()
+
+    def test_match_still_works_after_reservoir_fills(self):
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                base = _make_spread_embedding({0: 1.0, 1: 0.1})
+                catalog.add_cat("cat-1", "Full", b"\xff\xd8full", _to_bytes(base))
+
+                # Fill reservoir with similar embeddings.
+                for i in range(MAX_EMBEDDINGS_PER_CAT + 10):
+                    variant = _make_spread_embedding({0: 1.0, 1: 0.1 + i * 0.002})
+                    catalog.store_embedding("cat-1", _to_bytes(variant))
+
+                query = _make_spread_embedding({0: 1.0, 1: 0.12})
+                result = catalog.match_embedding(_to_bytes(query), 0.9)
+
+                assert result.cat_id == "cat-1"
+                assert result.similarity > MATCH_THRESHOLD
+            finally:
+                db.close()
+
+
+# ---------------------------------------------------------------------------
+# Cache coherence (tested via observable behavior, not internal state)
+# ---------------------------------------------------------------------------
+
+
+class TestCacheCoherence:
+    def test_new_cat_visible_after_add(self):
+        """add_cat must invalidate the cache so subsequent matches see the new cat."""
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                emb1 = _make_spread_embedding({0: 1.0, 1: 0.1})
+                catalog.add_cat("cat-1", "First", b"\xff\xd8first", _to_bytes(emb1))
+
+                # Prime cache via match.
+                catalog.match_embedding(_to_bytes(emb1), 0.9)
+
+                # Add a second cat in a different region of the space.
+                emb2 = _make_spread_embedding({40: 1.0, 41: 0.1})
+                catalog.add_cat("cat-2", "Second", b"\xff\xd8second", _to_bytes(emb2))
+
+                # The new cat must be matchable immediately.
+                result = catalog.match_embedding(_to_bytes(emb2), 0.9)
+                assert result.cat_id == "cat-2"
+                assert result.similarity > MATCH_THRESHOLD
+            finally:
+                db.close()
+
+    def test_stored_embedding_reflected_in_next_match(self):
+        """store_embedding must invalidate the cache so the new data affects matching."""
+        with TemporaryDirectory() as tmpdir:
+            db, catalog = _db_with_catalog(tmpdir)
+            try:
+                # Cat starts with an embedding in dim 0.
+                emb_dim0 = _make_spread_embedding({0: 1.0})
+                catalog.add_cat("cat-1", "Drift", b"\xff\xd8drift", _to_bytes(emb_dim0))
+
+                # Prime cache.
+                catalog.match_embedding(_to_bytes(emb_dim0), 0.9)
+
+                # Store many embeddings biased toward dim 1.
+                emb_dim1 = _make_spread_embedding({0: 0.3, 1: 1.0})
+                for _ in range(10):
+                    catalog.store_embedding("cat-1", _to_bytes(emb_dim1))
+
+                # A query near dim 1 should now match (the averaged profile
+                # has shifted toward dim 1 due to the stored embeddings).
+                query = _make_spread_embedding({0: 0.3, 1: 1.0})
+                result = catalog.match_embedding(_to_bytes(query), 0.9)
+                assert result.cat_id == "cat-1"
                 assert result.similarity > MATCH_THRESHOLD
             finally:
                 db.close()

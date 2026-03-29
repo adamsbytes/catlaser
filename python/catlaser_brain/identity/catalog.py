@@ -8,11 +8,17 @@ an unknown cat requiring user naming.
 Embeddings arrive as 512 raw bytes (128 little-endian f32s), matching the
 Rust-side ``embedding_to_bytes`` serialization. All vectors are L2-normalized
 by the Rust embedding engine, so cosine similarity reduces to a dot product.
+
+Stored embeddings are maintained as a fixed-size reservoir sample per cat
+(Algorithm R). This gives a representative spread across all conditions the
+cat has been observed in (lighting, pose, angle, seasonal coat) rather than
+biasing toward the most recent observations.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import struct
 import time
 from typing import TYPE_CHECKING, Final, NamedTuple
@@ -34,6 +40,9 @@ EMBEDDING_BYTES: Final[int] = EMBEDDING_DIM * 4
 
 MATCH_THRESHOLD: Final[float] = 0.75
 """Cosine similarity above which a match is considered confident."""
+
+MAX_EMBEDDINGS_PER_CAT: Final[int] = 30
+"""Maximum stored embeddings per cat (reservoir size)."""
 
 _UNPACK_FMT: Final[str] = f"<{EMBEDDING_DIM}f"
 """``struct`` format string: 128 little-endian f32s."""
@@ -165,14 +174,19 @@ class CatCatalog:
     and resolves track identity. Not thread-safe — designed for single-threaded
     use within the Python behavior engine event loop.
 
+    Deserialized embeddings are cached in memory and invalidated on mutation
+    (``store_embedding``, ``add_cat``). The catalog is small (a few cats, up
+    to ``MAX_EMBEDDINGS_PER_CAT`` each) so the cache is always complete.
+
     Args:
         db: Database handle with migrations already applied.
     """
 
-    __slots__ = ("_db",)
+    __slots__ = ("_cache", "_db")
 
     def __init__(self, db: Database) -> None:
         self._db = db
+        self._cache: dict[str, list[tuple[float, ...]]] | None = None
 
     def match_embedding(
         self,
@@ -181,7 +195,7 @@ class CatCatalog:
     ) -> MatchResult:
         """Compare an embedding against all stored cat profiles.
 
-        Loads all stored embeddings from ``cat_embeddings``, averages per-cat,
+        Loads stored embeddings (from cache or SQLite), averages per-cat,
         and returns the best cosine-similarity match (or unknown if below
         threshold or catalog is empty).
 
@@ -197,7 +211,7 @@ class CatCatalog:
             ValueError: If *embedding_bytes* is not exactly 512 bytes.
         """
         query_emb = deserialize_embedding(embedding_bytes)
-        catalog = self._load_catalog_embeddings()
+        catalog = self._get_catalog()
 
         if not catalog:
             return MatchResult(cat_id="", similarity=-1.0)
@@ -218,10 +232,16 @@ class CatCatalog:
         return MatchResult(cat_id=best_cat_id, similarity=best_similarity)
 
     def store_embedding(self, cat_id: str, embedding_bytes: bytes) -> None:
-        """Store a new embedding for an existing cat.
+        """Store a new embedding for an existing cat using reservoir sampling.
 
-        Called after a successful match to grow the cat's embedding profile
-        over time, improving future match accuracy.
+        Maintains a fixed-size reservoir of ``MAX_EMBEDDINGS_PER_CAT``
+        embeddings per cat. Uses Algorithm R: the first N embeddings fill
+        the reservoir directly; subsequent embeddings are accepted with
+        probability N/n (where n is total embeddings ever observed for this
+        cat), replacing a uniformly random existing entry.
+
+        This produces a representative spread across all conditions the cat
+        has been observed in, rather than biasing toward recent observations.
 
         Args:
             cat_id: The cat to associate this embedding with.
@@ -233,12 +253,51 @@ class CatCatalog:
         if len(embedding_bytes) != EMBEDDING_BYTES:
             msg = f"embedding must be {EMBEDDING_BYTES} bytes, got {len(embedding_bytes)}"
             raise ValueError(msg)
+
+        conn = self._db.conn
         now = int(time.time())
-        self._db.conn.execute(
-            "INSERT INTO cat_embeddings (cat_id, embedding, captured_at) VALUES (?, ?, ?)",
-            (cat_id, embedding_bytes, now),
+
+        # Increment total-seen counter and read the new value.
+        conn.execute(
+            "UPDATE cats SET embeddings_seen = embeddings_seen + 1 WHERE cat_id = ?",
+            (cat_id,),
         )
-        self._db.conn.commit()
+        row = conn.execute(
+            "SELECT embeddings_seen FROM cats WHERE cat_id = ?",
+            (cat_id,),
+        ).fetchone()
+        embeddings_seen: int = row["embeddings_seen"]
+
+        # Count currently stored embeddings.
+        count_row = conn.execute(
+            "SELECT COUNT(*) FROM cat_embeddings WHERE cat_id = ?",
+            (cat_id,),
+        ).fetchone()
+        stored_count: int = count_row[0]
+
+        if stored_count < MAX_EMBEDDINGS_PER_CAT:
+            # Reservoir not full — insert directly.
+            conn.execute(
+                "INSERT INTO cat_embeddings (cat_id, embedding, captured_at) VALUES (?, ?, ?)",
+                (cat_id, embedding_bytes, now),
+            )
+        elif random.random() < MAX_EMBEDDINGS_PER_CAT / embeddings_seen:  # noqa: S311
+            # Reservoir full — accept with probability k/n, replace random entry.
+            ids: list[int] = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM cat_embeddings WHERE cat_id = ?",
+                    (cat_id,),
+                ).fetchall()
+            ]
+            replace_id = random.choice(ids)  # noqa: S311
+            conn.execute(
+                "UPDATE cat_embeddings SET embedding = ?, captured_at = ? WHERE id = ?",
+                (embedding_bytes, now, replace_id),
+            )
+
+        conn.commit()
+        self._cache = None
 
     def add_cat(
         self,
@@ -250,6 +309,7 @@ class CatCatalog:
         """Register a new cat in the catalog.
 
         Inserts into both ``cats`` and ``cat_embeddings`` atomically.
+        Initializes ``embeddings_seen`` to 1 for the seed embedding.
 
         Args:
             cat_id: Unique cat identifier (e.g. UUID).
@@ -267,8 +327,8 @@ class CatCatalog:
         conn = self._db.conn
         conn.execute(
             """INSERT INTO cats
-               (cat_id, name, thumbnail, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               (cat_id, name, thumbnail, embeddings_seen, created_at, updated_at)
+               VALUES (?, ?, ?, 1, ?, ?)""",
             (cat_id, name, thumbnail, now, now),
         )
         conn.execute(
@@ -276,6 +336,14 @@ class CatCatalog:
             (cat_id, embedding_bytes, now),
         )
         conn.commit()
+        self._cache = None
+
+    def _get_catalog(self) -> dict[str, list[tuple[float, ...]]]:
+        """Return cached catalog, loading from SQLite on first access or after invalidation."""
+        if self._cache is not None:
+            return self._cache
+        self._cache = self._load_catalog_embeddings()
+        return self._cache
 
     def _load_catalog_embeddings(self) -> dict[str, list[tuple[float, ...]]]:
         """Load all stored embeddings grouped by cat_id.
