@@ -44,7 +44,7 @@
   - [X] Per-cat profile adaptation (speed, smoothing, pattern randomness)
   - [X] Pattern generation (offset streaming per-frame to Rust)
   - [X] Cooldown → lead-to-point (left/right chute exit)
-  - [ ] Dispense orchestration (variable reward: tier 0-2, chute alternation)
+  - [X] Dispense orchestration (variable reward: tier 0-2, chute alternation)
   - [ ] Session scheduling (read schedule, accept/skip logic)
 
 [ ] Storage + Networking
