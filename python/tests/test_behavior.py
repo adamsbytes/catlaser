@@ -1147,11 +1147,24 @@ class TestPatternOffsets:
         output = e.update(cat, t)
         assert output.command.offset_x > 0.0
 
-    def test_cooldown_commands_zero_offsets(self):
-        e = _engine()
-        t = _run_to_cooldown(e)
-        t += 0.1
+    def test_cooldown_decel_decays_offsets_to_zero(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_chase(e)
+        # Build up a pattern offset by ticking chase with a moving cat.
+        cat = _cat(vx=0.2, vy=0.0)
+        for _ in range(5):
+            t += 1.0 / 15.0
+            e.update(cat, t)
+        e.stop_session(t)
+        # Early in decel: offsets decay but are not yet zero.
+        t += 0.01
+        output = e.update(cat, t)
+        assert output.command.mode is TargetingMode.TRACK
+        # Past decel: LEAD_TO_POINT commands have zero offsets.
+        t += cfg.cooldown_decel_duration
         output = e.update(None, t)
+        assert output.command.mode is TargetingMode.LEAD_TO_POINT
         assert output.command.offset_x == 0.0
         assert output.command.offset_y == 0.0
 

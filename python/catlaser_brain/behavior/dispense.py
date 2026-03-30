@@ -79,9 +79,10 @@ def finalize_session(
     atomically at the end:
 
     1. Updates ``chute_state`` to record the used side for alternation.
-    2. Closes the ``sessions`` row with end time, duration, engagement
+    2. Links the session to the cat via ``session_cats``.
+    3. Closes the ``sessions`` row with end time, duration, engagement
        score, treats dispensed, and pounce count.
-    3. Increments the cat's ``total_sessions``, ``total_play_time_sec``,
+    4. Increments the cat's ``total_sessions``, ``total_play_time_sec``,
        and ``total_treats`` counters, and writes the adapted behavior
        profile.
 
@@ -102,7 +103,7 @@ def finalize_session(
     """
     now = int(time.time())
     duration = now - start_time
-    play_time_sec = int(result.active_play_time)
+    play_time_sec = round(result.active_play_time)
 
     profile = load_profile(conn, cat_id)
     adapted = adapt_profile(
@@ -116,6 +117,11 @@ def finalize_session(
     conn.execute(
         "UPDATE chute_state SET last_side = ?, updated_at = ? WHERE id = 1",
         (chute_side.value, now),
+    )
+
+    conn.execute(
+        "INSERT INTO session_cats (session_id, cat_id) VALUES (?, ?)",
+        (session_id, cat_id),
     )
 
     conn.execute(

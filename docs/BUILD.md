@@ -38,7 +38,7 @@
   - [X] Cat re-ID: MobileNetV2 embedding on NPU (Rust side)
   - [X] Embedding comparison + catalog matching (Python side)
 
-[ ] Behavior Engine (catlaser_brain)
+[X] Behavior Engine (catlaser_brain)
   - [X] State machine (lure / chase / tease / cooldown / dispense)
   - [X] Engagement tracking (cat velocity, pounce count, time-on-target)
   - [X] Per-cat profile adaptation (speed, smoothing, pattern randomness)

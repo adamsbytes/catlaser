@@ -389,15 +389,11 @@ pub(crate) fn behavior_solution(
         Some(detection::TargetingMode::TARGETING_MODE_LEAD_TO_POINT) => {
             let solution = lead_target_to_solution(cmd.lead_target_x, cmd.lead_target_y);
             // Safety ceiling applies — the laser is on during lead-to-point.
-            if safety.ceiling_y >= 0.0_f32 {
-                let ceiling_tilt = lead_target_to_solution(0.0_f32, safety.ceiling_y).tilt;
-                TargetingSolution {
-                    pan: solution.pan,
-                    tilt: solution.tilt.max(ceiling_tilt),
-                }
-            } else {
-                solution
-            }
+            // ceiling_y is in camera-frame normalized coordinates, so we use
+            // enforce_ceiling (which accounts for FOV and current tilt) rather
+            // than lead_target_to_solution (which maps across the full servo
+            // range — a different coordinate space).
+            targeter.enforce_ceiling(solution, safety.ceiling_y, current_tilt)
         }
 
         // IDLE, DISPENSE, UNSPECIFIED, unknown future variants: home position.
@@ -3840,15 +3836,27 @@ mod tests {
         };
         let solution = behavior_solution(&cmd, &targeter, &[], safety, PAN_HOME, TILT_HOME);
 
-        // The unconstrained tilt for y=0.0 is TILT_LIMIT_MIN (-4500).
-        // The ceiling at y=0.3 maps to a higher (less negative) tilt.
-        // The result must be clamped to at or below the ceiling.
-        let ceiling_tilt = lead_target_to_solution(0.0_f32, 0.3_f32).tilt;
+        // enforce_ceiling converts ceiling_y through FOV math relative to
+        // current_tilt (TILT_HOME = 4500). With zero parallax and VFOV=6400
+        // centidegrees: ceiling_tilt = (0.3 - 0.5) * 6400 + 4500 = 3220.
+        // The unconstrained tilt for lead_target_y=0.0 maps to
+        // TILT_LIMIT_MIN (-4500), which is above the ceiling, so the result
+        // must be clamped to the ceiling tilt.
+        let unconstrained = lead_target_to_solution(0.5_f32, 0.0_f32);
+        assert_eq!(
+            unconstrained.tilt, TILT_LIMIT_MIN,
+            "unconstrained lead target y=0.0 must map to TILT_LIMIT_MIN"
+        );
+
+        let ceiling_solution = targeter.enforce_ceiling(unconstrained, 0.3_f32, TILT_HOME);
+        assert_eq!(
+            solution.tilt, ceiling_solution.tilt,
+            "LEAD_TO_POINT must use enforce_ceiling for camera-space ceiling conversion"
+        );
         assert!(
-            solution.tilt >= ceiling_tilt,
-            "safety ceiling must clamp tilt: solution={}, ceiling={}",
+            solution.tilt > TILT_LIMIT_MIN,
+            "safety ceiling must clamp tilt above TILT_LIMIT_MIN: solution={}",
             solution.tilt,
-            ceiling_tilt
         );
     }
 

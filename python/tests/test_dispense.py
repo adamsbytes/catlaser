@@ -208,7 +208,7 @@ class TestFinalizeSessionWrites:
         row = conn.execute(
             "SELECT total_play_time_sec FROM cats WHERE cat_id = 'cat-1'",
         ).fetchone()
-        assert row["total_play_time_sec"] == 45
+        assert row["total_play_time_sec"] == 46
 
     def test_chute_state_updated_at(self, conn: sqlite3.Connection):
         _insert_cat(conn)
