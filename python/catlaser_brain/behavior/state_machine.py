@@ -411,6 +411,7 @@ class BehaviorEngine:
 
         self._track_presence(cat, now)
 
+        pre_tick_state = self._state
         if self._state in _ENGAGEMENT_STATES and cat is not None:
             self._update_engagement(cat, dt)
 
@@ -420,6 +421,16 @@ class BehaviorEngine:
         tick_result = self._dispatch_tick(cat, now)
         if tick_result is not None:
             return tick_result
+
+        # Accumulate engagement for the frame that transitioned us into
+        # an engagement state (e.g. lure -> chase). The pre-tick check
+        # above saw the old state and skipped; now the new state qualifies.
+        if (
+            pre_tick_state not in _ENGAGEMENT_STATES
+            and self._state in _ENGAGEMENT_STATES
+            and cat is not None
+        ):
+            self._update_engagement(cat, dt)
 
         self._compute_pattern_offsets(cat, dt)
 
