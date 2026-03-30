@@ -45,7 +45,7 @@
   - [X] Pattern generation (offset streaming per-frame to Rust)
   - [X] Cooldown → lead-to-point (left/right chute exit)
   - [X] Dispense orchestration (variable reward: tier 0-2, chute alternation)
-  - [ ] Session scheduling (read schedule, accept/skip logic)
+  - [X] Session scheduling (read schedule, accept/skip logic)
 
 [ ] Storage + Networking
   - [ ] SQLite CRUD (cat profiles, sessions, play history, embeddings, schedule)
