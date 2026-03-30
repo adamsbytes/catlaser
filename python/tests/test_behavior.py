@@ -7,6 +7,7 @@ import random
 import pytest
 
 from catlaser_brain.behavior.engagement import EngagementConfig
+from catlaser_brain.behavior.profile import CatProfile
 from catlaser_brain.behavior.state_machine import (
     DISPENSE_ROTATIONS,
     BehaviorEngine,
@@ -887,3 +888,94 @@ class TestFullSessionLifecycle:
         output = e.update(None, t)
         assert output.session_ended is not None
         assert output.session_ended.dispense_rotations in (3, 5, 7)
+
+
+# ---------------------------------------------------------------------------
+# Pattern offsets
+# ---------------------------------------------------------------------------
+
+
+class TestPatternOffsets:
+    def test_lure_commands_have_offsets(self):
+        e = _engine()
+        e.start_session(1, ChuteSide.LEFT, 0.0)
+        has_offset = False
+        t = 0.0
+        for _ in range(30):
+            t += 1.0 / 15.0
+            output = e.update(_cat(), t)
+            if abs(output.command.offset_x) > 1e-6 or abs(output.command.offset_y) > 1e-6:
+                has_offset = True
+                break
+        assert has_offset
+
+    def test_chase_leads_in_velocity_direction(self):
+        e = _engine()
+        t = _run_to_chase(e)
+        cat = _cat(vx=0.2, vy=0.0)
+        t += 1.0 / 15.0
+        output = e.update(cat, t)
+        assert output.command.offset_x > 0.0
+
+    def test_cooldown_commands_zero_offsets(self):
+        e = _engine()
+        t = _run_to_cooldown(e)
+        t += 0.1
+        output = e.update(None, t)
+        assert output.command.offset_x == 0.0
+        assert output.command.offset_y == 0.0
+
+    def test_dispense_commands_zero_offsets(self):
+        e = _engine()
+        t = _run_to_dispense(e)
+        t += 0.1
+        output = e.update(None, t)
+        assert output.command.offset_x == 0.0
+        assert output.command.offset_y == 0.0
+
+    def test_offsets_bounded(self):
+        e = _engine()
+        e.start_session(1, ChuteSide.LEFT, 0.0)
+        t = 0.0
+        for _ in range(200):
+            t += 1.0 / 15.0
+            output = e.update(_engaged_cat(), t)
+            assert abs(output.command.offset_x) <= 0.15
+            assert abs(output.command.offset_y) <= 0.15
+
+    def test_offsets_reset_between_sessions(self):
+        e = _engine()
+        t = _run_to_dispense(e)
+        t += _FAST_CONFIG.dispense_duration + 0.1
+        e.update(None, t)
+        assert e.state is State.IDLE
+
+        t += 1.0
+        output = e.start_session(2, ChuteSide.RIGHT, t)
+        assert output.command.offset_x == 0.0
+        assert output.command.offset_y == 0.0
+
+    def test_profile_randomness_affects_offsets(self):
+        profile_low = CatProfile(pattern_randomness=0.0)
+        profile_high = CatProfile(pattern_randomness=1.0)
+
+        e_low = _engine()
+        e_high = _engine()
+
+        e_low.start_session(1, ChuteSide.LEFT, 0.0, profile=profile_low)
+        e_high.start_session(1, ChuteSide.LEFT, 0.0, profile=profile_high)
+
+        t = _FAST_CONFIG.lure_min_duration + 0.1
+        e_low.update(_engaged_cat(), t)
+        e_high.update(_engaged_cat(), t)
+
+        offsets_low: list[tuple[float, float]] = []
+        offsets_high: list[tuple[float, float]] = []
+        for _ in range(100):
+            t += 1.0 / 15.0
+            out_low = e_low.update(_engaged_cat(), t)
+            out_high = e_high.update(_engaged_cat(), t)
+            offsets_low.append((out_low.command.offset_x, out_low.command.offset_y))
+            offsets_high.append((out_high.command.offset_x, out_high.command.offset_y))
+
+        assert offsets_low != offsets_high

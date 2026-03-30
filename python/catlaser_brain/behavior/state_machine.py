@@ -15,6 +15,7 @@ import random
 from typing import TYPE_CHECKING, Final
 
 from catlaser_brain.behavior.engagement import EngagementConfig, EngagementTracker
+from catlaser_brain.behavior.pattern import PatternConfig, PatternGenerator
 
 if TYPE_CHECKING:
     from catlaser_brain.behavior.profile import CatProfile
@@ -213,6 +214,12 @@ class EngineConfig:
         default_factory=EngagementConfig,
     )
 
+    # -- Pattern generation --
+    pattern: PatternConfig = dataclasses.field(
+        default_factory=PatternConfig,
+    )
+    pattern_randomness: float = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Profile application
@@ -243,6 +250,7 @@ def apply_profile(config: EngineConfig, profile: CatProfile) -> EngineConfig:
         tease_max_speed=config.tease_max_speed * profile.preferred_speed,
         chase_smoothing=profile.preferred_smoothing,
         tease_smoothing=profile.preferred_smoothing * tease_chase_ratio,
+        pattern_randomness=profile.pattern_randomness,
     )
 
 
@@ -264,6 +272,8 @@ class _SessionState:
     last_update_time: float = 0.0
     dispense_tier: int = 0
     dispense_rotations: int = 0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -285,12 +295,16 @@ class BehaviorEngine:
         rng: Random number generator for tease interval scheduling.
     """
 
-    __slots__ = ("_base_config", "_config", "_rng", "_session", "_state")
+    __slots__ = ("_base_config", "_config", "_pattern", "_rng", "_session", "_state")
 
     def __init__(self, config: EngineConfig, rng: random.Random) -> None:
         self._base_config = config
         self._config = config
         self._rng = rng
+        self._pattern = PatternGenerator(
+            config.pattern,
+            random.Random(rng.getrandbits(64)),  # noqa: S311
+        )
         self._state = State.IDLE
         self._session = _SessionState(
             engagement=EngagementTracker(config.engagement),
@@ -354,6 +368,7 @@ class BehaviorEngine:
             last_update_time=now,
         )
         self._state = State.LURE
+        self._pattern.reset()
 
         return EngineOutput(command=self._make_command())
 
@@ -405,6 +420,8 @@ class BehaviorEngine:
         tick_result = self._dispatch_tick(cat, now)
         if tick_result is not None:
             return tick_result
+
+        self._compute_pattern_offsets(cat, dt)
 
         return EngineOutput(command=self._make_command())
 
@@ -478,6 +495,21 @@ class BehaviorEngine:
             case State.IDLE:
                 pass
         return None
+
+    def _compute_pattern_offsets(self, cat: CatObservation | None, dt: float) -> None:
+        s = self._session
+        if self._state not in _ACTIVE_PLAY_STATES:
+            s.offset_x = 0.0
+            s.offset_y = 0.0
+            return
+        self._pattern.tick(dt)
+        randomness = self._config.pattern_randomness
+        if self._state is State.LURE:
+            s.offset_x, s.offset_y = self._pattern.lure(randomness)
+        elif self._state is State.CHASE:
+            s.offset_x, s.offset_y = self._pattern.chase(cat, randomness)
+        else:
+            s.offset_x, s.offset_y = self._pattern.tease(dt, randomness)
 
     # -------------------------------------------------------------------
     # State transitions
@@ -592,6 +624,8 @@ class BehaviorEngine:
             case State.LURE:
                 return Command(
                     mode=TargetingMode.TRACK,
+                    offset_x=self._session.offset_x,
+                    offset_y=self._session.offset_y,
                     smoothing=self._config.lure_smoothing,
                     max_speed=self._config.lure_max_speed,
                     laser_on=True,
@@ -600,6 +634,8 @@ class BehaviorEngine:
             case State.CHASE:
                 return Command(
                     mode=TargetingMode.TRACK,
+                    offset_x=self._session.offset_x,
+                    offset_y=self._session.offset_y,
                     smoothing=self._config.chase_smoothing,
                     max_speed=self._config.chase_max_speed,
                     laser_on=True,
@@ -608,6 +644,8 @@ class BehaviorEngine:
             case State.TEASE:
                 return Command(
                     mode=TargetingMode.TRACK,
+                    offset_x=self._session.offset_x,
+                    offset_y=self._session.offset_y,
                     smoothing=self._config.tease_smoothing,
                     max_speed=self._config.tease_max_speed,
                     laser_on=True,
