@@ -131,6 +131,12 @@ class EngineOutput:
 DISPENSE_ROTATIONS: Final[tuple[int, int, int]] = (3, 5, 7)
 """Treat disc rotation counts indexed by engagement tier (0, 1, 2)."""
 
+
+def _lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolation from *a* to *b* by factor *t* in [0, 1]."""
+    return a + (b - a) * t
+
+
 _IDLE_COMMAND: Final[Command] = Command(mode=TargetingMode.IDLE)
 
 _IDLE_OUTPUT: Final[EngineOutput] = EngineOutput(command=_IDLE_COMMAND)
@@ -189,6 +195,7 @@ class EngineConfig:
     tease_max_speed: float = 0.7
 
     # -- Cooldown phase --
+    cooldown_decel_duration: float = 3.0
     cooldown_timeout: float = 15.0
     cooldown_smoothing: float = 0.9
     cooldown_max_speed: float = 0.1
@@ -274,6 +281,8 @@ class _SessionState:
     dispense_rotations: int = 0
     offset_x: float = 0.0
     offset_y: float = 0.0
+    pre_cooldown_speed: float = 0.0
+    pre_cooldown_smoothing: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +543,18 @@ class BehaviorEngine:
         tier = self._session.engagement.tier
         self._session.dispense_tier = tier
         self._session.dispense_rotations = DISPENSE_ROTATIONS[tier]
+
+        cfg = self._config
+        if self._state is State.CHASE:
+            self._session.pre_cooldown_speed = cfg.chase_max_speed
+            self._session.pre_cooldown_smoothing = cfg.chase_smoothing
+        elif self._state is State.TEASE:
+            self._session.pre_cooldown_speed = cfg.tease_max_speed
+            self._session.pre_cooldown_smoothing = cfg.tease_smoothing
+        else:
+            self._session.pre_cooldown_speed = cfg.lure_max_speed
+            self._session.pre_cooldown_smoothing = cfg.lure_smoothing
+
         self._transition(State.COOLDOWN, now)
 
     def _begin_chase(self, now: float) -> None:
@@ -663,16 +684,7 @@ class BehaviorEngine:
                     target_track_id=self._session.target_track_id,
                 )
             case State.COOLDOWN:
-                tx, ty = self._chute_target()
-                return Command(
-                    mode=TargetingMode.LEAD_TO_POINT,
-                    smoothing=self._config.cooldown_smoothing,
-                    max_speed=self._config.cooldown_max_speed,
-                    laser_on=True,
-                    target_track_id=self._session.target_track_id,
-                    lead_target_x=tx,
-                    lead_target_y=ty,
-                )
+                return self._cooldown_command()
             case State.DISPENSE:
                 tx, ty = self._chute_target()
                 return Command(
@@ -688,6 +700,48 @@ class BehaviorEngine:
         if self._session.chute_side is ChuteSide.LEFT:
             return cfg.chute_left_x, cfg.chute_left_y
         return cfg.chute_right_x, cfg.chute_right_y
+
+    def _cooldown_command(self) -> Command:
+        """Build the command for the current cooldown sub-phase.
+
+        Deceleration (``t < cooldown_decel_duration``): TRACK mode with
+        speed and smoothing linearly interpolated from the pre-cooldown
+        values to the cooldown targets.
+
+        Lead (``t >= cooldown_decel_duration``): LEAD_TO_POINT mode at
+        final cooldown speed/smoothing, guiding the laser toward the
+        selected chute exit.
+        """
+        s = self._session
+        cfg = self._config
+        time_in_cooldown = max(s.last_update_time - s.state_entered_at, 0.0)
+
+        if cfg.cooldown_decel_duration > 0.0:
+            decel_progress = min(time_in_cooldown / cfg.cooldown_decel_duration, 1.0)
+        else:
+            decel_progress = 1.0
+
+        if decel_progress < 1.0:
+            speed = _lerp(s.pre_cooldown_speed, cfg.cooldown_max_speed, decel_progress)
+            smoothing = _lerp(s.pre_cooldown_smoothing, cfg.cooldown_smoothing, decel_progress)
+            return Command(
+                mode=TargetingMode.TRACK,
+                smoothing=smoothing,
+                max_speed=speed,
+                laser_on=True,
+                target_track_id=s.target_track_id,
+            )
+
+        tx, ty = self._chute_target()
+        return Command(
+            mode=TargetingMode.LEAD_TO_POINT,
+            smoothing=cfg.cooldown_smoothing,
+            max_speed=cfg.cooldown_max_speed,
+            laser_on=True,
+            target_track_id=s.target_track_id,
+            lead_target_x=tx,
+            lead_target_y=ty,
+        )
 
     # -------------------------------------------------------------------
     # Engagement scoring

@@ -35,6 +35,7 @@ _FAST_CONFIG = EngineConfig(
     chase_tease_interval_max=3.0,
     tease_duration_min=1.0,
     tease_duration_max=1.0,
+    cooldown_decel_duration=1.0,
     cooldown_timeout=5.0,
     cooldown_arrival_tolerance=0.05,
     dispense_duration=1.0,
@@ -321,7 +322,7 @@ class TestStopSession:
         t = _run_to_chase(e)
         output = e.stop_session(t)
         assert e.state is State.COOLDOWN
-        assert output.command.mode is TargetingMode.LEAD_TO_POINT
+        assert output.command.mode is TargetingMode.TRACK
         assert output.command.laser_on is True
 
     def test_from_lure(self):
@@ -466,7 +467,9 @@ class TestCooldownTransitions:
         cfg = _FAST_CONFIG
         e = _engine(config=cfg)
         t = _run_to_cooldown(e)
-        output = e.update(None, t + 0.1)
+        # Advance past deceleration sub-phase into lead sub-phase.
+        t += cfg.cooldown_decel_duration + 0.1
+        output = e.update(None, t)
         cmd = output.command
         assert cmd.mode is TargetingMode.LEAD_TO_POINT
         assert cmd.lead_target_x == cfg.chute_left_x
@@ -481,6 +484,197 @@ class TestCooldownTransitions:
         t += 0.1
         e.update(far_cat, t)
         assert e.state is State.COOLDOWN
+
+
+# ---------------------------------------------------------------------------
+# Cooldown lead-to-point
+# ---------------------------------------------------------------------------
+
+
+class TestCooldownLeadToPoint:
+    def test_decel_phase_uses_track_mode(self):
+        e = _engine()
+        t = _run_to_cooldown(e)
+        t += 0.1
+        output = e.update(_engaged_cat(), t)
+        assert output.command.mode is TargetingMode.TRACK
+
+    def test_decel_speed_ramps_from_chase(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_cooldown(e)
+        # Near start: speed close to chase value.
+        t += 0.01
+        output = e.update(_engaged_cat(), t)
+        assert abs(output.command.max_speed - cfg.chase_max_speed) < 0.05
+        # Past deceleration: speed at cooldown value.
+        t += cfg.cooldown_decel_duration
+        output = e.update(_engaged_cat(), t)
+        assert output.command.max_speed == cfg.cooldown_max_speed
+
+    def test_decel_speed_ramps_from_tease(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_chase(e)
+        t += cfg.chase_tease_interval_min + 0.1
+        e.update(_engaged_cat(), t)
+        assert e.state is State.TEASE
+        e.stop_session(t)
+        assert e.state is State.COOLDOWN
+        t += 0.01
+        output = e.update(_engaged_cat(), t)
+        assert abs(output.command.max_speed - cfg.tease_max_speed) < 0.05
+
+    def test_decel_speed_ramps_from_lure(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.LEFT, 0.0)
+        e.stop_session(0.5)
+        assert e.state is State.COOLDOWN
+        t = 0.5 + 0.01
+        output = e.update(None, t)
+        assert abs(output.command.max_speed - cfg.lure_max_speed) < 0.05
+
+    def test_decel_smoothing_ramps(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_cooldown(e)
+        # Near start: smoothing close to chase value.
+        t += 0.01
+        output = e.update(_engaged_cat(), t)
+        assert abs(output.command.smoothing - cfg.chase_smoothing) < 0.05
+        # Near end: smoothing close to cooldown value.
+        t += cfg.cooldown_decel_duration - 0.02
+        output = e.update(_engaged_cat(), t)
+        assert abs(output.command.smoothing - cfg.cooldown_smoothing) < 0.05
+
+    def test_decel_midpoint_interpolation(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_cooldown(e)
+        t += cfg.cooldown_decel_duration / 2.0
+        output = e.update(_engaged_cat(), t)
+        expected_speed = (cfg.chase_max_speed + cfg.cooldown_max_speed) / 2.0
+        expected_smoothing = (cfg.chase_smoothing + cfg.cooldown_smoothing) / 2.0
+        assert abs(output.command.max_speed - expected_speed) < 0.01
+        assert abs(output.command.smoothing - expected_smoothing) < 0.01
+
+    def test_lead_phase_after_decel(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_cooldown(e)
+        t += cfg.cooldown_decel_duration + 0.1
+        output = e.update(None, t)
+        cmd = output.command
+        assert cmd.mode is TargetingMode.LEAD_TO_POINT
+        assert cmd.max_speed == cfg.cooldown_max_speed
+        assert cmd.smoothing == cfg.cooldown_smoothing
+        assert cmd.lead_target_x == cfg.chute_left_x
+        assert cmd.lead_target_y == cfg.chute_left_y
+
+    def test_lead_phase_right_chute(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.RIGHT, 0.0)
+        t = cfg.lure_min_duration + 0.1
+        e.update(_engaged_cat(), t)
+        assert e.state is State.CHASE
+        e.stop_session(t)
+        t += cfg.cooldown_decel_duration + 0.1
+        output = e.update(None, t)
+        assert output.command.lead_target_x == cfg.chute_right_x
+        assert output.command.lead_target_y == cfg.chute_right_y
+
+    def test_cat_arrival_during_decel_triggers_dispense(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_cooldown(e)
+        near_chute = _cat(cx=cfg.chute_left_x, cy=cfg.chute_left_y)
+        t += 0.1
+        e.update(near_chute, t)
+        assert e.state is State.DISPENSE
+
+    def test_laser_on_throughout_cooldown(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        t = _run_to_cooldown(e)
+        # During decel.
+        t += 0.1
+        output = e.update(_engaged_cat(), t)
+        assert output.command.laser_on is True
+        # During lead.
+        t += cfg.cooldown_decel_duration
+        output = e.update(None, t)
+        assert output.command.laser_on is True
+
+    def test_track_id_preserved_in_both_phases(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        e.start_session(42, ChuteSide.LEFT, 0.0)
+        t = cfg.lure_min_duration + 0.1
+        e.update(_engaged_cat(), t)
+        assert e.state is State.CHASE
+        e.stop_session(t)
+        # During decel.
+        t += 0.1
+        output = e.update(_engaged_cat(), t)
+        assert output.command.target_track_id == 42
+        # During lead.
+        t += cfg.cooldown_decel_duration
+        output = e.update(None, t)
+        assert output.command.target_track_id == 42
+
+    def test_zero_decel_duration_skips_to_lead(self):
+        cfg = EngineConfig(
+            lure_min_duration=1.0,
+            lure_engagement_velocity=0.05,
+            cooldown_decel_duration=0.0,
+            cooldown_timeout=5.0,
+            session_timeout=60.0,
+            track_lost_timeout=10.0,
+        )
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.LEFT, 0.0)
+        t = cfg.lure_min_duration + 0.1
+        e.update(_engaged_cat(), t)
+        assert e.state is State.CHASE
+        e.stop_session(t)
+        output = e.update(None, t + 0.1)
+        assert output.command.mode is TargetingMode.LEAD_TO_POINT
+
+    def test_timeout_spans_both_phases(self):
+        cfg = EngineConfig(
+            lure_min_duration=1.0,
+            lure_engagement_velocity=0.05,
+            cooldown_decel_duration=2.0,
+            cooldown_timeout=3.0,
+            session_timeout=60.0,
+            track_lost_timeout=10.0,
+        )
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.LEFT, 0.0)
+        t = cfg.lure_min_duration + 0.1
+        e.update(_engaged_cat(), t)
+        e.stop_session(t)
+        # Timeout fires at 3.0s into cooldown (1.0s into lead phase).
+        t += cfg.cooldown_timeout + 0.1
+        e.update(None, t)
+        assert e.state is State.DISPENSE
+
+    def test_profile_adjusted_speed_in_decel(self):
+        cfg = _FAST_CONFIG
+        profile = CatProfile(preferred_speed=1.5)
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.LEFT, 0.0, profile=profile)
+        t = cfg.lure_min_duration + 0.1
+        e.update(_engaged_cat(), t)
+        assert e.state is State.CHASE
+        e.stop_session(t)
+        # Decel should ramp from the profile-adjusted chase speed.
+        adjusted_chase_speed = cfg.chase_max_speed * profile.preferred_speed
+        t += 0.01
+        output = e.update(_engaged_cat(), t)
+        assert abs(output.command.max_speed - adjusted_chase_speed) < 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +795,9 @@ class TestChuteSide:
         e = _engine(config=cfg)
         e.start_session(1, ChuteSide.LEFT, 0.0)
         e.stop_session(1.0)
-        output = e.update(None, 1.1)
+        # Advance past deceleration into lead sub-phase.
+        t = 1.0 + cfg.cooldown_decel_duration + 0.1
+        output = e.update(None, t)
         assert output.command.lead_target_x == cfg.chute_left_x
         assert output.command.lead_target_y == cfg.chute_left_y
 
@@ -610,7 +806,9 @@ class TestChuteSide:
         e = _engine(config=cfg)
         e.start_session(1, ChuteSide.RIGHT, 0.0)
         e.stop_session(1.0)
-        output = e.update(None, 1.1)
+        # Advance past deceleration into lead sub-phase.
+        t = 1.0 + cfg.cooldown_decel_duration + 0.1
+        output = e.update(None, t)
         assert output.command.lead_target_x == cfg.chute_right_x
         assert output.command.lead_target_y == cfg.chute_right_y
 
