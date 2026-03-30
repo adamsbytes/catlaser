@@ -49,7 +49,7 @@
 
 [ ] Storage + Networking
   - [X] SQLite CRUD (cat profiles, sessions, play history, embeddings, schedule)
-  - [ ] App API (protobuf over WebRTC data channel / TCP over Tailscale)
+  - [X] App API (protobuf over WebRTC data channel / TCP over Tailscale)
   - [ ] WebRTC live view (LiveKit, H.264/265 from hardware encoder)
   - [ ] Push notifications (FCM/APNs: play summaries, session alerts, hopper empty)
 
