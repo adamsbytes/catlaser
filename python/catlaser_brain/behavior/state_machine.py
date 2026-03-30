@@ -12,9 +12,12 @@ import dataclasses
 import enum
 import math
 import random
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from catlaser_brain.behavior.engagement import EngagementConfig, EngagementTracker
+
+if TYPE_CHECKING:
+    from catlaser_brain.behavior.profile import CatProfile
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -212,6 +215,38 @@ class EngineConfig:
 
 
 # ---------------------------------------------------------------------------
+# Profile application
+# ---------------------------------------------------------------------------
+
+
+def apply_profile(config: EngineConfig, profile: CatProfile) -> EngineConfig:
+    """Overlay a cat's learned preferences onto the base engine config.
+
+    Speed is multiplicative: ``preferred_speed`` scales chase and tease
+    max speeds. Smoothing is a direct override: ``preferred_smoothing``
+    replaces chase smoothing, and tease smoothing is scaled to maintain
+    its original ratio relative to chase smoothing.
+
+    Lure, cooldown, and dispense parameters are unaffected.
+
+    Args:
+        config: Base engine configuration.
+        profile: Per-cat profile to apply.
+
+    Returns:
+        New config with profile-adjusted fields.
+    """
+    tease_chase_ratio = config.tease_smoothing / config.chase_smoothing
+    return dataclasses.replace(
+        config,
+        chase_max_speed=config.chase_max_speed * profile.preferred_speed,
+        tease_max_speed=config.tease_max_speed * profile.preferred_speed,
+        chase_smoothing=profile.preferred_smoothing,
+        tease_smoothing=profile.preferred_smoothing * tease_chase_ratio,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Internal mutable state
 # ---------------------------------------------------------------------------
 
@@ -250,9 +285,10 @@ class BehaviorEngine:
         rng: Random number generator for tease interval scheduling.
     """
 
-    __slots__ = ("_config", "_rng", "_session", "_state")
+    __slots__ = ("_base_config", "_config", "_rng", "_session", "_state")
 
     def __init__(self, config: EngineConfig, rng: random.Random) -> None:
+        self._base_config = config
         self._config = config
         self._rng = rng
         self._state = State.IDLE
@@ -279,13 +315,21 @@ class BehaviorEngine:
         target_track_id: int,
         chute_side: ChuteSide,
         now: float,
+        *,
+        profile: CatProfile | None = None,
     ) -> EngineOutput:
         """Begin a new play session targeting a specific cat track.
+
+        If a cat profile is provided, the engine applies it to the base
+        config for the duration of the session. The base config is
+        restored when the session ends.
 
         Args:
             target_track_id: SORT tracker ID to follow.
             chute_side: Which chute to lead the cat toward at session end.
             now: Monotonic timestamp in seconds.
+            profile: Per-cat profile to apply for this session. ``None``
+                uses the base engine config unmodified.
 
         Returns:
             Initial lure-phase command.
@@ -296,6 +340,10 @@ class BehaviorEngine:
         if self._state is not State.IDLE:
             msg = f"cannot start session: engine is in {self._state.value} state"
             raise RuntimeError(msg)
+
+        self._config = (
+            apply_profile(self._base_config, profile) if profile is not None else self._base_config
+        )
 
         self._session = _SessionState(
             engagement=EngagementTracker(self._config.engagement),
@@ -524,6 +572,7 @@ class BehaviorEngine:
                 pounce_rate=snap.pounce_rate,
                 time_on_target=snap.time_on_target,
             )
+            self._config = self._base_config
             self._state = State.IDLE
             self._session = _SessionState(
                 engagement=EngagementTracker(self._config.engagement),
