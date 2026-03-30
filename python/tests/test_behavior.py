@@ -772,6 +772,38 @@ class TestEngagement:
         assert result.pounce_count == 0
         assert result.time_on_target == 0.0
 
+    def test_engagement_accumulated_on_transition_frame(self):
+        cfg = EngineConfig(
+            lure_min_duration=1.0,
+            lure_max_duration=5.0,
+            lure_engagement_velocity=0.05,
+            chase_tease_interval_min=100.0,
+            chase_tease_interval_max=100.0,
+            cooldown_timeout=1.0,
+            dispense_duration=0.5,
+            session_timeout=60.0,
+            track_lost_timeout=10.0,
+        )
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.LEFT, 0.0)
+        # Single frame at lure_min + epsilon with engaged cat triggers
+        # lure -> chase. That frame's velocity should be accumulated.
+        t = cfg.lure_min_duration + 0.1
+        fast = _cat(vx=0.3, vy=0.0)
+        e.update(fast, t)
+        assert e.state is State.CHASE
+        # Immediately stop to freeze engagement metrics.
+        e.stop_session(t)
+        t += cfg.cooldown_timeout + 0.1
+        e.update(None, t)
+        t += cfg.dispense_duration + 0.1
+        output = e.update(None, t)
+        result = output.session_ended
+        assert result is not None
+        # The transition frame's velocity (0.3) must be present.
+        assert result.avg_velocity > 0.0
+        assert result.active_play_time > 0.0
+
     def test_engagement_score_bounded_zero_to_one(self):
         cfg = EngineConfig(
             lure_min_duration=0.0,

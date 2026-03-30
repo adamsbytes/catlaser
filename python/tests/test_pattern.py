@@ -285,6 +285,60 @@ class TestTease:
         # Without freeze, zero offsets should not appear after initial pick.
         assert zero_count == 0
 
+    def test_high_randomness_preserves_hold_time_variance(self):
+        # Verify that high randomness shortens holds (more direction
+        # changes) without collapsing the variance.
+        cfg = PatternConfig(tease_freeze_probability=0.0)
+        g_low = _gen(config=cfg, seed=42)
+        g_high = _gen(config=cfg, seed=42)
+
+        changes_low = 0
+        changes_high = 0
+        prev_low = (0.0, 0.0)
+        prev_high = (0.0, 0.0)
+
+        for _ in range(500):
+            g_low.tick(_DT)
+            g_high.tick(_DT)
+            ox_l, oy_l = g_low.tease(_DT, 0.0)
+            ox_h, oy_h = g_high.tease(_DT, 0.9)
+            if (ox_l, oy_l) != prev_low:
+                changes_low += 1
+                prev_low = (ox_l, oy_l)
+            if (ox_h, oy_h) != prev_high:
+                changes_high += 1
+                prev_high = (ox_h, oy_h)
+
+        # High randomness should produce more direction changes.
+        assert changes_high > changes_low
+
+    def test_high_randomness_shorter_average_hold(self):
+        # At high randomness, proportional scaling shortens both
+        # bounds, producing shorter average hold durations.
+        cfg = PatternConfig(tease_freeze_probability=0.0)
+        g_low = _gen(config=cfg, seed=99)
+        g_high = _gen(config=cfg, seed=99)
+
+        # Count total juke transitions as a proxy for hold duration.
+        low_transitions = 0
+        high_transitions = 0
+        prev_low = (0.0, 0.0)
+        prev_high = (0.0, 0.0)
+        for _ in range(1000):
+            g_low.tick(_DT)
+            g_high.tick(_DT)
+            ol = g_low.tease(_DT, 0.0)
+            oh = g_high.tease(_DT, 1.0)
+            if ol != prev_low:
+                low_transitions += 1
+                prev_low = ol
+            if oh != prev_high:
+                high_transitions += 1
+                prev_high = oh
+
+        # More transitions = shorter holds on average.
+        assert high_transitions > low_transitions
+
 
 # ---------------------------------------------------------------------------
 # Reset

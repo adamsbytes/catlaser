@@ -250,12 +250,13 @@ class PatternGenerator:
         self._juke_target_x = math.cos(angle) * mag
         self._juke_target_y = math.sin(angle) * mag
 
-        max_dur = cfg.tease_juke_duration_max - randomness * 0.5 * (
-            cfg.tease_juke_duration_max - cfg.tease_juke_duration_min
-        )
+        # Higher randomness produces shorter holds (more direction changes
+        # per second). Proportional scaling preserves the relative spread
+        # so hold times remain unpredictable at all randomness levels.
+        scale = 1.0 - randomness * 0.5
         self._juke_timer = self._rng.uniform(
-            cfg.tease_juke_duration_min,
-            max(cfg.tease_juke_duration_min, max_dur),
+            cfg.tease_juke_duration_min * scale,
+            cfg.tease_juke_duration_max * scale,
         )
 
     def _clamp(self, ox: float, oy: float) -> tuple[float, float]:
