@@ -6,6 +6,7 @@ import random
 
 import pytest
 
+from catlaser_brain.behavior.engagement import EngagementConfig
 from catlaser_brain.behavior.state_machine import (
     DISPENSE_ROTATIONS,
     BehaviorEngine,
@@ -527,6 +528,10 @@ class TestDispenseTransitions:
         assert result.dispense_rotations == DISPENSE_ROTATIONS[result.dispense_tier]
         assert result.engagement_score >= 0.0
         assert result.active_play_time >= 0.0
+        assert result.avg_velocity >= 0.0
+        assert result.pounce_count >= 0
+        assert result.pounce_rate >= 0.0
+        assert 0.0 <= result.time_on_target <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -620,8 +625,10 @@ class TestEngagement:
             dispense_duration=0.5,
             session_timeout=60.0,
             track_lost_timeout=10.0,
-            velocity_normalization=0.2,
-            pounce_velocity_threshold=0.15,
+            engagement=EngagementConfig(
+                velocity_normalization=0.2,
+                pounce_velocity_threshold=0.15,
+            ),
         )
         e = _engine(config=cfg)
         e.start_session(1, ChuteSide.LEFT, 0.0)
@@ -652,9 +659,11 @@ class TestEngagement:
             dispense_duration=0.5,
             session_timeout=60.0,
             track_lost_timeout=10.0,
-            velocity_normalization=0.2,
-            pounce_velocity_threshold=0.15,
-            pounce_rate_normalization=1.0,
+            engagement=EngagementConfig(
+                velocity_normalization=0.2,
+                pounce_velocity_threshold=0.15,
+                pounce_rate_normalization=1.0,
+            ),
         )
         e = _engine(config=cfg)
         e.start_session(1, ChuteSide.LEFT, 0.0)
@@ -683,16 +692,20 @@ class TestEngagement:
             dispense_duration=0.5,
             session_timeout=60.0,
             track_lost_timeout=10.0,
-            velocity_normalization=0.2,
-            pounce_velocity_threshold=0.15,
-            pounce_rate_normalization=1.0,
+            engagement=EngagementConfig(
+                velocity_normalization=0.2,
+                pounce_velocity_threshold=0.15,
+                pounce_rate_normalization=1.0,
+            ),
         )
         e = _engine(config=cfg)
         e.start_session(1, ChuteSide.LEFT, 0.0)
         e.update(_cat(vx=0.1), 0.1)
         assert e.state is State.CHASE
-        # Moderate velocity: 0.12/0.2 = vel_score 0.6, * 0.6 weight = 0.36
-        # which clears tier_low (0.33) but not tier_high (0.66).
+        # vel: 0.12/0.2 = 0.6 * 0.4 = 0.24
+        # pounce: 0.12 < 0.15, no pounces = 0
+        # time_on_target: 0.12 > 0.03, ratio 1.0 * 0.3 = 0.30
+        # total = 0.54, clears tier_low (0.33) but not tier_high (0.66)
         moderate = _cat(vx=0.12, vy=0.0)
         _advance(e, moderate, 0.2, 5.0)
         e.stop_session(5.5)
@@ -733,6 +746,9 @@ class TestEngagement:
         # No engagement was tracked during lure.
         assert result.active_play_time == 0.0
         assert result.engagement_score == 0.0
+        assert result.avg_velocity == 0.0
+        assert result.pounce_count == 0
+        assert result.time_on_target == 0.0
 
     def test_engagement_score_bounded_zero_to_one(self):
         cfg = EngineConfig(

@@ -54,4 +54,4 @@ py-fmt:
     cd python && ruff format .
 
 py-test:
-    cd python && python -m pytest
+    cd python && .venv/bin/python -m pytest

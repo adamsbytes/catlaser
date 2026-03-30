@@ -40,7 +40,7 @@
 
 [ ] Behavior Engine (catlaser_brain)
   - [X] State machine (lure / chase / tease / cooldown / dispense)
-  - [ ] Engagement tracking (cat velocity, pounce count, time-on-target)
+  - [X] Engagement tracking (cat velocity, pounce count, time-on-target)
   - [ ] Per-cat profile adaptation (speed, smoothing, pattern randomness)
   - [ ] Pattern generation (offset streaming per-frame to Rust)
   - [ ] Cooldown → lead-to-point (left/right chute exit)

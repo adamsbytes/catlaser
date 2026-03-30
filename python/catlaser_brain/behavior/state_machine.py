@@ -14,6 +14,8 @@ import math
 import random
 from typing import Final
 
+from catlaser_brain.behavior.engagement import EngagementConfig, EngagementTracker
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -98,6 +100,10 @@ class SessionResult:
     dispense_tier: int
     dispense_rotations: int
     active_play_time: float
+    avg_velocity: float
+    pounce_count: int
+    pounce_rate: float
+    time_on_target: float
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -199,14 +205,10 @@ class EngineConfig:
     chute_right_x: float = 0.7
     chute_right_y: float = 0.9
 
-    # -- Engagement scoring --
-    pounce_velocity_threshold: float = 0.15
-    velocity_normalization: float = 0.2
-    pounce_rate_normalization: float = 1.0
-    velocity_weight: float = 0.6
-    pounce_weight: float = 0.4
-    tier_low_threshold: float = 0.33
-    tier_high_threshold: float = 0.66
+    # -- Engagement tracking --
+    engagement: EngagementConfig = dataclasses.field(
+        default_factory=EngagementConfig,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -215,15 +217,8 @@ class EngineConfig:
 
 
 @dataclasses.dataclass(slots=True)
-class _EngagementMetrics:
-    velocity_sum: float = 0.0
-    pounce_count: int = 0
-    active_frames: int = 0
-    active_time: float = 0.0
-
-
-@dataclasses.dataclass(slots=True)
 class _SessionState:
+    engagement: EngagementTracker
     session_start: float = 0.0
     state_entered_at: float = 0.0
     target_track_id: int = 0
@@ -231,9 +226,6 @@ class _SessionState:
     target_absent_since: float | None = None
     next_tease_at: float = 0.0
     tease_ends_at: float = 0.0
-    engagement: _EngagementMetrics = dataclasses.field(
-        default_factory=_EngagementMetrics,
-    )
     last_update_time: float = 0.0
     dispense_tier: int = 0
     dispense_rotations: int = 0
@@ -264,7 +256,9 @@ class BehaviorEngine:
         self._config = config
         self._rng = rng
         self._state = State.IDLE
-        self._session = _SessionState()
+        self._session = _SessionState(
+            engagement=EngagementTracker(config.engagement),
+        )
 
     @property
     def state(self) -> State:
@@ -304,6 +298,7 @@ class BehaviorEngine:
             raise RuntimeError(msg)
 
         self._session = _SessionState(
+            engagement=EngagementTracker(self._config.engagement),
             session_start=now,
             state_entered_at=now,
             target_track_id=target_track_id,
@@ -445,7 +440,7 @@ class BehaviorEngine:
         self._session.state_entered_at = now
 
     def _begin_cooldown(self, now: float) -> None:
-        tier = self._compute_dispense_tier()
+        tier = self._session.engagement.tier
         self._session.dispense_tier = tier
         self._session.dispense_rotations = DISPENSE_ROTATIONS[tier]
         self._transition(State.COOLDOWN, now)
@@ -518,14 +513,21 @@ class BehaviorEngine:
     def _tick_dispense(self, now: float) -> EngineOutput:
         if now - self._session.state_entered_at >= self._config.dispense_duration:
             s = self._session
+            snap = s.engagement.snapshot()
             result = SessionResult(
-                engagement_score=self._compute_engagement_score(),
+                engagement_score=snap.score,
                 dispense_tier=s.dispense_tier,
                 dispense_rotations=s.dispense_rotations,
-                active_play_time=s.engagement.active_time,
+                active_play_time=snap.active_time,
+                avg_velocity=snap.avg_velocity,
+                pounce_count=snap.pounce_count,
+                pounce_rate=snap.pounce_rate,
+                time_on_target=snap.time_on_target,
             )
             self._state = State.IDLE
-            self._session = _SessionState()
+            self._session = _SessionState(
+                engagement=EngagementTracker(self._config.engagement),
+            )
             return EngineOutput(command=_IDLE_COMMAND, session_ended=result)
 
         return EngineOutput(command=self._make_command())
@@ -592,29 +594,4 @@ class BehaviorEngine:
 
     def _update_engagement(self, cat: CatObservation, dt: float) -> None:
         speed = math.hypot(cat.velocity_x, cat.velocity_y)
-        m = self._session.engagement
-        m.velocity_sum += speed
-        m.active_frames += 1
-        m.active_time += dt
-        if speed >= self._config.pounce_velocity_threshold:
-            m.pounce_count += 1
-
-    def _compute_engagement_score(self) -> float:
-        m = self._session.engagement
-        cfg = self._config
-        if m.active_frames == 0 or m.active_time < 1.0:
-            return 0.0
-        avg_velocity = m.velocity_sum / m.active_frames
-        pounce_rate = m.pounce_count / m.active_time
-        vel_score = min(avg_velocity / cfg.velocity_normalization, 1.0)
-        pounce_score = min(pounce_rate / cfg.pounce_rate_normalization, 1.0)
-        return cfg.velocity_weight * vel_score + cfg.pounce_weight * pounce_score
-
-    def _compute_dispense_tier(self) -> int:
-        score = self._compute_engagement_score()
-        cfg = self._config
-        if score >= cfg.tier_high_threshold:
-            return 2
-        if score >= cfg.tier_low_threshold:
-            return 1
-        return 0
+        self._session.engagement.update(speed, dt)
