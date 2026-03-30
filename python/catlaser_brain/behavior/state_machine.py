@@ -283,6 +283,8 @@ class _SessionState:
     offset_y: float = 0.0
     pre_cooldown_speed: float = 0.0
     pre_cooldown_smoothing: float = 0.0
+    pre_cooldown_offset_x: float = 0.0
+    pre_cooldown_offset_y: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -544,16 +546,20 @@ class BehaviorEngine:
         self._session.dispense_tier = tier
         self._session.dispense_rotations = DISPENSE_ROTATIONS[tier]
 
+        s = self._session
+        s.pre_cooldown_offset_x = s.offset_x
+        s.pre_cooldown_offset_y = s.offset_y
+
         cfg = self._config
         if self._state is State.CHASE:
-            self._session.pre_cooldown_speed = cfg.chase_max_speed
-            self._session.pre_cooldown_smoothing = cfg.chase_smoothing
+            s.pre_cooldown_speed = cfg.chase_max_speed
+            s.pre_cooldown_smoothing = cfg.chase_smoothing
         elif self._state is State.TEASE:
-            self._session.pre_cooldown_speed = cfg.tease_max_speed
-            self._session.pre_cooldown_smoothing = cfg.tease_smoothing
+            s.pre_cooldown_speed = cfg.tease_max_speed
+            s.pre_cooldown_smoothing = cfg.tease_smoothing
         else:
-            self._session.pre_cooldown_speed = cfg.lure_max_speed
-            self._session.pre_cooldown_smoothing = cfg.lure_smoothing
+            s.pre_cooldown_speed = cfg.lure_max_speed
+            s.pre_cooldown_smoothing = cfg.lure_smoothing
 
         self._transition(State.COOLDOWN, now)
 
@@ -724,8 +730,12 @@ class BehaviorEngine:
         if decel_progress < 1.0:
             speed = _lerp(s.pre_cooldown_speed, cfg.cooldown_max_speed, decel_progress)
             smoothing = _lerp(s.pre_cooldown_smoothing, cfg.cooldown_smoothing, decel_progress)
+            offset_x = _lerp(s.pre_cooldown_offset_x, 0.0, decel_progress)
+            offset_y = _lerp(s.pre_cooldown_offset_y, 0.0, decel_progress)
             return Command(
                 mode=TargetingMode.TRACK,
+                offset_x=offset_x,
+                offset_y=offset_y,
                 smoothing=smoothing,
                 max_speed=speed,
                 laser_on=True,
