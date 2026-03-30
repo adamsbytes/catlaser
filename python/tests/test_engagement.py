@@ -179,6 +179,40 @@ class TestVelocity:
         t.update(0.10, 0.3)
         assert _close(t.active_time, 0.8)
 
+    def test_average_velocity_time_weighted(self):
+        t = _tracker()
+        # Short burst at low speed, long period at high speed.
+        t.update(0.10, 0.1)
+        t.update(0.30, 0.3)
+        # Time-weighted: (0.10*0.1 + 0.30*0.3) / (0.1 + 0.3) = 0.25
+        # Frame-weighted would give: (0.10 + 0.30) / 2 = 0.20
+        assert _close(t.avg_velocity, 0.25, tol=1e-6)
+
+    def test_ema_frame_rate_independent(self):
+        cfg = EngagementConfig(velocity_ema_alpha=0.1)
+        t_15fps = _tracker(cfg)
+        t_30fps = _tracker(cfg)
+        # 2 seconds at constant speed, different frame rates.
+        for _ in range(30):
+            t_15fps.update(0.10, 1.0 / 15.0)
+        for _ in range(60):
+            t_30fps.update(0.10, 1.0 / 30.0)
+        assert _close(t_15fps.velocity_ema, t_30fps.velocity_ema, tol=1e-6)
+
+    def test_ema_step_response_frame_rate_independent(self):
+        cfg = EngagementConfig(velocity_ema_alpha=0.2)
+        t_10fps = _tracker(cfg)
+        t_30fps = _tracker(cfg)
+        # Seed with initial speed.
+        t_10fps.update(0.0, 1.0 / 10.0)
+        t_30fps.update(0.0, 1.0 / 30.0)
+        # Step to 1.0 for 1 second at different rates.
+        for _ in range(10):
+            t_10fps.update(1.0, 1.0 / 10.0)
+        for _ in range(30):
+            t_30fps.update(1.0, 1.0 / 30.0)
+        assert _close(t_10fps.velocity_ema, t_30fps.velocity_ema, tol=0.01)
+
 
 # ---------------------------------------------------------------------------
 # Pounce rate

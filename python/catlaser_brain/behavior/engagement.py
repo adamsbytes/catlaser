@@ -28,6 +28,7 @@ class EngagementConfig:
 
     # -- Velocity EMA --
     velocity_ema_alpha: float = 0.1
+    reference_fps: float = 15.0
 
     # -- Scoring normalization --
     velocity_normalization: float = 0.2
@@ -91,12 +92,12 @@ class EngagementTracker:
         "_pounce_count",
         "_pouncing",
         "_velocity_ema",
-        "_velocity_sum",
+        "_velocity_time_sum",
     )
 
     def __init__(self, config: EngagementConfig) -> None:
         self._config = config
-        self._velocity_sum = 0.0
+        self._velocity_time_sum = 0.0
         self._velocity_ema = 0.0
         self._pounce_count = 0
         self._pouncing = False
@@ -114,14 +115,14 @@ class EngagementTracker:
         """
         cfg = self._config
 
-        self._velocity_sum += speed
+        self._velocity_time_sum += speed * dt
         self._active_frames += 1
         self._active_time += dt
 
         if self._active_frames == 1:
             self._velocity_ema = speed
         else:
-            alpha = cfg.velocity_ema_alpha
+            alpha = 1.0 - (1.0 - cfg.velocity_ema_alpha) ** (dt * cfg.reference_fps)
             self._velocity_ema = alpha * speed + (1.0 - alpha) * self._velocity_ema
 
         if self._pouncing:
@@ -136,10 +137,10 @@ class EngagementTracker:
 
     @property
     def avg_velocity(self) -> float:
-        """Session average cat speed (normalized units/sec)."""
-        if self._active_frames == 0:
+        """Time-weighted session average cat speed (normalized units/sec)."""
+        if self._active_time <= 0.0:
             return 0.0
-        return self._velocity_sum / self._active_frames
+        return self._velocity_time_sum / self._active_time
 
     @property
     def velocity_ema(self) -> float:
