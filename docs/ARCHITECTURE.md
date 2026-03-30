@@ -1,6 +1,6 @@
 **Architecture**
 - Split-brain: Rust daemon on compute module owns camera/NPU/tracking, Python sidecar handles behavior/app/networking
-- Separate RP2040 MCU for servo control — safety-isolated, never talks to app, never touches network
+- Separate RP2350 MCU (Cortex-M33, TrustZone-M) for servo control — safety-isolated via hardware partitioning, never talks to app, never touches network
 - Python never touches hardware directly — it receives structured data from Rust over Unix domain socket (protobuf via `buffa`), emits behavior commands back
 - Rust on compute module translates behavior commands into servo targets, sends packed 8-byte struct over UART to MCU
 - Hierarchy is strict: App → Python → Rust (compute) → Rust (MCU). Each layer only talks to its neighbors
@@ -10,7 +10,7 @@
 - RV1106G3 SiP: Cortex-A7, 1 TOPS NPU, 256MB DDR3L in-package (no external memory traces), WiFi 6
 
 **Storage**
-- RP2040: 264KB SRAM on-die, boots from 2MB external QSPI flash
+- RP2350: 520KB SRAM on-die, boots from 2MB external QSPI flash
 - Compute module: 256MB SPI NAND (8-pin, no BGA) — read-only Buildroot rootfs, ML models, small journaled writable partition for SQLite and config, never stores media
 - microSD (ship 2GB, user-expandable) — clip buffer and offline store for session recordings, crops, embeddings
 - Clips sync to phone app over the existing data channel whenever connected — phone is the archive
@@ -48,11 +48,12 @@
 - Disc rests with holes misaligned (closed position) — second independent gravity-closed gate in series with the chute door
 
 **MCU**
-- RP2040, Embassy async runtime
-- 200Hz control loop: receive targets, smooth interpolation, PWM output, laser GPIO
+- RP2350 (Cortex-M33), TrustZone-M hardware isolation between safety-critical and application firmware
+- Secure world (small, synchronous, no Embassy): laser GPIO, watchdog, tilt enforcement, person-detection gating — hardware-inaccessible to application code via SAU and ACCESSCTRL
+- Non-Secure world (Embassy async runtime): 200Hz servo interpolation, UART parsing, dispenser control — calls Secure gateway functions to request laser state changes, report sensor data, and feed watchdog
 - Dispenser control: drives disc/door/deflector servos on command, fixed-duration pulses, jam detection via servo stall timeout
 - Hopper sensor GPIO: MCU reads IR break-beam for status LED, compute module reads same line for session gating
-- Watchdog: no message in 500ms → laser off, pan/tilt servos home, dispenser door closed
+- Watchdog: no message in 500ms → Secure world forces laser off, pan/tilt servos home, dispenser door closed
 - Supercap (10F) for 5-8 second clean shutdown on power loss, MCU monitors VBUS
 
 **Vision Pipeline**

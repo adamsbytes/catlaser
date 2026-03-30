@@ -47,6 +47,16 @@
   - [X] Dispense orchestration (variable reward: tier 0-2, chute alternation)
   - [X] Session scheduling (read schedule, accept/skip logic)
 
+[ ] MCU TrustZone Partitioning (RP2040 → RP2350)
+  - [ ] Secure image crate (catlaser-mcu-secure): SAU + ACCESSCTRL initialization
+  - [ ] NSC gateway functions (set_laser_state, report_tilt, feed_watchdog, report_person_detected)
+  - [ ] Secure interrupt handlers (watchdog timeout, tilt fault, power brownout → laser off)
+  - [ ] Non-Secure image refactor (catlaser-mcu → NS, gateway calls replace direct GPIO/watchdog)
+  - [ ] Two-stage linker script (Secure image → veneer import lib → NS image links against it)
+  - [ ] Memory map (Secure/NS flash and SRAM regions, NSC veneer region)
+  - [ ] PWM recalculation (150MHz default clock vs 125MHz)
+  - [ ] Embassy feature migration (rp2040 → rp235xa, thumbv6m → thumbv8m.main)
+
 [ ] Storage + Networking
   - [X] SQLite CRUD (cat profiles, sessions, play history, embeddings, schedule)
   - [X] App API (protobuf over WebRTC data channel / TCP over Tailscale)
@@ -54,7 +64,7 @@
   - [ ] Push notifications (FCM/APNs: play summaries, session alerts, hopper empty)
 
 [ ] Deploy + CI
-  - [ ] Cross-compile toolchain (ARM Cortex-A7 for vision, thumbv6m for MCU)
+  - [ ] Cross-compile toolchain (ARM Cortex-A7 for vision, thumbv8m for MCU)
   - [ ] ONNX → RKNN model conversion pipeline
   - [ ] Rootfs overlay + systemd services (catlaser-vision, catlaser-brain)
   - [ ] build-image.sh (full firmware image assembly)

@@ -1,14 +1,14 @@
-# Embassy RP2040 HAL (`embassy-rp`) — API Research
+# Embassy RP2350 HAL (`embassy-rp`) — API Research
 
-Reference crate version: **0.10.0** (`embassy-rp` on crates.io / `git` on docs.embassy.dev).  
-Docs: `https://docs.embassy.dev/embassy-rp/git/rp2040/`  
+Reference crate version: **0.10.0** (`embassy-rp` on crates.io / `git` on docs.embassy.dev).
+Docs: `https://docs.embassy.dev/embassy-rp/git/rp235xa/`
 Source: `https://github.com/embassy-rs/embassy/tree/main/embassy-rp`
 
 ---
 
 ## Crate Overview
 
-`embassy-rp` is the Embassy HAL targeting RP2040 and RP235x. It provides both **blocking and async** APIs for peripherals. When the `time-driver` feature is enabled, the RP2040 TIMER peripheral is consumed as a 1 MHz global time source for `embassy-time`. The crate implements `embedded-hal` (v0.2 + v1.0), `embedded-hal-async`, `embedded-io`, and `embedded-io-async` traits, meaning drivers written against those traits are directly compatible.
+`embassy-rp` is the Embassy HAL targeting RP2040 and RP235x. It provides both **blocking and async** APIs for peripherals. When the `time-driver` feature is enabled, the TIMER peripheral is consumed as a 1 MHz global time source for `embassy-time`. The crate implements `embedded-hal` (v0.2 + v1.0), `embedded-hal-async`, `embedded-io`, and `embedded-io-async` traits, meaning drivers written against those traits are directly compatible.
 
 Initialization is always `let p = embassy_rp::init(Default::default());` which returns a `Peripherals` struct owning every singleton. Interrupt binding uses the `bind_interrupts!` macro.
 
@@ -74,7 +74,7 @@ Runtime baud rate changes are supported: `uart.set_baudrate(new_baud)`.
 
 ### Relevance to project
 
-For the 8-byte packed UART command struct at 200 Hz, DMA mode with `read_exact` on a fixed buffer is the cleanest approach. Avoid `BufferedUart` unless you need to handle variable-length or partial reads. The RP2040 has two UART instances (UART0, UART1); each can be mapped to several pin pairs.
+For the 8-byte packed UART command struct at 200 Hz, DMA mode with `read_exact` on a fixed buffer is the cleanest approach. Avoid `BufferedUart` unless you need to handle variable-length or partial reads. The RP2350 has two UART instances (UART0, UART1); each can be mapped to several pin pairs. With TrustZone-M, the UART peripheral is assigned to the Non-Secure world via ACCESSCTRL.
 
 ---
 
@@ -82,7 +82,7 @@ For the 8-byte packed UART command struct at 200 Hz, DMA mode with `read_exact` 
 
 **Module:** `embassy_rp::pwm`
 
-The RP2040 has **8 PWM slices** (PWM_SLICE0–7), each with two channels (A and B) that share the same frequency/period but have independent duty cycles. Each GPIO pin is hard-mapped to a specific slice+channel.
+The RP2350 has **12 PWM slices** (PWM_SLICE0–11), each with two channels (A and B) that share the same frequency/period but have independent duty cycles. Each GPIO pin is hard-mapped to a specific slice+channel.
 
 ### Config Struct
 
@@ -104,28 +104,28 @@ pub struct Config {
 
 ### Calculating 50 Hz Servo PWM
 
-System clock: 125 MHz. Target period: 20 ms (50 Hz).
+System clock: 150 MHz (RP2350 default). Target period: 20 ms (50 Hz).
 
-Target total clocks = 125,000,000 / 50 = 2,500,000.
+Target total clocks = 150,000,000 / 50 = 3,000,000.
 
-With `top = 24_999` (so period counts = 25,000) → divider = 2,500,000 / 25,000 = **100**.
+With `top = 29_999` (so period counts = 30,000) → divider = 3,000,000 / 30,000 = **100**.
 
-This gives 0.8 µs per counter tick. Servo pulse mapping:
+This gives 0.667 µs per counter tick. Servo pulse mapping:
 
 | Servo pulse | Counter ticks | `compare_x` value |
 |---|---|---|
-| 500 µs (min) | 625 | 625 |
-| 1500 µs (center) | 1875 | 1875 |
-| 2400 µs (max) | 3000 | 3000 |
+| 500 µs (min) | 750 | 750 |
+| 1500 µs (center) | 2250 | 2250 |
+| 2500 µs (max) | 3750 | 3750 |
 
 ```rust
 use embassy_rp::pwm::{Pwm, Config};
 use fixed::traits::ToFixed;
 
 let mut config = Config::default();
-config.top = 24_999;
+config.top = 29_999;
 config.divider = 100u8.to_fixed();  // integer divider = 100
-config.compare_a = 1875;            // center position
+config.compare_a = 2250;            // center position
 
 let mut pwm_pan = Pwm::new_output_a(p.PWM_SLICE0, p.PIN_0, config.clone());
 ```
@@ -141,7 +141,7 @@ pwm_pan.set_config(&config);
 
 Use both channels of one slice (if pins allow), or two separate slices. `Pwm::new_output_ab(slice, pin_a, pin_b, config)` drives both channels with independent duty cycles on a shared period.
 
-### Note on RP2040-E1 errata and the `fixed` crate
+### Note on the `fixed` crate
 
 The `divider` field is `FixedU16<U4>` from the `fixed` crate — 8 integer bits, 4 fractional bits. Maximum integer divider is 255. Use `ToFixed` trait for conversion. The `fixed` crate is a required dependency.
 
@@ -151,7 +151,7 @@ The `divider` field is `FixedU16<U4>` from the `fixed` crate — 8 integer bits,
 
 **Module:** `embassy_rp::adc`
 
-The RP2040 has a 12-bit SAR ADC with 5 input channels: GPIO26–29 (ADC0–3) and an internal temperature sensor (channel 4). It runs from a 48 MHz clock.
+The RP2350 has a 12-bit SAR ADC with 5 input channels: GPIO26–29 (ADC0–3) and an internal temperature sensor (channel 4). It runs from a 48 MHz clock.
 
 ### Driver Modes
 
@@ -177,7 +177,7 @@ For continuous monitoring: `adc.read_many(channel, &mut buf, div).await`. The `d
 
 ### VBUS monitoring approach
 
-On the Pico, VBUS is available through a voltage divider on GPIO29/ADC3. Reading this pin gives the USB 5 V rail voltage (scaled to 0–3.3 V). For monitoring the Luckfox power connection, a simple resistor divider on one of ADC0–2 would work, with periodic async reads in a low-priority task.
+On the Pico 2, VBUS is available through a voltage divider on GPIO29/ADC3. Reading this pin gives the USB 5 V rail voltage (scaled to 0–3.3 V). For monitoring the Luckfox power connection, a simple resistor divider on one of ADC0–2 would work, with periodic async reads in a low-priority task. With TrustZone-M, the ADC peripheral can be assigned to the Non-Secure world (power monitoring reports to Secure via gateway), or to the Secure world (Secure brownout handler reads directly).
 
 ---
 
@@ -211,8 +211,8 @@ let beam = Input::new(p.PIN_16, Pull::Up);
 
 ### Relevance to project
 
-- **Laser GPIO**: Simple `Output` pin. Default-low (laser off). The watchdog kill path should force this low on timeout.
-- **IR break-beam**: Use `Input` with `Pull::Up` and async edge detection to monitor beam interruption without busy-waiting. Schmitt trigger is configurable: `beam.set_schmitt(true)`.
+- **Laser GPIO**: With TrustZone-M, the laser pin is assigned to the Secure world via ACCESSCTRL. Non-Secure code cannot write it directly — only the Secure `set_laser_state` gateway can actuate the laser after validating safety invariants.
+- **IR break-beam**: Use `Input` with `Pull::Up` and async edge detection to monitor beam interruption without busy-waiting. Schmitt trigger is configurable: `beam.set_schmitt(true)`. Hopper sensor GPIO can remain Non-Secure (informational, not safety-critical).
 
 ---
 
@@ -220,7 +220,7 @@ let beam = Input::new(p.PIN_16, Pull::Up);
 
 **Module:** `embassy_rp::watchdog`
 
-The RP2040 watchdog is a countdown timer that resets the chip if it reaches zero. It resets everything except ROSC and XOSC.
+The RP2350 watchdog is a countdown timer that resets the chip if it reaches zero. It resets everything except ROSC and XOSC. With TrustZone-M, the watchdog peripheral is assigned to the Secure world via ACCESSCTRL — Non-Secure code feeds it through a Secure gateway function.
 
 ### API
 
@@ -230,9 +230,8 @@ use embassy_time::Duration;
 
 let mut watchdog = Watchdog::new(p.WATCHDOG);
 
-// Required on RP2040: start the watchdog tick generator.
-// Argument = clk_ref frequency in MHz (typically 12 for XOSC).
-watchdog.enable_tick_generation(12);
+// RP2040 only: watchdog.enable_tick_generation(12);
+// Not needed on RP2350 — tick generator runs automatically.
 
 // Optional: don't pause watchdog during debug
 watchdog.pause_on_debug(false);
@@ -249,7 +248,7 @@ watchdog.feed(Duration::from_millis(500));
 | Method | Description |
 |---|---|
 | `new(peripheral)` | Construct. Takes ownership of the WATCHDOG peripheral singleton. |
-| `enable_tick_generation(cycles: u8)` | **RP2040 only.** Starts clk_tick from clk_ref. Pass clk_ref freq in MHz (12 for default XOSC). |
+| `enable_tick_generation(cycles: u8)` | **RP2040 only.** Not needed on RP2350 — tick generator runs automatically. |
 | `pause_on_debug(bool)` | Pause timer when CPU is halted by debugger/JTAG. |
 | `start(Duration)` | Configure reset triggers, load counter, enable. |
 | `feed(Duration)` | Reload the counter. Duration can differ from start — this is the new timeout. |
@@ -258,15 +257,13 @@ watchdog.feed(Duration::from_millis(500));
 | `set_scratch(index, u32)` / `get_scratch(index)` | 8 scratch registers (0–7) that survive watchdog resets. Useful for passing state across resets. |
 | `reset_reason()` | Returns `Option<ResetReason>` — `Forced` or `TimedOut`. |
 
-### RP2040-E1 errata
-
-The RP2040 watchdog counter decrements by 2 instead of 1 due to a silicon bug. The HAL compensates automatically — `feed()` doubles the load value internally when the `rp2040` feature is active. Maximum timeout on RP2040: `0xFFFFFF / 2` microseconds ≈ **8.39 seconds**.
-
 ### Relevance to project
 
-The 500 ms watchdog fits comfortably within the hardware maximum. The flow is: the main UART-receive loop calls `watchdog.feed(Duration::from_millis(500))` each time a valid command packet arrives. If the Luckfox stops sending (crash, hang, cable disconnect), the watchdog fires after 500 ms, resetting the MCU. The startup code should default the laser GPIO to low and check `watchdog.reset_reason()` to log/report the event.
+The 500 ms watchdog fits comfortably within the hardware maximum. With TrustZone-M, the watchdog peripheral is owned by the Secure world. The Non-Secure Embassy firmware feeds it through a gateway function (`feed_watchdog`), which the Secure side only honors if its own invariants are satisfied. If the Luckfox stops sending (crash, hang, cable disconnect), the watchdog fires after 500 ms — the Secure interrupt handler forces the laser off and homes servos.
 
 The scratch registers can persist a "last known state" or error code across watchdog resets without needing flash writes.
+
+Note: the RP2040 had an E1 errata where the watchdog counter decremented by 2 instead of 1 (HAL compensated automatically). This does not affect the RP2350.
 
 ---
 
@@ -292,7 +289,7 @@ This is a compile-time checked, type-safe registration — no runtime overhead.
 
 | Feature | Purpose |
 |---|---|
-| `rp2040` | Target the RP2040 silicon (required). |
+| `rp235xa` / `rp235xb` | Target the RP2350 silicon (select based on variant). Replaces `rp2040`. |
 | `time-driver` | Use TIMER as embassy-time driver (1 MHz tick). Required for `Timer::after`, `Ticker`, etc. |
 | `critical-section-impl` | Safe critical sections for multicore. Not needed if using only core 0. |
 | `unstable-pac` | Re-export `rp-pac` as `embassy_rp::pac` for register-level access when needed. |
@@ -307,7 +304,7 @@ This is a compile-time checked, type-safe registration — no runtime overhead.
 | `embassy-executor` | 0.10.x | Async task executor |
 | `embassy-time` | 0.5.x | Timekeeping (`Ticker::every` for 200 Hz loop) |
 | `embassy-sync` | 0.8.x | Channels, mutexes, signals between tasks |
-| `embassy-rp` | 0.10.x | RP2040 HAL |
+| `embassy-rp` | 0.10.x | RP2350 HAL |
 | `fixed` | 1.28+ | Required for PWM divider type |
 | `defmt` + `defmt-rtt` | 1.x | Lightweight debug logging over SWD |
 | `panic-probe` | — | Breakpoint on panic for debug |

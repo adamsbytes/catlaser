@@ -1,6 +1,6 @@
 # Catlaser
 
-Automated cat laser toy with vision-guided tracking, treat dispensing, and per-cat behavior adaptation. Split-brain: Linux compute module (RV1106G3) handles vision/behavior/networking, bare-metal RP2040 handles servo control and safety.
+Automated cat laser toy with vision-guided tracking, treat dispensing, and per-cat behavior adaptation. Split-brain: Linux compute module (RV1106G3) handles vision/behavior/networking, bare-metal RP2350 handles servo control and safety with TrustZone-M hardware isolation for laser safety invariants.
 
 ## Conventions
 
@@ -22,7 +22,7 @@ Review the `rust` skill which has critical information that will allow your work
 
 These are hard constraints. Violating any of them breaks the project.
 
-- **MCU is the safety layer.** The RP2040 enforces mechanical tilt limits, watchdog timeout, and power-loss laser kill regardless of compute module state. No software update to the compute module can bypass MCU protections.
+- **MCU is the safety layer.** The RP2350's TrustZone-M Secure world owns laser GPIO, watchdog, and tilt enforcement — hardware-inaccessible to application firmware. No software bug, compute module update, or Non-Secure firmware defect can bypass these protections.
 - **Strict layer hierarchy.** App → Python → Rust (compute) → Rust (MCU). Each layer only talks to its neighbors. Python never touches hardware. The MCU never touches the network.
 - **Python never sees raw hardware.** Python receives normalized coordinates (0.0-1.0) and pre-computed safety ceilings. It never knows camera resolution, FOV, servo angles, or that the MCU exists.
 - **Safety ceiling is pre-computed.** Rust computes `safety_ceiling_y` from all person detections and sends a single float. Python never sees individual person bounding boxes.
@@ -34,7 +34,7 @@ These are hard constraints. Violating any of them breaks the project.
 - Workspace dependency inheritance via `[workspace.dependencies]` in root `Cargo.toml`
 - `thiserror` for all error types
 - `catlaser-common` owns all shared types — `ServoCommand`, constants, safety limits. `no_std` compatible
-- `catlaser-mcu` is `no_std` (Embassy, bare-metal RP2040). `catlaser-vision` is `std` (Linux daemon)
+- `catlaser-mcu` is `no_std` (Embassy, bare-metal RP2350). `catlaser-vision` is `std` (Linux daemon)
 - Lint policy defined in `[workspace.lints]` in root `Cargo.toml` — every member crate must have `[lints] workspace = true`
 - Linting should NEVER be ignored without a fundamental requirement to do so, it is strict intentionally
 - `tracing` for observability in `catlaser-vision`, not `log`
@@ -60,7 +60,7 @@ These are hard constraints. Violating any of them breaks the project.
 
 ```
 catlaser/
-├── Cargo.toml                        # [workspace] — common, vision, mcu
+├── Cargo.toml                        # [workspace] — common, vision, mcu, mcu-secure
 ├── Cargo.lock
 │
 ├── proto/catlaser/
@@ -87,14 +87,24 @@ catlaser/
 │   │       ├── serial.rs             # UART TX to MCU (ServoCommand packing)
 │   │       └── ipc.rs               # Unix socket, protobuf via buffa
 │   │
-│   └── catlaser-mcu/                 # RP2040 firmware (Embassy, no_std).
-│       ├── memory.x                  # Linker script
+│   ├── catlaser-mcu/                 # RP2350 Non-Secure firmware (Embassy, no_std).
+│   │   ├── memory.x                  # NS linker script
+│   │   └── src/
+│   │       ├── main.rs               # Embassy entry, task spawning
+│   │       ├── control.rs            # 200Hz servo interpolation loop
+│   │       ├── uart.rs               # UART RX, command parsing + checksum
+│   │       ├── safety.rs             # Watchdog feed, tilt reporting (via Secure gateways)
+│   │       └── pwm.rs               # Servo PWM drivers
+│   │
+│   └── catlaser-mcu-secure/          # RP2350 Secure firmware (no_std, no Embassy).
+│       ├── memory.x                  # Secure linker script
 │       └── src/
-│           ├── main.rs               # Embassy entry, task spawning
-│           ├── control.rs            # 200Hz servo interpolation loop
-│           ├── uart.rs               # UART RX, command parsing + checksum
-│           ├── safety.rs             # Watchdog, tilt clamp, VBUS power monitor
-│           └── pwm.rs               # Servo PWM + laser GPIO drivers
+│           ├── main.rs               # SAU + ACCESSCTRL init, NS boot
+│           ├── gateway.rs            # NSC entry points (set_laser_state,
+│           │                         # report_tilt, feed_watchdog,
+│           │                         # report_person_detected)
+│           └── handlers.rs           # Secure interrupts (watchdog timeout,
+│                                     # tilt fault, power brownout → laser off)
 │
 ├── python/
 │   ├── pyproject.toml                # uv-managed, ruff + pyright config
