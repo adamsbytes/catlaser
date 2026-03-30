@@ -497,13 +497,34 @@ class TestDispenseTransitions:
         assert output.session_ended is not None
 
     def test_dispense_command(self):
-        e = _engine()
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
         t = _run_to_dispense(e)
         output = e.update(None, t + 0.1)
         cmd = output.command
         assert cmd.mode is TargetingMode.DISPENSE
         assert cmd.laser_on is False
         assert cmd.dispense_rotations in (3, 5, 7)
+        assert cmd.lead_target_x == cfg.chute_left_x
+        assert cmd.lead_target_y == cfg.chute_left_y
+
+    def test_dispense_command_right_chute(self):
+        cfg = _FAST_CONFIG
+        e = _engine(config=cfg)
+        e.start_session(1, ChuteSide.RIGHT, 0.0)
+        t = cfg.lure_min_duration + 0.1
+        e.update(_engaged_cat(), t)
+        assert e.state is State.CHASE
+        e.stop_session(t)
+        assert e.state is State.COOLDOWN
+        t += cfg.cooldown_timeout + 0.1
+        e.update(None, t)
+        assert e.state is State.DISPENSE
+        output = e.update(None, t + 0.1)
+        cmd = output.command
+        assert cmd.mode is TargetingMode.DISPENSE
+        assert cmd.lead_target_x == cfg.chute_right_x
+        assert cmd.lead_target_y == cfg.chute_right_y
 
     def test_session_ended_only_on_final_transition(self):
         e = _engine()

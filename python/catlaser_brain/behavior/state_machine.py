@@ -576,10 +576,13 @@ class BehaviorEngine:
                     lead_target_y=ty,
                 )
             case State.DISPENSE:
+                tx, ty = self._chute_target()
                 return Command(
                     mode=TargetingMode.DISPENSE,
                     laser_on=False,
                     dispense_rotations=self._session.dispense_rotations,
+                    lead_target_x=tx,
+                    lead_target_y=ty,
                 )
 
     def _chute_target(self) -> tuple[float, float]:
