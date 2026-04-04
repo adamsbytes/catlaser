@@ -506,15 +506,17 @@ class TestHandlerSessionControl:
 
 
 class TestHandlerStubs:
-    def test_start_stream_not_available(self, handler: RequestHandler):
-        req = pb.AppRequest(start_stream=pb.StartStreamRequest(sdp_offer="v=0\r\n"))
+    def test_start_stream_not_configured(self, handler: RequestHandler):
+        req = pb.AppRequest(start_stream=pb.StartStreamRequest())
         event = handler.handle(req)
         assert event.HasField("error")
+        assert "not configured" in event.error.message
 
-    def test_stop_stream_not_available(self, handler: RequestHandler):
+    def test_stop_stream_not_configured(self, handler: RequestHandler):
         req = pb.AppRequest(stop_stream=pb.StopStreamRequest())
         event = handler.handle(req)
         assert event.HasField("error")
+        assert "not configured" in event.error.message
 
     def test_run_diagnostic_not_available(self, handler: RequestHandler):
         req = pb.AppRequest(

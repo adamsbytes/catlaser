@@ -100,10 +100,7 @@ message GetPlayHistoryRequest {
   uint64 end_time = 2;
 }
 
-message StartStreamRequest {
-  // WebRTC SDP offer from the app.
-  string sdp_offer = 1;
-}
+message StartStreamRequest {}
 
 message StopStreamRequest {}
 
@@ -176,8 +173,10 @@ message ScheduleList {
 }
 
 message StreamOffer {
-  // WebRTC SDP answer from the device.
-  string sdp_answer = 1;
+  // LiveKit server URL for the subscriber (app) to connect to.
+  string livekit_url = 1;
+  // JWT token for the subscriber (app) to join the LiveKit room.
+  string subscriber_token = 2;
 }
 
 // Pushed at session end.

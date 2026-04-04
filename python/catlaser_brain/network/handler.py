@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Callable
 
+    from catlaser_brain.network.streaming import StreamCredentials, StreamManager
+
 # ---------------------------------------------------------------------------
 # Error codes
 # ---------------------------------------------------------------------------
@@ -105,6 +107,23 @@ class SessionControl(Protocol):
         ...
 
 
+class StreamNotify(Protocol):
+    """Callback protocol for stream lifecycle notifications.
+
+    Implemented by the integration layer to relay stream credentials
+    to the Rust vision daemon via IPC when the app starts or stops
+    a live stream.
+    """
+
+    def on_stream_start(self, credentials: StreamCredentials) -> None:
+        """Notify that a stream has started with the given credentials."""
+        ...
+
+    def on_stream_stop(self) -> None:
+        """Notify that the stream has been stopped."""
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
@@ -124,17 +143,28 @@ class RequestHandler:
         session_control: Optional session lifecycle callbacks.
     """
 
-    __slots__ = ("_conn", "_dispatch_table", "_session_control", "_state")
+    __slots__ = (
+        "_conn",
+        "_dispatch_table",
+        "_session_control",
+        "_state",
+        "_stream_manager",
+        "_stream_notify",
+    )
 
     def __init__(
         self,
         conn: sqlite3.Connection,
         state: DeviceState,
         session_control: SessionControl | None = None,
+        stream_manager: StreamManager | None = None,
+        stream_notify: StreamNotify | None = None,
     ) -> None:
         self._conn = conn
         self._state = state
         self._session_control = session_control
+        self._stream_manager = stream_manager
+        self._stream_notify = stream_notify
         self._dispatch_table: dict[str, Callable[[pb.AppRequest], pb.DeviceEvent]] = {
             "get_status": self._on_get_status,
             "get_cat_profiles": self._on_get_cat_profiles,
@@ -323,14 +353,42 @@ class RequestHandler:
         return pb.DeviceEvent(status_update=self._build_status())
 
     # -------------------------------------------------------------------
-    # Stubs (implemented in later build steps)
+    # Streaming
     # -------------------------------------------------------------------
 
     def _on_start_stream(self, _request: pb.AppRequest) -> pb.DeviceEvent:
-        return _error(_ERR_NOT_AVAILABLE, "streaming not yet implemented")
+        if self._stream_manager is None:
+            return _error(_ERR_NOT_AVAILABLE, "streaming not configured")
+
+        if self._stream_manager.is_streaming:
+            return _error(_ERR_NOT_AVAILABLE, "stream already active")
+
+        credentials = self._stream_manager.start()
+
+        if self._stream_notify is not None:
+            self._stream_notify.on_stream_start(credentials)
+
+        return pb.DeviceEvent(
+            stream_offer=pb.StreamOffer(
+                livekit_url=credentials.livekit_url,
+                subscriber_token=credentials.subscriber_token,
+            ),
+        )
 
     def _on_stop_stream(self, _request: pb.AppRequest) -> pb.DeviceEvent:
-        return _error(_ERR_NOT_AVAILABLE, "streaming not yet implemented")
+        if self._stream_manager is None:
+            return _error(_ERR_NOT_AVAILABLE, "streaming not configured")
+
+        self._stream_manager.stop()
+
+        if self._stream_notify is not None:
+            self._stream_notify.on_stream_stop()
+
+        return pb.DeviceEvent(status_update=self._build_status())
+
+    # -------------------------------------------------------------------
+    # Stubs (implemented in later build steps)
+    # -------------------------------------------------------------------
 
     def _on_run_diagnostic(self, _request: pb.AppRequest) -> pb.DeviceEvent:
         return _error(_ERR_NOT_AVAILABLE, "diagnostics not yet implemented")

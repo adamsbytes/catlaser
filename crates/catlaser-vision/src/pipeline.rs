@@ -734,6 +734,7 @@ fn handle_incoming(
     session_state: &mut SessionState,
     last_behavior_cmd: &mut Option<BehaviorCommand>,
     tracker: &mut Tracker,
+    pending_stream_control: &mut Option<detection::StreamControl>,
 ) {
     match msg {
         IncomingMessage::SessionAck(ack) => {
@@ -800,6 +801,12 @@ fn handle_incoming(
                     "identity result for unknown track, track may have died"
                 );
             }
+        }
+        IncomingMessage::StreamControl(ctrl) => {
+            // Handled by the pipeline's stream_ipc method via the returned
+            // pending_stream_control field. We queue it here to avoid
+            // passing the stream handle through handle_incoming.
+            *pending_stream_control = Some(ctrl);
         }
     }
 }
@@ -906,6 +913,10 @@ pub(crate) struct Pipeline {
     frames_drained: u64,
     /// Total frames processed since pipeline init.
     frame_count: u64,
+    /// Active streaming publisher handle, if streaming is in progress.
+    /// Owned by the pipeline — dropping it signals the publisher thread
+    /// to shut down.
+    stream_handle: Option<crate::streaming::StreamHandle>,
 }
 
 impl Pipeline {
@@ -1000,6 +1011,7 @@ impl Pipeline {
             frame_data: Vec::new(),
             frames_drained: 0_u64,
             frame_count: 0_u64,
+            stream_handle: None,
         })
     }
 
@@ -1186,7 +1198,7 @@ impl Pipeline {
         // take_completed() clears the internal list so each embedding is
         // sent as an IdentityRequest exactly once.
         let completed_embeddings = self.embed_engine.take_completed();
-        let ipc_connected = self.stream_ipc(
+        let (ipc_connected, pending_stream_control) = self.stream_ipc(
             frame_timestamp,
             safety,
             ambient_brightness,
@@ -1194,6 +1206,13 @@ impl Pipeline {
             target_track_id,
             &completed_embeddings,
         );
+
+        // Handle StreamControl outside stream_ipc to avoid borrow conflicts
+        // (stream_ipc borrows self.ipc_connection, handle_stream_control
+        // borrows self.stream_handle).
+        if let Some(ctrl) = pending_stream_control {
+            self.handle_stream_control(ctrl);
+        }
 
         // --- State update ---
         // Clamp to the MCU's effective range so that on the next frame the
@@ -1255,7 +1274,7 @@ impl Pipeline {
         timestamp_us: u64,
         target_track_id: Option<u32>,
         completed_embeddings: &[CompletedEmbedding],
-    ) -> bool {
+    ) -> (bool, Option<detection::StreamControl>) {
         // Compute FPS estimate from V4L2 monotonic timestamps for
         // velocity-per-frame → velocity-per-second conversion.
         let fps_estimate = match self.prev_frame_timestamp {
@@ -1287,7 +1306,7 @@ impl Pipeline {
         }
 
         let Some(conn) = &mut self.ipc_connection else {
-            return false;
+            return (false, None);
         };
 
         // --- DetectionFrame (steady ~15/sec) ---
@@ -1304,7 +1323,7 @@ impl Pipeline {
             self.ipc_connection = None;
             self.session_state = SessionState::Idle;
             self.last_behavior_cmd = None;
-            return false;
+            return (false, None);
         }
 
         // --- TrackEvents (sporadic) ---
@@ -1315,7 +1334,7 @@ impl Pipeline {
                 self.ipc_connection = None;
                 self.session_state = SessionState::Idle;
                 self.last_behavior_cmd = None;
-                return false;
+                return (false, None);
             }
         }
 
@@ -1327,11 +1346,12 @@ impl Pipeline {
                 self.ipc_connection = None;
                 self.session_state = SessionState::Idle;
                 self.last_behavior_cmd = None;
-                return false;
+                return (false, None);
             }
         }
 
         // --- Drain incoming messages ---
+        let mut pending_stream_control: Option<detection::StreamControl> = None;
         loop {
             match conn.try_recv() {
                 Ok(Some(msg)) => handle_incoming(
@@ -1339,6 +1359,7 @@ impl Pipeline {
                     &mut self.session_state,
                     &mut self.last_behavior_cmd,
                     &mut self.tracker,
+                    &mut pending_stream_control,
                 ),
                 Ok(None) => break,
                 Err(err) => {
@@ -1346,7 +1367,7 @@ impl Pipeline {
                     self.ipc_connection = None;
                     self.session_state = SessionState::Idle;
                     self.last_behavior_cmd = None;
-                    return false;
+                    return (false, None);
                 }
             }
         }
@@ -1367,7 +1388,7 @@ impl Pipeline {
                 self.ipc_connection = None;
                 self.session_state = SessionState::Idle;
                 self.last_behavior_cmd = None;
-                return false;
+                return (false, None);
             }
             self.session_state = SessionState::AwaitingAck {
                 sent_at: Instant::now(),
@@ -1375,7 +1396,44 @@ impl Pipeline {
             tracing::info!(track_id, "session request sent (cat detected)");
         }
 
-        true
+        (true, pending_stream_control)
+    }
+
+    /// Handles a `StreamControl` message from Python.
+    ///
+    /// Starts or stops the WebRTC video publisher based on the action.
+    /// On start, spawns a publisher thread with the credentials from the
+    /// message. On stop, drops the handle (which closes the frame channel,
+    /// signaling the publisher to exit).
+    fn handle_stream_control(&mut self, ctrl: detection::StreamControl) {
+        let action = ctrl.action.as_known();
+        match action {
+            Some(detection::StreamAction::STREAM_ACTION_START) => {
+                if self.stream_handle.is_some() {
+                    tracing::warn!("received start stream but publisher already running");
+                    return;
+                }
+                let config = crate::streaming::StreamConfig {
+                    livekit_url: ctrl.livekit_url,
+                    publisher_token: ctrl.publisher_token,
+                    room_name: ctrl.room_name,
+                    target_bitrate_bps: ctrl.target_bitrate_bps,
+                    width: self.frame_width,
+                    height: self.frame_height,
+                };
+                tracing::info!(room = %config.room_name, "starting stream publisher");
+                self.stream_handle = Some(crate::streaming::StreamHandle::start(config));
+            }
+            Some(detection::StreamAction::STREAM_ACTION_STOP) => {
+                if let Some(handle) = self.stream_handle.take() {
+                    tracing::info!("stopping stream publisher");
+                    handle.stop();
+                }
+            }
+            _ => {
+                tracing::debug!(action = ?ctrl.action, "ignoring unknown stream action");
+            }
+        }
     }
 
     /// Returns the total number of frames processed since initialization.
@@ -3883,6 +3941,7 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
 
         let stored = last_cmd.expect("BehaviorCommand must be stored when Active");
@@ -3910,6 +3969,7 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
 
         assert!(
@@ -3936,6 +3996,7 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
 
         assert!(
@@ -3964,12 +4025,14 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
         handle_incoming(
             IncomingMessage::BehaviorCommand(cmd2),
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
 
         let stored = last_cmd.expect("BehaviorCommand must be stored");
@@ -3998,6 +4061,7 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
 
         assert!(
@@ -4037,6 +4101,7 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
 
         assert_eq!(
@@ -4065,6 +4130,7 @@ mod tests {
             &mut state,
             &mut last_cmd,
             &mut tracker,
+            &mut None,
         );
     }
 

@@ -17,6 +17,8 @@ MSG_TYPE_IDENTITY_RESULT: MsgType
 MSG_TYPE_SESSION_ACK: MsgType
 MSG_TYPE_SESSION_END: MsgType
 MSG_TYPE_SESSION_REQUEST: MsgType
+MSG_TYPE_STREAM_CONTROL: MsgType
+MSG_TYPE_STREAM_STATUS: MsgType
 MSG_TYPE_TRACK_EVENT: MsgType
 MSG_TYPE_UNSPECIFIED: MsgType
 SESSION_TRIGGER_CAT_DETECTED: SessionTrigger
@@ -26,6 +28,14 @@ SKIP_REASON_COOLDOWN: SkipReason
 SKIP_REASON_HOPPER_EMPTY: SkipReason
 SKIP_REASON_QUIET_HOURS: SkipReason
 SKIP_REASON_UNSPECIFIED: SkipReason
+STREAM_ACTION_START: StreamAction
+STREAM_ACTION_STOP: StreamAction
+STREAM_ACTION_UNSPECIFIED: StreamAction
+STREAM_STATE_CONNECTING: StreamState
+STREAM_STATE_ERROR: StreamState
+STREAM_STATE_PUBLISHING: StreamState
+STREAM_STATE_STOPPED: StreamState
+STREAM_STATE_UNSPECIFIED: StreamState
 TARGETING_MODE_DISPENSE: TargetingMode
 TARGETING_MODE_IDLE: TargetingMode
 TARGETING_MODE_LEAD_TO_POINT: TargetingMode
@@ -174,6 +184,37 @@ class SessionRequest(_message.Message):
         self, trigger: _Optional[_Union[SessionTrigger, str]] = ..., track_id: _Optional[int] = ...
     ) -> None: ...
 
+class StreamControl(_message.Message):
+    __slots__ = ["action", "livekit_url", "publisher_token", "room_name", "target_bitrate_bps"]
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    LIVEKIT_URL_FIELD_NUMBER: _ClassVar[int]
+    PUBLISHER_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    ROOM_NAME_FIELD_NUMBER: _ClassVar[int]
+    TARGET_BITRATE_BPS_FIELD_NUMBER: _ClassVar[int]
+    action: StreamAction
+    livekit_url: str
+    publisher_token: str
+    room_name: str
+    target_bitrate_bps: int
+    def __init__(
+        self,
+        action: _Optional[_Union[StreamAction, str]] = ...,
+        livekit_url: _Optional[str] = ...,
+        publisher_token: _Optional[str] = ...,
+        room_name: _Optional[str] = ...,
+        target_bitrate_bps: _Optional[int] = ...,
+    ) -> None: ...
+
+class StreamStatus(_message.Message):
+    __slots__ = ["error_message", "state"]
+    ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    error_message: str
+    state: StreamState
+    def __init__(
+        self, state: _Optional[_Union[StreamState, str]] = ..., error_message: _Optional[str] = ...
+    ) -> None: ...
+
 class TrackEvent(_message.Message):
     __slots__ = ["identity_request", "new_track", "track_lost"]
     IDENTITY_REQUEST_FIELD_NUMBER: _ClassVar[int]
@@ -255,4 +296,10 @@ class SkipReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = []
 
 class SessionTrigger(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = []
+
+class StreamAction(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = []
+
+class StreamState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = []

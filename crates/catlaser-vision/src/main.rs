@@ -11,12 +11,14 @@
 mod camera;
 mod detect;
 mod embed;
+mod encoder;
 mod ipc;
 mod npu;
 mod pipeline;
 mod proto;
 mod safety;
 mod serial;
+mod streaming;
 mod targeting;
 mod tracker;
 

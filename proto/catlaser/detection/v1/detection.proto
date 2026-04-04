@@ -12,11 +12,13 @@ enum MsgType {
   MSG_TYPE_DETECTION_FRAME = 1;
   MSG_TYPE_TRACK_EVENT = 2;
   MSG_TYPE_SESSION_REQUEST = 3;
+  MSG_TYPE_STREAM_STATUS = 9;
   // Python -> Rust
   MSG_TYPE_BEHAVIOR_COMMAND = 4;
   MSG_TYPE_SESSION_ACK = 5;
   MSG_TYPE_IDENTITY_RESULT = 6;
   MSG_TYPE_SESSION_END = 7;
+  MSG_TYPE_STREAM_CONTROL = 8;
 }
 
 // SORT tracker lifecycle states.
@@ -183,4 +185,50 @@ message IdentityResult {
   string cat_id = 2;
   // Cosine similarity score. >0.75 = confident match.
   float similarity = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming control (Python -> Rust, sporadic)
+// ---------------------------------------------------------------------------
+
+// Stream publishing state requested by Python.
+enum StreamAction {
+  STREAM_ACTION_UNSPECIFIED = 0;
+  STREAM_ACTION_START = 1;
+  STREAM_ACTION_STOP = 2;
+}
+
+// Python tells Rust to start or stop publishing video to a LiveKit room.
+// Sent when the app requests a live stream via the App API.
+message StreamControl {
+  StreamAction action = 1;
+  // LiveKit server URL (e.g. "wss://livekit.example.com"). Set for START.
+  string livekit_url = 2;
+  // JWT token for the publisher (device) to join the room. Set for START.
+  string publisher_token = 3;
+  // Room name for logging and diagnostics. Set for START.
+  string room_name = 4;
+  // Target video bitrate in bits per second. Set for START.
+  uint32 target_bitrate_bps = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming status (Rust -> Python, sporadic)
+// ---------------------------------------------------------------------------
+
+// Current state of the video publisher on the Rust side.
+enum StreamState {
+  STREAM_STATE_UNSPECIFIED = 0;
+  STREAM_STATE_STOPPED = 1;
+  STREAM_STATE_CONNECTING = 2;
+  STREAM_STATE_PUBLISHING = 3;
+  STREAM_STATE_ERROR = 4;
+}
+
+// Rust reports stream publisher state changes to Python. Sent on
+// state transitions so Python can relay status to the app.
+message StreamStatus {
+  StreamState state = 1;
+  // Human-readable error detail when state is ERROR.
+  string error_message = 2;
 }

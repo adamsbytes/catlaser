@@ -405,10 +405,8 @@ class StartSessionRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class StartStreamRequest(_message.Message):
-    __slots__ = ["sdp_offer"]
-    SDP_OFFER_FIELD_NUMBER: _ClassVar[int]
-    sdp_offer: str
-    def __init__(self, sdp_offer: _Optional[str] = ...) -> None: ...
+    __slots__ = []
+    def __init__(self) -> None: ...
 
 class StatusUpdate(_message.Message):
     __slots__ = [
@@ -446,10 +444,14 @@ class StopStreamRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class StreamOffer(_message.Message):
-    __slots__ = ["sdp_answer"]
-    SDP_ANSWER_FIELD_NUMBER: _ClassVar[int]
-    sdp_answer: str
-    def __init__(self, sdp_answer: _Optional[str] = ...) -> None: ...
+    __slots__ = ["livekit_url", "subscriber_token"]
+    LIVEKIT_URL_FIELD_NUMBER: _ClassVar[int]
+    SUBSCRIBER_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    livekit_url: str
+    subscriber_token: str
+    def __init__(
+        self, livekit_url: _Optional[str] = ..., subscriber_token: _Optional[str] = ...
+    ) -> None: ...
 
 class UpdateCatProfileRequest(_message.Message):
     __slots__ = ["profile"]

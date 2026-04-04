@@ -31,7 +31,7 @@ use buffa::{DecodeOptions, Message};
 
 use crate::proto::detection::{
     BehaviorCommand, DetectionFrame, IdentityResult, SessionAck, SessionEnd, SessionRequest,
-    TrackEvent,
+    StreamControl, StreamStatus, TrackEvent,
 };
 
 // ---------------------------------------------------------------------------
@@ -100,13 +100,17 @@ pub(crate) enum WireType {
     IdentityResult = 6,
     /// `SessionEnd` — Python → Rust, sporadic.
     SessionEnd = 7,
+    /// `StreamControl` — Python → Rust, sporadic.
+    StreamControl = 8,
+    /// `StreamStatus` — Rust → Python, sporadic.
+    StreamStatus = 9,
 }
 
 impl WireType {
     /// Converts to the on-wire byte value.
     #[expect(
         clippy::as_conversions,
-        reason = "repr(u8) enum to u8 is a no-op cast — values are 1-7, always valid"
+        reason = "repr(u8) enum to u8 is a no-op cast — values are 1-9, always valid"
     )]
     pub(crate) const fn to_byte(self) -> u8 {
         self as u8
@@ -122,6 +126,8 @@ impl WireType {
             5 => Ok(Self::SessionAck),
             6 => Ok(Self::IdentityResult),
             7 => Ok(Self::SessionEnd),
+            8 => Ok(Self::StreamControl),
+            9 => Ok(Self::StreamStatus),
             _ => Err(IpcError::InvalidWireType(byte)),
         }
     }
@@ -290,6 +296,8 @@ pub(crate) enum IncomingMessage {
     IdentityResult(IdentityResult),
     /// The behavior engine has finished the current session.
     SessionEnd,
+    /// Python tells Rust to start or stop video streaming.
+    StreamControl(StreamControl),
 }
 
 /// Decodes a payload into an [`IncomingMessage`] based on the wire type.
@@ -320,11 +328,17 @@ fn decode_incoming(wire_type: WireType, payload: &[u8]) -> Result<IncomingMessag
                 .map_err(|source| IpcError::Decode { source })?;
             Ok(IncomingMessage::SessionEnd)
         }
-        // DetectionFrame, TrackEvent, SessionRequest are outbound-only.
-        wire_type
-        @ (WireType::DetectionFrame | WireType::TrackEvent | WireType::SessionRequest) => {
-            Err(IpcError::UnexpectedWireType { wire_type })
+        WireType::StreamControl => {
+            let msg = opts
+                .decode_from_slice::<StreamControl>(payload)
+                .map_err(|source| IpcError::Decode { source })?;
+            Ok(IncomingMessage::StreamControl(msg))
         }
+        // DetectionFrame, TrackEvent, SessionRequest, StreamStatus are outbound-only.
+        wire_type @ (WireType::DetectionFrame
+        | WireType::TrackEvent
+        | WireType::SessionRequest
+        | WireType::StreamStatus) => Err(IpcError::UnexpectedWireType { wire_type }),
     }
 }
 
@@ -463,6 +477,11 @@ impl IpcConnection {
     /// Sends a `SessionRequest` to the Python behavior engine.
     pub(crate) fn send_session_request(&mut self, msg: &SessionRequest) -> Result<(), IpcError> {
         self.send_message(WireType::SessionRequest, msg)
+    }
+
+    /// Sends a `StreamStatus` to the Python behavior engine.
+    pub(crate) fn send_stream_status(&mut self, msg: &StreamStatus) -> Result<(), IpcError> {
+        self.send_message(WireType::StreamStatus, msg)
     }
 
     /// Attempts a non-blocking read for an incoming message.
@@ -734,6 +753,8 @@ mod tests {
             WireType::SessionAck,
             WireType::IdentityResult,
             WireType::SessionEnd,
+            WireType::StreamControl,
+            WireType::StreamStatus,
         ];
         for wt in variants {
             let byte = wt.to_byte();
@@ -749,7 +770,7 @@ mod tests {
             WireType::from_byte(0).is_err(),
             "0 (UNSPECIFIED) must be rejected"
         );
-        assert!(WireType::from_byte(8).is_err(), "8 must be rejected");
+        assert!(WireType::from_byte(10).is_err(), "10 must be rejected");
         assert!(WireType::from_byte(255).is_err(), "255 must be rejected");
     }
 
