@@ -521,3 +521,84 @@ def _row_to_pending_cat(row: sqlite3.Row) -> PendingCatRow:
         embedding=bytes(embedding_raw) if embedding_raw is not None else None,
         detected_at=row["detected_at"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Push token CRUD
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PushTokenRow:
+    """Registered push notification token.
+
+    Maps to ``RegisterPushTokenRequest`` in app.proto. Each app instance
+    registers its FCM (or APNs) token on connect so the device can send
+    push notifications when the app is backgrounded or disconnected.
+    """
+
+    token: str
+    platform: str
+    registered_at: int
+
+
+def register_push_token(
+    conn: sqlite3.Connection,
+    token: str,
+    platform: str,
+) -> None:
+    """Register or update a push notification token.
+
+    Upserts: if the token already exists, the platform and timestamp
+    are updated. This handles token refresh (same device, new token)
+    and platform correction.
+
+    Args:
+        conn: SQLite connection.
+        token: FCM or APNs device token.
+        platform: ``'fcm'`` or ``'apns'``.
+    """
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO push_tokens (token, platform, registered_at) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT(token) DO UPDATE SET platform = excluded.platform, "
+        "registered_at = excluded.registered_at",
+        (token, platform, now),
+    )
+    conn.commit()
+
+
+def unregister_push_token(conn: sqlite3.Connection, token: str) -> None:
+    """Remove a push notification token.
+
+    Idempotent: no error if the token does not exist.
+
+    Args:
+        conn: SQLite connection.
+        token: Token to remove.
+    """
+    conn.execute("DELETE FROM push_tokens WHERE token = ?", (token,))
+    conn.commit()
+
+
+def list_push_tokens(conn: sqlite3.Connection) -> list[PushTokenRow]:
+    """List all registered push tokens.
+
+    Args:
+        conn: SQLite connection with ``row_factory = sqlite3.Row``.
+
+    Returns:
+        All registered tokens, oldest first.
+    """
+    rows = conn.execute(
+        "SELECT token, platform, registered_at FROM push_tokens ORDER BY registered_at",
+    ).fetchall()
+    return [
+        PushTokenRow(
+            token=row["token"],
+            platform=row["platform"],
+            registered_at=row["registered_at"],
+        )
+        for row in rows
+    ]

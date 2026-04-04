@@ -88,11 +88,23 @@ CREATE TABLE pending_cats (
 ) STRICT;
 """
 
+# ---------------------------------------------------------------------------
+# Schema v2: push notification tokens
+# ---------------------------------------------------------------------------
+
+_V2_SCHEMA: Final[str] = """\
+CREATE TABLE push_tokens (
+    token         TEXT    NOT NULL PRIMARY KEY,
+    platform      TEXT    NOT NULL CHECK(platform IN ('fcm', 'apns')),
+    registered_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+"""
+
 # Ordered list of (version, sql). Each migration runs inside an explicit
 # transaction via executescript. If a migration fails partway, the transaction
 # is never committed and rolls back when the connection closes. On next
 # startup the migration retries from the same version.
-_MIGRATIONS: Final[tuple[tuple[int, str], ...]] = ((1, _V1_SCHEMA),)
+_MIGRATIONS: Final[tuple[tuple[int, str], ...]] = ((1, _V1_SCHEMA), (2, _V2_SCHEMA))
 
 
 # ---------------------------------------------------------------------------

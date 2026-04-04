@@ -3,6 +3,7 @@ name = "catlaser-brain"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "google-auth>=2.0",
     "livekit-api>=1.1.0",
     "protobuf>=5.29,<6",
 ]
@@ -44,6 +45,8 @@ ignore = [
 # Tests get relaxed rules matching your TS/Rust test overrides
 "**/test_*" = [
     "S101",     # assert — tests need assert statements
+    "S105",     # hardcoded-password-string — test fixtures contain test values, not secrets
+    "S106",     # hardcoded-password-func-arg — same rationale as S105
     "PLR2004",  # magic-value-comparison — test values are self-documenting
     "SLF001",   # private-member-access — tests verify internal state
     "D",        # docstrings — tests describe themselves

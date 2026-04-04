@@ -29,6 +29,9 @@ HOPPER_LEVEL_EMPTY: HopperLevel
 HOPPER_LEVEL_LOW: HopperLevel
 HOPPER_LEVEL_OK: HopperLevel
 HOPPER_LEVEL_UNSPECIFIED: HopperLevel
+PUSH_PLATFORM_APNS: PushPlatform
+PUSH_PLATFORM_FCM: PushPlatform
+PUSH_PLATFORM_UNSPECIFIED: PushPlatform
 
 class AppRequest(_message.Message):
     __slots__ = [
@@ -38,6 +41,7 @@ class AppRequest(_message.Message):
         "get_schedule",
         "get_status",
         "identify_new_cat",
+        "register_push_token",
         "request_id",
         "run_diagnostic",
         "set_schedule",
@@ -45,6 +49,7 @@ class AppRequest(_message.Message):
         "start_stream",
         "stop_session",
         "stop_stream",
+        "unregister_push_token",
         "update_cat_profile",
     ]
     DELETE_CAT_PROFILE_FIELD_NUMBER: _ClassVar[int]
@@ -53,6 +58,7 @@ class AppRequest(_message.Message):
     GET_SCHEDULE_FIELD_NUMBER: _ClassVar[int]
     GET_STATUS_FIELD_NUMBER: _ClassVar[int]
     IDENTIFY_NEW_CAT_FIELD_NUMBER: _ClassVar[int]
+    REGISTER_PUSH_TOKEN_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     RUN_DIAGNOSTIC_FIELD_NUMBER: _ClassVar[int]
     SET_SCHEDULE_FIELD_NUMBER: _ClassVar[int]
@@ -60,6 +66,7 @@ class AppRequest(_message.Message):
     START_STREAM_FIELD_NUMBER: _ClassVar[int]
     STOP_SESSION_FIELD_NUMBER: _ClassVar[int]
     STOP_STREAM_FIELD_NUMBER: _ClassVar[int]
+    UNREGISTER_PUSH_TOKEN_FIELD_NUMBER: _ClassVar[int]
     UPDATE_CAT_PROFILE_FIELD_NUMBER: _ClassVar[int]
     delete_cat_profile: DeleteCatProfileRequest
     get_cat_profiles: GetCatProfilesRequest
@@ -67,6 +74,7 @@ class AppRequest(_message.Message):
     get_schedule: GetScheduleRequest
     get_status: GetStatusRequest
     identify_new_cat: IdentifyNewCatRequest
+    register_push_token: RegisterPushTokenRequest
     request_id: int
     run_diagnostic: RunDiagnosticRequest
     set_schedule: SetScheduleRequest
@@ -74,6 +82,7 @@ class AppRequest(_message.Message):
     start_stream: StartStreamRequest
     stop_session: StopSessionRequest
     stop_stream: StopStreamRequest
+    unregister_push_token: UnregisterPushTokenRequest
     update_cat_profile: UpdateCatProfileRequest
     def __init__(
         self,
@@ -91,6 +100,8 @@ class AppRequest(_message.Message):
         identify_new_cat: _Optional[_Union[IdentifyNewCatRequest, _Mapping]] = ...,
         run_diagnostic: _Optional[_Union[RunDiagnosticRequest, _Mapping]] = ...,
         get_schedule: _Optional[_Union[GetScheduleRequest, _Mapping]] = ...,
+        register_push_token: _Optional[_Union[RegisterPushTokenRequest, _Mapping]] = ...,
+        unregister_push_token: _Optional[_Union[UnregisterPushTokenRequest, _Mapping]] = ...,
     ) -> None: ...
 
 class CatProfile(_message.Message):
@@ -170,6 +181,7 @@ class DeviceEvent(_message.Message):
         "hopper_empty",
         "new_cat_detected",
         "play_history",
+        "push_token_ack",
         "request_id",
         "schedule",
         "session_summary",
@@ -182,6 +194,7 @@ class DeviceEvent(_message.Message):
     HOPPER_EMPTY_FIELD_NUMBER: _ClassVar[int]
     NEW_CAT_DETECTED_FIELD_NUMBER: _ClassVar[int]
     PLAY_HISTORY_FIELD_NUMBER: _ClassVar[int]
+    PUSH_TOKEN_ACK_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     SCHEDULE_FIELD_NUMBER: _ClassVar[int]
     SESSION_SUMMARY_FIELD_NUMBER: _ClassVar[int]
@@ -193,6 +206,7 @@ class DeviceEvent(_message.Message):
     hopper_empty: HopperEmpty
     new_cat_detected: NewCatDetected
     play_history: PlayHistoryResponse
+    push_token_ack: PushTokenAck
     request_id: int
     schedule: ScheduleList
     session_summary: SessionSummary
@@ -211,6 +225,7 @@ class DeviceEvent(_message.Message):
         diagnostic_result: _Optional[_Union[DiagnosticResult, _Mapping]] = ...,
         error: _Optional[_Union[DeviceError, _Mapping]] = ...,
         schedule: _Optional[_Union[ScheduleList, _Mapping]] = ...,
+        push_token_ack: _Optional[_Union[PushTokenAck, _Mapping]] = ...,
     ) -> None: ...
 
 class DiagnosticResult(_message.Message):
@@ -324,6 +339,20 @@ class PlaySession(_message.Message):
         engagement_score: _Optional[float] = ...,
         treats_dispensed: _Optional[int] = ...,
         pounce_count: _Optional[int] = ...,
+    ) -> None: ...
+
+class PushTokenAck(_message.Message):
+    __slots__ = []
+    def __init__(self) -> None: ...
+
+class RegisterPushTokenRequest(_message.Message):
+    __slots__ = ["platform", "token"]
+    PLATFORM_FIELD_NUMBER: _ClassVar[int]
+    TOKEN_FIELD_NUMBER: _ClassVar[int]
+    platform: PushPlatform
+    token: str
+    def __init__(
+        self, token: _Optional[str] = ..., platform: _Optional[_Union[PushPlatform, str]] = ...
     ) -> None: ...
 
 class RunDiagnosticRequest(_message.Message):
@@ -453,6 +482,12 @@ class StreamOffer(_message.Message):
         self, livekit_url: _Optional[str] = ..., subscriber_token: _Optional[str] = ...
     ) -> None: ...
 
+class UnregisterPushTokenRequest(_message.Message):
+    __slots__ = ["token"]
+    TOKEN_FIELD_NUMBER: _ClassVar[int]
+    token: str
+    def __init__(self, token: _Optional[str] = ...) -> None: ...
+
 class UpdateCatProfileRequest(_message.Message):
     __slots__ = ["profile"]
     PROFILE_FIELD_NUMBER: _ClassVar[int]
@@ -463,6 +498,9 @@ class HopperLevel(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = []
 
 class DiagnosticType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = []
+
+class PushPlatform(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = []
 
 class DayOfWeek(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):

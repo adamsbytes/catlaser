@@ -23,8 +23,10 @@ from catlaser_brain.storage.crud import (
     get_play_history,
     list_cats,
     list_schedule,
+    register_push_token,
     resolve_pending_cat,
     set_schedule,
+    unregister_push_token,
     update_cat,
 )
 
@@ -55,6 +57,11 @@ _DAY_OF_WEEK_MAP: Final[dict[int, pb.DayOfWeek]] = {
     5: pb.DAY_OF_WEEK_FRIDAY,
     6: pb.DAY_OF_WEEK_SATURDAY,
     7: pb.DAY_OF_WEEK_SUNDAY,
+}
+
+_PUSH_PLATFORM_MAP: Final[dict[int, str]] = {
+    int(pb.PUSH_PLATFORM_FCM): "fcm",
+    int(pb.PUSH_PLATFORM_APNS): "apns",
 }
 
 
@@ -179,6 +186,8 @@ class RequestHandler:
             "start_stream": self._on_start_stream,
             "stop_stream": self._on_stop_stream,
             "run_diagnostic": self._on_run_diagnostic,
+            "register_push_token": self._on_register_push_token,
+            "unregister_push_token": self._on_unregister_push_token,
         }
 
     def handle(self, request: pb.AppRequest) -> pb.DeviceEvent:
@@ -385,6 +394,25 @@ class RequestHandler:
             self._stream_notify.on_stream_stop()
 
         return pb.DeviceEvent(status_update=self._build_status())
+
+    # -------------------------------------------------------------------
+    # Push token registration
+    # -------------------------------------------------------------------
+
+    def _on_register_push_token(self, request: pb.AppRequest) -> pb.DeviceEvent:
+        req = request.register_push_token
+        platform = _PUSH_PLATFORM_MAP.get(int(req.platform))
+        if platform is None:
+            return _error(
+                _ERR_UNKNOWN_REQUEST,
+                f"unsupported push platform: {req.platform}",
+            )
+        register_push_token(self._conn, req.token, platform)
+        return pb.DeviceEvent(push_token_ack=pb.PushTokenAck())
+
+    def _on_unregister_push_token(self, request: pb.AppRequest) -> pb.DeviceEvent:
+        unregister_push_token(self._conn, request.unregister_push_token.token)
+        return pb.DeviceEvent(push_token_ack=pb.PushTokenAck())
 
     # -------------------------------------------------------------------
     # Stubs (implemented in later build steps)

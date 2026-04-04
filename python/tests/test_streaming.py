@@ -27,7 +27,7 @@ from catlaser_brain.storage.db import Database
 # ---------------------------------------------------------------------------
 
 _TEST_API_KEY = "APIdevKey1234"
-_TEST_API_SECRET = "thisisaverylongsecretkeythatmustbeatleast32bytes"  # noqa: S105
+_TEST_API_SECRET = "thisisaverylongsecretkeythatmustbeatleast32bytes"
 _TEST_URL = "wss://livekit.test.local"
 
 
