@@ -69,6 +69,10 @@ pub async fn power_monitor_task(
                 POWER_LOST.borrow(cs).set(true);
             });
 
+            // Kill laser via Secure gateway. Belt-and-suspenders with
+            // the Secure POWMAN brownout handler.
+            let _ = crate::gateway::laser_set(false);
+
             // Signal compute module to begin filesystem-safe shutdown.
             // Blocking write: one byte at 115200 baud = ~87 us, negligible
             // against the 5-8 second supercap budget.

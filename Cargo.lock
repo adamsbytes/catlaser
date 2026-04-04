@@ -182,6 +182,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "catlaser-mcu-secure"
+version = "0.1.0"
+dependencies = [
+ "catlaser-common",
+ "cortex-m",
+ "cortex-m-rt",
+ "critical-section",
+ "defmt",
+ "defmt-rtt",
+ "embassy-rp",
+ "panic-probe",
+]
+
+[[package]]
 name = "catlaser-vision"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,10 @@
+[build]
+target = "thumbv8m.main-none-eabi"
+
+# arm-none-eabi-gcc is required as the linker driver because rust-lld
+# cannot generate CMSE import libraries (--cmse-implib). The GCC driver
+# passes linker flags through to arm-none-eabi-ld which supports CMSE.
+# Rust automatically passes -nostartfiles for bare-metal ARM targets.
+[target.thumbv8m.main-none-eabi]
+linker = "arm-none-eabi-gcc"
+rustflags = ["-C", "target-feature=+cmse"]

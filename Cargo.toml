@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/catlaser-common",
     "crates/catlaser-mcu",
+    "crates/catlaser-mcu-secure",
     "crates/catlaser-vision",
 ]
 default-members = [
@@ -45,7 +46,7 @@ tempfile = "3"
 
 # embassy async runtime (MCU firmware)
 embassy-executor = { version = "0.10", features = ["defmt", "platform-cortex-m", "executor-thread"] }
-embassy-rp = { version = "0.10", features = ["defmt", "time-driver", "critical-section-impl", "rp2040"] }
+embassy-rp = { version = "0.10", features = ["defmt", "time-driver", "critical-section-impl", "rp235xa", "imagedef-nonsecure-exe"] }
 embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-sync = { version = "0.8", features = ["defmt"] }
 embassy-futures = "0.1"

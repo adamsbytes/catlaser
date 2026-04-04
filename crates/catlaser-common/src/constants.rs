@@ -41,7 +41,7 @@ pub const WATCHDOG_TIMEOUT_MS: u32 = 500_u32;
 /// Software watchdog check frequency.
 ///
 /// The watchdog task checks command freshness at this rate and feeds the
-/// RP2040 hardware watchdog each tick. 100 Hz gives at most 10 ms of
+/// RP2350 hardware watchdog each tick. 100 Hz gives at most 10 ms of
 /// additional detection latency beyond the timeout window.
 pub const WATCHDOG_CHECK_HZ: u32 = 100_u32;
 
@@ -194,38 +194,38 @@ pub const fn dispense_sequence_duration_ms(rotations: u8) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// PWM configuration (50 Hz servo signal at 125 MHz / divider 100)
+// PWM configuration (50 Hz servo signal at 150 MHz / divider 100)
 // ---------------------------------------------------------------------------
 
 /// PWM counter wrap value for 50 Hz servo signal.
 ///
-/// `period = (top + 1) * divider / clk_sys = 25000 * 100 / 125_000_000 = 20 ms`
-pub const PWM_TOP: u16 = 24_999_u16;
+/// `period = (top + 1) * divider / clk_sys = 30000 * 100 / 150_000_000 = 20 ms`
+pub const PWM_TOP: u16 = 29_999_u16;
 
 /// PWM clock divider (integer part) for 50 Hz servo signal.
 pub const PWM_DIVIDER: u8 = 100_u8;
 
 /// PWM compare value for minimum servo pulse (500 us).
-pub const PWM_TICKS_MIN: u16 = 625_u16;
+pub const PWM_TICKS_MIN: u16 = 750_u16;
 
 /// PWM compare value for center servo pulse (1500 us).
-pub const PWM_TICKS_CENTER: u16 = 1875_u16;
+pub const PWM_TICKS_CENTER: u16 = 2250_u16;
 
 /// PWM compare value for maximum servo pulse (2500 us).
-pub const PWM_TICKS_MAX: u16 = 3125_u16;
+pub const PWM_TICKS_MAX: u16 = 3750_u16;
 
 /// Converts a pulse width in microseconds to PWM compare ticks.
 ///
-/// `ticks = pulse_us * (PWM_TOP + 1) / period_us = pulse_us * 5 / 4`
+/// `ticks = pulse_us * (PWM_TOP + 1) / period_us = pulse_us * 3 / 2`
 #[expect(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::integer_division,
-    reason = "compile-time helper only; max intermediate = 2500 * 5 = 12500, fits u32 and u16"
+    reason = "compile-time helper only; max intermediate = 2500 * 3 = 7500, fits u32 and u16"
 )]
 const fn pulse_us_to_ticks(pulse_us: u16) -> u16 {
-    (pulse_us as u32 * 5_u32 / 4_u32) as u16
+    (pulse_us as u32 * 3_u32 / 2_u32) as u16
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +312,18 @@ const _: () = assert!(
     "maximum servo pulse must fit within PWM period"
 );
 
+// PWM period must produce exactly 50 Hz at 150 MHz system clock.
+// (PWM_TOP + 1) * PWM_DIVIDER = 30000 * 100 = 3_000_000 = 150_000_000 / 50
+#[expect(
+    clippy::as_conversions,
+    reason = "compile-time assertion: u16-to-u32 widening is lossless, overflow is a compile \
+              error in const context"
+)]
+const _: () = assert!(
+    (PWM_TOP as u32 + 1_u32) * PWM_DIVIDER as u32 == 3_000_000_u32,
+    "PWM period must equal 3_000_000 clocks (20 ms at 150 MHz)"
+);
+
 // ---------------------------------------------------------------------------
 // UART protocol
 // ---------------------------------------------------------------------------
@@ -323,7 +335,7 @@ pub const UART_BAUD: u32 = 115_200_u32;
 pub const SERVO_CMD_SIZE: usize = 8_usize;
 
 // ---------------------------------------------------------------------------
-// RP2040 pin assignments (GPIO numbers)
+// RP2350 pin assignments (GPIO numbers)
 // ---------------------------------------------------------------------------
 
 /// UART TX (MCU to compute module).
@@ -388,7 +400,7 @@ pub const VBUS_POLL_HZ: u32 = 10_u32;
 /// pin voltage multiplied by this factor.
 pub const VBUS_DIVIDER_FACTOR: u32 = 3_u32;
 
-/// ADC reference voltage in millivolts (RP2040 internal 3.3 V reference).
+/// ADC reference voltage in millivolts (RP2350 internal 3.3 V reference).
 pub const ADC_REF_MV: u32 = 3300_u32;
 
 /// ADC maximum raw reading (12-bit SAR, 0–4095).

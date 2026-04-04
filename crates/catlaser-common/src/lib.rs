@@ -10,6 +10,7 @@ pub mod frame_parser;
 pub mod hopper;
 pub mod servo_cmd;
 pub mod servo_math;
+pub mod trustzone;
 
 pub use frame_parser::FrameParser;
 pub use hopper::HopperDebouncer;

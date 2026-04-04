@@ -1,0 +1,29 @@
+[package]
+name = "catlaser-mcu-secure"
+description = "RP2350 TrustZone Secure firmware — SAU/ACCESSCTRL partitioning, laser safety, watchdog"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+catlaser-common.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+panic-probe.workspace = true
+critical-section.workspace = true
+
+# embassy-rp for RP2350 IMAGE_DEF (Secure boot block) and PAC re-export.
+# No async runtime, no time driver — the Secure image is synchronous.
+embassy-rp = { version = "0.10", default-features = false, features = [
+    "rp235xa",
+    "imagedef-secure-exe",
+    "rt",
+    "defmt",
+    "unstable-pac",
+    "critical-section-impl",
+] }
+
+[lints]
+workspace = true

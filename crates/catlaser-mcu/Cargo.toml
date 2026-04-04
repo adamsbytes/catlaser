@@ -1,6 +1,6 @@
 [package]
 name = "catlaser-mcu"
-description = "RP2040 firmware — servo interpolation, laser control, watchdog, and safety"
+description = "RP2350 Non-Secure firmware — servo interpolation, dispenser control, and safety via TrustZone gateways"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -2,9 +2,11 @@
 //!
 //! Reads the latest [`ServoCommand`](catlaser_common::ServoCommand) from shared
 //! state, applies angle clamping, exponential interpolation, slew-rate limiting,
-//! and outputs PWM to the pan/tilt servos at 200 Hz.
+//! and outputs PWM to the pan/tilt servos at 200 Hz. Reports tilt and
+//! person-detected state to the Secure world each tick, then requests laser
+//! state via the [`gateway`](crate::gateway) -- the Secure side validates all
+//! safety invariants before toggling the laser GPIO.
 
-use embassy_rp::gpio::{Level, Output};
 use embassy_rp::pwm::{self, Pwm};
 use embassy_time::{Duration, Ticker};
 use fixed::traits::ToFixed as _;
@@ -20,9 +22,10 @@ use crate::state::{DISPENSE_SIGNAL, DISPENSING, DispenseRequest, LATEST_CMD, POW
 /// Maintains current pan/tilt angles (initialized to home) and smoothly
 /// drives them toward the latest commanded target each tick. Outputs the
 /// resulting angles as PWM compare values on slice 1 channels A (pan)
-/// and B (tilt). Drives the laser GPIO from the command flags each tick.
+/// and B (tilt). Reports tilt and person-detected state to the Secure
+/// world, then requests laser state via the gateway each tick.
 #[embassy_executor::task]
-pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
+pub async fn control_task(mut pwm: Pwm<'static>) {
     defmt::info!("control: starting 200Hz loop");
 
     let mut current_pan: i16 = PAN_HOME;
@@ -66,12 +69,22 @@ pub async fn control_task(mut pwm: Pwm<'static>, mut laser: Output<'static>) {
         current_pan = servo_math::clamp_pan(current_pan);
         current_tilt = servo_math::clamp_tilt(current_tilt, cmd.flags().person_detected());
 
-        // Drive laser GPIO from command flags.
-        laser.set_level(if cmd.flags().laser_on() {
-            Level::High
-        } else {
-            Level::Low
-        });
+        // Report tilt to Secure world before requesting laser state, so
+        // the Secure side has current angles for its safety check.
+        crate::gateway::tilt_report(current_tilt, 0_i16);
+
+        // Report person-detected state to Secure world. If a person is
+        // newly detected while the laser is on above the person horizon
+        // limit, the Secure side forces the laser off immediately.
+        crate::gateway::person_detected_report(cmd.flags().person_detected());
+
+        // Request laser state from Secure world. The Secure side validates
+        // all safety invariants (tilt, person-detected, watchdog) before
+        // toggling the laser GPIO.
+        let status = crate::gateway::laser_set(cmd.flags().laser_on());
+        if cmd.flags().laser_on() && !status.is_ok() {
+            defmt::trace!("control: laser denied (status={})", status.to_raw(),);
+        }
 
         // Convert to PWM ticks and output.
         pwm_cfg.compare_a = servo_math::angle_to_ticks(current_pan);

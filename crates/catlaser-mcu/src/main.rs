@@ -1,20 +1,25 @@
-//! Catlaser MCU firmware.
+//! Catlaser MCU Non-Secure firmware.
 //!
-//! 200Hz servo interpolation, laser GPIO, dispenser control, and watchdog
-//! on RP2040 via Embassy async runtime.
+//! 200Hz servo interpolation, dispenser control, and safety watchdog on
+//! RP2350 via Embassy async runtime. Runs in the Non-Secure world after
+//! the Secure image has partitioned memory and peripherals via TrustZone-M.
+//!
+//! Safety-critical functions (laser GPIO, hardware watchdog, tilt enforcement)
+//! are owned by the Secure world and accessed through NSC gateway calls.
+//! No Non-Secure code can actuate the laser or disable the watchdog directly.
 //!
 //! # Task architecture
 //!
 //! - `uart_rx` — receives 8-byte [`ServoCommand`] frames from the compute
 //!   module, publishes to shared state
 //! - `control` — 200Hz loop: reads latest command, interpolates servo
-//!   positions, outputs PWM
+//!   positions, outputs PWM, reports state to Secure world via gateway
 //! - `dispenser` — drives disc/door/deflector servos through timed dispense
 //!   sequence on command, with jam detection and safety abort
-//! - `watchdog` — monitors command freshness, kills laser and homes servos
-//!   on timeout
+//! - `watchdog` — monitors command freshness, kills laser via Secure gateway
+//!   and homes servos on timeout, feeds hardware watchdog each tick
 //! - `power` — monitors VBUS via ADC at 10Hz, initiates shutdown on power
-//!   loss (laser off, servos home, signal compute module)
+//!   loss (laser off via gateway, servos home, signal compute module)
 //! - `hopper` — polls IR break-beam sensor at 2Hz, debounces readings,
 //!   drives status LED (solid = OK, blink = empty)
 
@@ -23,6 +28,7 @@
 
 mod control;
 mod dispenser;
+mod gateway;
 mod hopper;
 mod power;
 mod safety;
@@ -34,7 +40,6 @@ use embassy_rp::adc;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::pwm::Pwm;
-use embassy_rp::watchdog::{ResetReason, Watchdog};
 use fixed::traits::ToFixed as _;
 
 use catlaser_common::constants::{
@@ -56,15 +61,7 @@ bind_interrupts!(struct Irqs {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(embassy_rp::config::Config::default());
 
-    defmt::info!("catlaser-mcu: starting");
-
-    // --- Watchdog: check for previous reset reason ---
-    let watchdog = Watchdog::new(p.WATCHDOG);
-    match watchdog.reset_reason() {
-        Some(ResetReason::Forced) => defmt::warn!("boot: previous forced reset"),
-        Some(ResetReason::TimedOut) => defmt::warn!("boot: previous watchdog timeout"),
-        None => {}
-    }
+    defmt::info!("catlaser-mcu: starting (Non-Secure)");
 
     // --- UART: commands from compute module (RX), shutdown signal (TX) ---
     let mut uart_config = embassy_rp::uart::Config::default();
@@ -96,10 +93,10 @@ async fn main(spawner: Spawner) {
 
     let pwm = Pwm::new_output_ab(p.PWM_SLICE1, p.PIN_2, p.PIN_3, pwm_cfg);
 
-    // --- Laser GPIO: default off, driven by control loop from command flags ---
-    let laser = Output::new(p.PIN_7, Level::Low);
+    // Laser GPIO (PIN_7) is owned by the Secure world — the control loop
+    // actuates the laser through the set_laser_state gateway.
 
-    if let Ok(token) = control::control_task(pwm, laser) {
+    if let Ok(token) = control::control_task(pwm) {
         spawner.spawn(token);
     } else {
         defmt::error!("catlaser-mcu: failed to spawn control task");
@@ -127,8 +124,10 @@ async fn main(spawner: Spawner) {
         cortex_m::asm::udf();
     }
 
-    // --- Watchdog: software timeout + hardware backstop ---
-    if let Ok(token) = safety::watchdog_task(watchdog) {
+    // Hardware watchdog is owned by the Secure world — the watchdog task
+    // feeds it through the feed_watchdog gateway each tick.
+
+    if let Ok(token) = safety::watchdog_task() {
         spawner.spawn(token);
     } else {
         defmt::error!("catlaser-mcu: failed to spawn watchdog task");

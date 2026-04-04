@@ -22,6 +22,10 @@ name = "catlaser-mcu"
 expression = "MIT"
 license-files = []
 [[licenses.clarify]]
+name = "catlaser-mcu-secure"
+expression = "MIT"
+license-files = []
+[[licenses.clarify]]
 name = "catlaser-vision"
 expression = "MIT"
 license-files = []

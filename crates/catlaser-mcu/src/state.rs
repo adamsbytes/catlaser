@@ -3,7 +3,7 @@
 //! All state is accessed via [`critical_section::Mutex`] wrapping [`Cell`],
 //! the standard pattern for sharing [`Copy`] types between cooperative tasks
 //! on single-core Cortex-M. Critical sections are interrupt disables —
-//! effectively zero-cost on RP2040.
+//! effectively zero-cost on RP2350.
 
 use core::cell::Cell;
 

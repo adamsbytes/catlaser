@@ -7,13 +7,21 @@ check:
     just py-check
 
 check-mcu:
-    cargo clippy -p catlaser-mcu --target thumbv6m-none-eabi
+    cargo clippy -p catlaser-mcu --target thumbv8m.main-none-eabi
+
+check-mcu-secure:
+    cd crates/catlaser-mcu-secure && cargo +nightly clippy --all-targets
 
 build:
     cargo build
 
 build-mcu:
-    cargo build -p catlaser-mcu --target thumbv6m-none-eabi --release
+    cargo build -p catlaser-mcu --target thumbv8m.main-none-eabi --release
+
+build-mcu-secure:
+    cd crates/catlaser-mcu-secure && cargo +nightly build --release
+
+build-mcu-all: build-mcu-secure build-mcu
 
 test crate:
     cargo test --release -p catlaser-{{crate}} -- --nocapture

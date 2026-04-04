@@ -508,11 +508,11 @@ mod tests {
             PWM_TICKS_CENTER,
             "pan home must map to center"
         );
-        // TILT_HOME = 4500 -> 1875 + 4500*1250/9000 = 1875 + 625 = 2500
+        // TILT_HOME = 4500 -> 2250 + 4500*1500/9000 = 2250 + 750 = 3000
         assert_eq!(
             angle_to_ticks(TILT_HOME),
-            2500_u16,
-            "tilt home (45 deg) must map to 2500 ticks"
+            3000_u16,
+            "tilt home (45 deg) must map to 3000 ticks"
         );
     }
 
@@ -532,17 +532,17 @@ mod tests {
 
     #[test]
     fn test_angle_to_ticks_45_degrees() {
-        // +45.00 deg = 4500 -> 1875 + 4500*1250/9000 = 1875 + 625 = 2500
+        // +45.00 deg = 4500 -> 2250 + 4500*1500/9000 = 2250 + 750 = 3000
         assert_eq!(
             angle_to_ticks(4500_i16),
-            2500_u16,
-            "+45 degrees must map to 2500 ticks"
+            3000_u16,
+            "+45 degrees must map to 3000 ticks"
         );
-        // -45.00 deg = -4500 -> 1875 + (-4500)*1250/9000 = 1875 - 625 = 1250
+        // -45.00 deg = -4500 -> 2250 + (-4500)*1500/9000 = 2250 - 750 = 1500
         assert_eq!(
             angle_to_ticks(-4500_i16),
-            1250_u16,
-            "-45 degrees must map to 1250 ticks"
+            1500_u16,
+            "-45 degrees must map to 1500 ticks"
         );
     }
 
