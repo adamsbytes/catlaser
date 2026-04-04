@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  VISION_TARGET: armv7-unknown-linux-uclibceabihf
+  MCU_TARGET: thumbv8m.main-none-eabi
+
+jobs:
+  build-mcu:
+    name: Build MCU firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabi
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: thumbv8m.main-none-eabi
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install arm-none-eabi-gcc
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Build Secure image
+        run: cd crates/catlaser-mcu-secure && cargo +nightly build --release
+
+      - name: Build Non-Secure image
+        run: cargo build -p catlaser-mcu --target thumbv8m.main-none-eabi --release
+
+      - name: Upload MCU artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcu-firmware
+          path: |
+            crates/catlaser-mcu-secure/target/thumbv8m.main-none-eabi/release/catlaser-mcu-secure
+            target/thumbv8m.main-none-eabi/release/catlaser-mcu
+
+  build-vision:
+    name: Build vision daemon (cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Rockchip cross-toolchain
+        run: |
+          echo "::error::Rockchip SDK toolchain must be provided via a self-hosted runner or pre-built container."
+          echo "This job requires LUCKFOX_SDK_PATH with the arm-rockchip830-linux-uclibcgnueabihf toolchain."
+          echo "See docs/resources/rust-rv1106-cross-compilation.md for setup instructions."
+          exit 1
+
+  convert-models:
+    name: Convert ONNX models to RKNN
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install rknn-toolkit2
+        run: pip install rknn-toolkit2
+
+      - name: Convert YOLOv8n
+        run: python3 models/convert/convert_yolo.py
+
+      - name: Convert MobileNetV2 re-ID
+        run: python3 models/convert/convert_reid.py
+
+      - name: Upload RKNN models
+        uses: actions/upload-artifact@v4
+        with:
+          name: rknn-models
+          path: |
+            models/yolov8n-coco.rknn
+            models/cat_reid_mobilenet.rknn
+
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+    needs: [build-mcu, convert-models]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcu-firmware
+          path: artifacts/mcu
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rknn-models
+          path: artifacts/models
+
+      - name: Package release artifacts
+        run: |
+          mkdir -p release
+          cp -r artifacts/mcu/* release/
+          cp -r artifacts/models/* release/
+          cd release && tar czf ../catlaser-${{ github.ref_name }}.tar.gz .
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: catlaser-${{ github.ref_name }}.tar.gz
+          generate_release_notes: true

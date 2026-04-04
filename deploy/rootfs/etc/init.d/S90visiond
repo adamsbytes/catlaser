@@ -1,0 +1,42 @@
+#!/bin/sh
+# S90visiond - Start catlaser vision daemon.
+#
+# Waits for the NPU device node created by S30loadmodules before
+# launching. The daemon creates its IPC socket at /var/run/catlaser.sock
+# which S91behavior depends on.
+
+DAEMON="/usr/bin/catlaser-visiond"
+PIDFILE="/var/run/catlaser-visiond.pid"
+
+wait_for_npu() {
+    retries=0
+    while [ ! -e /dev/mpp_service ] && [ "$retries" -lt 50 ]; do
+        sleep 0.1
+        retries=$((retries + 1))
+    done
+    if [ ! -e /dev/mpp_service ]; then
+        echo "ERROR: /dev/mpp_service not found after 5s" >&2
+        return 1
+    fi
+}
+
+case "$1" in
+    start)
+        echo "Starting catlaser-visiond..."
+        wait_for_npu || exit 1
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON"
+        ;;
+    stop)
+        echo "Stopping catlaser-visiond..."
+        start-stop-daemon -K -p "$PIDFILE"
+        rm -f "$PIDFILE"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

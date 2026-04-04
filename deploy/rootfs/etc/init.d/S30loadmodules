@@ -1,0 +1,45 @@
+#!/bin/sh
+# S30loadmodules - Load camera, ISP, NPU, and media kernel modules.
+#
+# Modules are loaded via insmod in strict dependency order.
+# modprobe is not available on the Buildroot image.
+
+KO_DIR="/oem/usr/ko"
+
+case "$1" in
+    start)
+        echo "Loading kernel modules..."
+        insmod "${KO_DIR}/rk_dvbm.ko"
+        insmod "${KO_DIR}/mpp_vcodec.ko"
+        insmod "${KO_DIR}/video_rkcif.ko"
+        insmod "${KO_DIR}/video_rkisp.ko"
+        insmod "${KO_DIR}/phy_rockchip_csi2_dphy_hw.ko"
+        insmod "${KO_DIR}/phy_rockchip_csi2_dphy.ko"
+        insmod "${KO_DIR}/sc3336.ko"
+        insmod "${KO_DIR}/rga3.ko"
+        insmod "${KO_DIR}/rknpu.ko"
+        insmod "${KO_DIR}/rockit.ko"
+        echo "Kernel modules loaded."
+        ;;
+    stop)
+        echo "Unloading kernel modules..."
+        rmmod rockit 2>/dev/null
+        rmmod rknpu 2>/dev/null
+        rmmod rga3 2>/dev/null
+        rmmod sc3336 2>/dev/null
+        rmmod phy_rockchip_csi2_dphy 2>/dev/null
+        rmmod phy_rockchip_csi2_dphy_hw 2>/dev/null
+        rmmod video_rkisp 2>/dev/null
+        rmmod video_rkcif 2>/dev/null
+        rmmod mpp_vcodec 2>/dev/null
+        rmmod rk_dvbm 2>/dev/null
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

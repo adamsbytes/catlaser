@@ -5,3 +5,16 @@
 *.snap.new
 *.pyc
 *.egg-info
+
+# RKNN compiled models (generated from ONNX sources)
+*.rknn
+
+# Calibration frames (captured from device, not committed)
+models/calibration/*.jpg
+models/calibration/*.png
+
+# Deploy build artifacts
+deploy/rootfs/usr/bin/catlaser-visiond
+deploy/rootfs/usr/bin/catlaser-brain
+deploy/rootfs/usr/lib/catlaser-brain/catlaser_brain/
+deploy/rootfs/usr/lib/*.rknn

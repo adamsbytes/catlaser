@@ -1,0 +1,11 @@
+# Calibration image list for RKNN INT8 quantization.
+# Each line is a path (relative to this file) to a representative frame
+# captured from the SC3336 camera in the deployment environment.
+#
+# Recommended: 50-100 images covering varying lighting, distances, and
+# cat poses. The toolkit auto-resizes to model input dimensions but
+# providing correctly-sized frames avoids interpolation artifacts.
+#
+# Example entries (uncomment and replace with real captures):
+# ./frame_001.jpg
+# ./frame_002.jpg

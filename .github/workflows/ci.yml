@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  rust-check:
+    name: Rust lint + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Tests
+        run: cargo test --release
+
+      - name: Docs
+        run: cargo doc --no-deps --document-private-items
+
+  rust-deny:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  rust-mcu-check:
+    name: MCU firmware lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabi
+          components: clippy
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: thumbv8m.main-none-eabi
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy MCU Non-Secure
+        run: cargo clippy -p catlaser-mcu --target thumbv8m.main-none-eabi
+
+      - name: Clippy MCU Secure
+        run: cd crates/catlaser-mcu-secure && cargo +nightly clippy --all-targets
+
+  python-check:
+    name: Python lint + typecheck + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Create venv and install deps
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Pyright
+        run: pyright .
+
+      - name: Tests
+        run: .venv/bin/python -m pytest
+
+  proto-lint:
+    name: Protobuf lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bufbuild/buf-action@v1
+        with:
+          lint: true
+          breaking: false
+          push: false
+
+  shellcheck:
+    name: Shell script lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck deploy scripts
+        run: shellcheck deploy/*.sh
+
+      - name: ShellCheck init scripts
+        run: shellcheck deploy/rootfs/etc/init.d/*

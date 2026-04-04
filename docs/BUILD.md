@@ -47,20 +47,20 @@
   - [X] Dispense orchestration (variable reward: tier 0-2, chute alternation)
   - [X] Session scheduling (read schedule, accept/skip logic)
 
-[ ] Storage + Networking
+[X] Storage + Networking
   - [X] SQLite CRUD (cat profiles, sessions, play history, embeddings, schedule)
   - [X] App API (protobuf over WebRTC data channel / TCP over Tailscale)
-  - [x] WebRTC live view (LiveKit, H.264/265 from hardware encoder)
+  - [X] WebRTC live view (LiveKit, H.264/265 from hardware encoder)
   - [X] Push notifications (FCM/APNs: play summaries, session alerts, hopper empty)
 
-[ ] Deploy + CI
-  - [ ] Cross-compile toolchain (ARM Cortex-A7 for vision, thumbv8m for MCU)
-  - [ ] ONNX → RKNN model conversion pipeline
-  - [ ] Rootfs overlay + systemd services (catlaser-vision, catlaser-brain)
-  - [ ] build-image.sh (full firmware image assembly)
-  - [ ] flash.sh (USB flash to device)
-  - [ ] catlaser-update.sh (OTA updates)
-  - [ ] CI: lint + test (Rust + Python) + release image builds
+[X] Deploy + CI
+  - [X] Cross-compile toolchain (ARM Cortex-A7 for vision, thumbv8m for MCU)
+  - [X] ONNX → RKNN model conversion pipeline
+  - [X] Rootfs overlay + init scripts (catlaser-vision, catlaser-brain)
+  - [X] build-image.sh (full firmware image assembly)
+  - [X] flash.sh (USB flash to device)
+  - [X] catlaser-update.sh (OTA updates)
+  - [X] CI: lint + test (Rust + Python) + release image builds
 
 [ ] App — iOS (SwiftUI, primary)
   - [ ] Proto codegen (swift-protobuf from app.proto)

@@ -5,6 +5,7 @@ check:
     cargo doc --no-deps --document-private-items
     cargo deny check
     just py-check
+    just shellcheck
 
 check-mcu:
     cargo clippy -p catlaser-mcu --target thumbv8m.main-none-eabi
@@ -22,6 +23,25 @@ build-mcu-secure:
     cd crates/catlaser-mcu-secure && cargo +nightly build --release
 
 build-mcu-all: build-mcu-secure build-mcu
+
+build-vision-cross:
+    cargo +nightly build \
+        -Zbuild-std=std,panic_abort \
+        --target armv7-unknown-linux-uclibceabihf \
+        --release \
+        -p catlaser-vision
+
+build-all: build-mcu-all build-vision-cross
+
+build-image *args:
+    ./deploy/build-image.sh {{args}}
+
+flash *args:
+    ./deploy/flash.sh {{args}}
+
+convert-models:
+    python3 models/convert/convert_yolo.py
+    python3 models/convert/convert_reid.py
 
 test crate:
     cargo test --release -p catlaser-{{crate}} -- --nocapture
@@ -51,6 +71,10 @@ proto: proto-format proto-lint proto-generate
 
 clean-deps:
     cargo machete
+
+shellcheck:
+    shellcheck deploy/*.sh
+    shellcheck deploy/rootfs/etc/init.d/*
 
 py-check:
     cd python && ruff check .

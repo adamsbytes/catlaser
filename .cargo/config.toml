@@ -1,0 +1,15 @@
+# RV1106 Linux target (Cortex-A7, uclibc, Rockchip SDK toolchain)
+#
+# Requires:
+#   - LUCKFOX_SDK_PATH set to the Luckfox Pico SDK root
+#   - SDK toolchain on PATH (source $LUCKFOX_SDK_PATH/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/env_install_toolchain.sh)
+#
+# Build with:
+#   cargo +nightly build -Zbuild-std=std,panic_abort \
+#     --target armv7-unknown-linux-uclibceabihf \
+#     --release -p catlaser-vision
+[target.armv7-unknown-linux-uclibceabihf]
+linker = "arm-rockchip830-linux-uclibcgnueabihf-gcc"
+rustflags = [
+    "-C", "link-arg=-Wl,--allow-shlib-undefined",
+]

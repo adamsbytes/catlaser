@@ -1,0 +1,42 @@
+#!/bin/sh
+# S91behavior - Start catlaser Python behavior sidecar.
+#
+# Waits for the vision daemon's IPC socket before launching.
+# The sidecar connects to the Unix socket created by catlaser-visiond.
+
+DAEMON="/usr/bin/catlaser-brain"
+PIDFILE="/var/run/catlaser-brain.pid"
+IPC_SOCKET="/var/run/catlaser.sock"
+
+wait_for_socket() {
+    retries=0
+    while [ ! -S "$IPC_SOCKET" ] && [ "$retries" -lt 100 ]; do
+        sleep 0.1
+        retries=$((retries + 1))
+    done
+    if [ ! -S "$IPC_SOCKET" ]; then
+        echo "ERROR: $IPC_SOCKET not found after 10s" >&2
+        return 1
+    fi
+}
+
+case "$1" in
+    start)
+        echo "Starting catlaser-brain..."
+        wait_for_socket || exit 1
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON"
+        ;;
+    stop)
+        echo "Stopping catlaser-brain..."
+        start-stop-daemon -K -p "$PIDFILE"
+        rm -f "$PIDFILE"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
