@@ -182,14 +182,11 @@ pub extern "cmse-nonsecure-entry" fn set_laser_state(on: u32) -> u32 {
 
         let result = check_laser_safety(tilt, person, wd_active);
         if result.is_ok() {
+            laser_gpio_set(true);
             LASER_ON.borrow(cs).set(true);
         }
         result
     });
-
-    if status.is_ok() {
-        laser_gpio_set(true);
-    }
 
     status.to_raw()
 }
