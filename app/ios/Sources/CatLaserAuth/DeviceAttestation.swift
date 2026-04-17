@@ -6,9 +6,10 @@ import Crypto
 #endif
 
 /// Wire-format attestation attached to magic-link request and verify
-/// calls. Replaces the v1 plaintext-JSON fingerprint header.
+/// calls. Replaces the v1 plaintext-JSON fingerprint header and the v2
+/// unbounded-lifetime signature.
 ///
-/// ## Wire format
+/// ## Wire format (v3)
 ///
 /// Header name: `x-device-attestation`.
 ///
@@ -17,41 +18,68 @@ import Crypto
 ///
 /// ```
 /// {
+///   "bnd": "req:<unix_seconds>" | "ver:<magic_link_token>",
 ///   "fph": "<base64url-no-pad(sha256(canonical fingerprint JSON), 32 bytes)>",
 ///   "pk":  "<base64(DER SubjectPublicKeyInfo of the client's P-256 public key, 91 bytes)>",
-///   "sig": "<base64(DER ECDSA-P256-SHA256 signature over fph's 32 raw bytes)>",
-///   "v":   2
+///   "sig": "<base64(DER ECDSA-P256-SHA256 signature over fph_raw || bnd_utf8)>",
+///   "v":   3
 /// }
 /// ```
 ///
 /// Outer encoding is standard base64 (with `+`/`/`/padding) — HTTP
 /// headers accept those characters. Inner `fph` is base64url-no-pad for
 /// a shorter, URL-logger-safe hash representation; the raw 32-byte hash
-/// digest is what's signed.
+/// digest is what's concatenated with `bnd` and signed.
+///
+/// ## Why `bnd`
+///
+/// The v2 signature was over the fingerprint hash alone. Because the
+/// fingerprint is deterministic per device, any captured v2 header was a
+/// forever-valid attestation for that device — an attacker who got a
+/// single `(fph, pk, sig)` triple out of a log store, an eBPF hook on
+/// the unencrypted path, or a briefly-compromised TLS middlebox could
+/// replay it indefinitely. v3 binds each signature to a freshness input:
+///
+/// * On `requestMagicLink`: `bnd = "req:<now_seconds>"`. Server rejects
+///   skew > ~60s; captured headers expire within a minute.
+/// * On `completeMagicLink`: `bnd = "ver:<magic_link_token>"`. The token
+///   is server-issued, single-use, and rotated on every request. A
+///   request-time signature cannot satisfy a verify call because the
+///   signed bytes differ, and a verify-time signature cannot be re-used
+///   with any other token.
+///
+/// The tagged prefix also prevents cross-context confusion in which a
+/// client or server strips the prefix before parsing — the raw bytes fed
+/// to ECDSA already differ in the first four characters.
 ///
 /// ## Server verification
 ///
 /// For BOTH request and verify endpoints:
 ///
-/// 1. Parse the header; reject if `v != 2`.
+/// 1. Parse the header; reject if `v != 3`.
 /// 2. base64-decode `pk`; assert length == 91 and the first 26 bytes
 ///    match the P-256 SPKI prefix (`DeviceIdentity.ecP256SPKIPrefix`).
 /// 3. base64url-decode `fph`; assert length == 32.
-/// 4. Verify `sig` over the 32-byte `fph` using the public key from `pk`.
-///    Reject on verify failure.
+/// 4. Parse `bnd`. On `requestMagicLink`, require the `"req:"` tag and a
+///    positive Int64 timestamp within the skew window. On
+///    `completeMagicLink`, require the `"ver:"` tag and byte-equality
+///    against the magic-link token parsed from the URL.
+/// 5. Reconstruct the signed message as `fph_raw_32_bytes || bnd_utf8`
+///    and verify `sig` over it using the public key from `pk`. Reject on
+///    verify failure.
 ///
 /// Additionally, at **verify time** only:
 ///
-/// 5. Look up the stored request-time record by the magic-link token.
-/// 6. Byte-compare the verify request's `fph` against the stored `fph`.
+/// 6. Look up the stored request-time record by the magic-link token.
+/// 7. Byte-compare the verify request's `fph` against the stored `fph`.
 ///    Reject on mismatch with `DEVICE_MISMATCH`.
-/// 7. Byte-compare the verify request's `pk` against the stored `pk`.
+/// 8. Byte-compare the verify request's `pk` against the stored `pk`.
 ///    Reject on mismatch with `DEVICE_MISMATCH`.
 ///
-/// Step 7 is required: an attacker who observes the stored `fph` value
-/// could replay it with their own public key and a valid signature from
-/// their own key. Comparing `pk` too binds the verify call to the exact
-/// Secure Enclave that requested the link.
+/// Step 8 is required: an attacker who observes the stored `fph` value
+/// could attempt to forge a verify call under their own public key. The
+/// stored-`pk` comparison binds the verify call to the exact Secure
+/// Enclave that requested the link.
 ///
 /// ## What is NOT on the wire
 ///
@@ -60,22 +88,25 @@ import Crypto
 /// into the 32-byte `fph` hash. Server-side observability tools that
 /// capture request headers cannot derive them.
 public struct DeviceAttestation: Sendable, Equatable {
-    public static let currentVersion: Int = 2
+    public static let currentVersion: Int = 3
 
     public let version: Int
     public let fingerprintHash: Data
     public let publicKeySPKI: Data
+    public let binding: AttestationBinding
     public let signature: Data
 
     public init(
         version: Int = DeviceAttestation.currentVersion,
         fingerprintHash: Data,
         publicKeySPKI: Data,
+        binding: AttestationBinding,
         signature: Data,
     ) {
         self.version = version
         self.fingerprintHash = fingerprintHash
         self.publicKeySPKI = publicKeySPKI
+        self.binding = binding
         self.signature = signature
     }
 }
@@ -83,11 +114,11 @@ public struct DeviceAttestation: Sendable, Equatable {
 public enum DeviceAttestationEncoder {
     public static let headerName = "x-device-attestation"
 
-    /// Upper bound on the serialized base64 value. Empirically ~420 bytes
-    /// for v2 (32 + 91 + ~72 + JSON framing, base64 of all of that). HTTP
-    /// stacks typically reject header values past 8 KiB; the conservative
-    /// ceiling here catches any runaway encoding bug before it hits the
-    /// server.
+    /// Upper bound on the serialized base64 value. Empirically ~450-500
+    /// bytes for v3 (32 + 91 + ~72 + JSON framing including `bnd`, base64
+    /// of all of that). HTTP stacks typically reject header values past
+    /// 8 KiB; the conservative ceiling here catches any runaway encoding
+    /// bug before it hits the server.
     public static let maxHeaderValueBytes = 2048
 
     public static func encodeHeaderValue(_ attestation: DeviceAttestation) throws(AuthError) -> String {
@@ -107,7 +138,14 @@ public enum DeviceAttestationEncoder {
         guard !attestation.signature.isEmpty else {
             throw .attestationFailed("signature is empty")
         }
+        let bnd = attestation.binding.wireValue
+        guard bnd.utf8.count <= AttestationBinding.maxWireBytes else {
+            throw .attestationFailed(
+                "bnd exceeds \(AttestationBinding.maxWireBytes) bytes (got \(bnd.utf8.count))",
+            )
+        }
         let payload = WirePayload(
+            bnd: bnd,
             fph: DeviceIdentity.base64URLNoPad(attestation.fingerprintHash),
             pk: attestation.publicKeySPKI.base64EncodedString(),
             sig: attestation.signature.base64EncodedString(),
@@ -152,15 +190,18 @@ public enum DeviceAttestationEncoder {
         guard let sig = Data(base64Encoded: payload.sig) else {
             throw .attestationFailed("sig base64 decode failed")
         }
+        let binding = try AttestationBinding.decode(wireValue: payload.bnd)
         return DeviceAttestation(
             version: payload.v,
             fingerprintHash: fph,
             publicKeySPKI: pk,
+            binding: binding,
             signature: sig,
         )
     }
 
     private struct WirePayload: Codable {
+        let bnd: String
         let fph: String
         let pk: String
         let sig: String
@@ -191,17 +232,32 @@ public enum DeviceAttestationBuilder {
     private typealias Digest = Crypto.SHA256
     #endif
 
+    /// Build a v3 attestation. The signed ECDSA message is
+    /// `fph_raw_32_bytes || binding.wireBytes`; both components are
+    /// echoed to the server on the wire so it can reconstruct and verify
+    /// exactly the same byte sequence.
     public static func build(
         fingerprint: DeviceFingerprint,
         identity: any DeviceIdentityStoring,
+        binding: AttestationBinding,
     ) async throws -> DeviceAttestation {
         let canonical = try fingerprint.canonicalJSONBytes()
         let hash = Data(Digest.hash(data: canonical))
         let spki = try await identity.publicKeySPKI()
-        let signature = try await identity.sign(hash)
+        let bindingBytes = binding.wireBytes
+        guard bindingBytes.count <= AttestationBinding.maxWireBytes else {
+            throw AuthError.attestationFailed(
+                "bnd exceeds \(AttestationBinding.maxWireBytes) bytes (got \(bindingBytes.count))",
+            )
+        }
+        var signed = Data(capacity: hash.count + bindingBytes.count)
+        signed.append(hash)
+        signed.append(bindingBytes)
+        let signature = try await identity.sign(signed)
         return DeviceAttestation(
             fingerprintHash: hash,
             publicKeySPKI: spki,
+            binding: binding,
             signature: signature,
         )
     }

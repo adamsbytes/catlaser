@@ -8,13 +8,16 @@ import Darwin
 
 public protocol DeviceAttestationProviding: Sendable {
     func currentFingerprint() async throws -> DeviceFingerprint
-    func currentAttestation() async throws -> DeviceAttestation
-    func currentAttestationHeader() async throws -> String
+    /// Build a fresh attestation bound to `binding`. The binding is mixed
+    /// into the ECDSA signature input so a captured header cannot be
+    /// replayed outside its original context (see `AttestationBinding`).
+    func currentAttestation(binding: AttestationBinding) async throws -> DeviceAttestation
+    func currentAttestationHeader(binding: AttestationBinding) async throws -> String
 }
 
 public extension DeviceAttestationProviding {
-    func currentAttestationHeader() async throws -> String {
-        let attestation = try await currentAttestation()
+    func currentAttestationHeader(binding: AttestationBinding) async throws -> String {
+        let attestation = try await currentAttestation(binding: binding)
         return try DeviceAttestationEncoder.encodeHeaderValue(attestation)
     }
 }
@@ -26,9 +29,11 @@ public extension DeviceAttestationProviding {
 ///
 /// The provider is deterministic for the static fields: two calls within
 /// the same app session produce identical fingerprints (and therefore
-/// identical `fph` hashes). The signature varies per call by design —
-/// ECDSA is non-deterministic; server verifies each signature against the
-/// stable public key rather than byte-comparing signatures.
+/// identical `fph` hashes). Each signature varies per call both because
+/// ECDSA is non-deterministic AND because the `binding` mixed into the
+/// signed message is freshness-scoped (request-time timestamp or
+/// verify-time token). Server verifies each signature against the stable
+/// public key rather than byte-comparing signatures.
 public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
     private let identity: any DeviceIdentityStoring
     private let bundle: Bundle
@@ -87,11 +92,12 @@ public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
         )
     }
 
-    public func currentAttestation() async throws -> DeviceAttestation {
+    public func currentAttestation(binding: AttestationBinding) async throws -> DeviceAttestation {
         let fingerprint = try await currentFingerprint()
         return try await DeviceAttestationBuilder.build(
             fingerprint: fingerprint,
             identity: identity,
+            binding: binding,
         )
     }
 }
@@ -214,7 +220,11 @@ public struct StubDeviceAttestationProvider: DeviceAttestationProviding {
         fingerprint
     }
 
-    public func currentAttestation() async throws -> DeviceAttestation {
-        try await DeviceAttestationBuilder.build(fingerprint: fingerprint, identity: identity)
+    public func currentAttestation(binding: AttestationBinding) async throws -> DeviceAttestation {
+        try await DeviceAttestationBuilder.build(
+            fingerprint: fingerprint,
+            identity: identity,
+            binding: binding,
+        )
     }
 }

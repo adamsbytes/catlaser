@@ -10,6 +10,10 @@ struct KeychainBearerTokenStoreTests {
     private func uniqueStore(
         policy: KeychainBearerTokenStore.AccessPolicy = .accessibilityOnly,
     ) -> (KeychainBearerTokenStore, String) {
+        // Uses the package-private initializer (reachable via
+        // `@testable import`) so tests can specify `.accessibilityOnly`
+        // and avoid biometric prompts. The public initializer pins the
+        // policy to `.userPresence` unconditionally.
         let service = "com.catlaser.tests.bearer.\(UUID().uuidString)"
         return (
             KeychainBearerTokenStore(
@@ -136,7 +140,7 @@ struct KeychainBearerTokenStoreTests {
             service: service,
             account: account,
             accessGroup: nil,
-            policy: .accessibilityOnly,
+            policy: .accessibilityOnly, // package-private init, test target only
         )
         // Load must not return the poisoned sync item.
         let loaded = try await store.load()
@@ -144,6 +148,21 @@ struct KeychainBearerTokenStoreTests {
     }
 
     // MARK: - Save semantics (delete-then-add)
+
+    @Test
+    func publicInitPinsPolicyToUserPresence() {
+        // The public initializer must not accept a policy parameter and
+        // must always produce a `.userPresence` store. Production code
+        // cannot reach the `.accessibilityOnly` variant; a future change
+        // that leaked it into the public API would regress the hardware
+        // ACL that protects the bearer token on a stolen unlocked phone.
+        let store = KeychainBearerTokenStore(
+            service: "com.catlaser.tests.public-init.\(UUID().uuidString)",
+            account: "session",
+            accessGroup: nil,
+        )
+        #expect(store.policy == .userPresence)
+    }
 
     @Test
     func saveReplacesAccessControlOnExistingItem() async throws {
@@ -156,7 +175,7 @@ struct KeychainBearerTokenStoreTests {
             service: service,
             account: "session",
             accessGroup: nil,
-            policy: .accessibilityOnly,
+            policy: .accessibilityOnly, // package-private init, test target only
         )
         try await first.save(makeSession(token: "first-policy-accessibilityOnly"))
         defer { Task { try? await first.delete() } }

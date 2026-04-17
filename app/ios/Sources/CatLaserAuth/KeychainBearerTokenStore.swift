@@ -38,27 +38,52 @@ public protocol AuthenticatingBearerTokenStore: Sendable {
 /// layer.
 public struct KeychainBearerTokenStore: BearerTokenStore, AuthenticatingBearerTokenStore {
     /// How the keychain item is protected against unauthorized reads.
-    public enum AccessPolicy: Sendable, Equatable {
+    /// **Package-private** — the public initializer always installs
+    /// `.userPresence`. The test-only `.accessibilityOnly` variant is
+    /// reachable only from within the module so it cannot be wired into
+    /// production by downstream code. A production build that silently
+    /// fell back to `.accessibilityOnly` would strip the hardware ACL
+    /// that protects the bearer token on a stolen unlocked phone — the
+    /// reason it is unreachable from public API.
+    enum AccessPolicy: Sendable, Equatable {
         /// Accessibility attribute only. Reads succeed whenever the device
-        /// is unlocked. Intended for `InMemory`-style integration tests that
-        /// still exercise the keychain code path without biometric prompts.
+        /// is unlocked. Used exclusively by integration tests that need
+        /// to exercise the keychain code path without biometric prompts.
         case accessibilityOnly
         /// Item is wrapped with `SecAccessControl(.userPresence)`. Reads
         /// require biometric or device-passcode authentication at the OS
-        /// layer. The default for production use.
+        /// layer. The only policy reachable from production code.
         case userPresence
     }
 
     public let service: String
     public let account: String
     public let accessGroup: String?
-    public let policy: AccessPolicy
+    let policy: AccessPolicy
 
     public init(
         service: String = "com.catlaser.app.auth",
         account: String = "session",
         accessGroup: String? = nil,
-        policy: AccessPolicy = .userPresence,
+    ) {
+        self.init(
+            service: service,
+            account: account,
+            accessGroup: accessGroup,
+            policy: .userPresence,
+        )
+    }
+
+    /// Package-private initializer used by tests to construct a store
+    /// with `.accessibilityOnly` so they can exercise the keychain
+    /// without triggering biometric prompts. Not reachable from outside
+    /// the module; production code always uses the public initializer
+    /// which pins the policy to `.userPresence`.
+    init(
+        service: String,
+        account: String,
+        accessGroup: String?,
+        policy: AccessPolicy,
     ) {
         self.service = service
         self.account = account

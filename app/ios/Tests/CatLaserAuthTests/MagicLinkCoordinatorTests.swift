@@ -15,16 +15,17 @@ private func makeConfig() throws -> AuthConfig {
     )
 }
 
-/// Records every header request and the fingerprint behind it so tests
-/// can assert that (a) the two attestations across the request/verify
-/// pair share the same `fph` and `pk`, and (b) the `sig` is a fresh value
-/// on each call (ECDSA is non-deterministic by design).
+/// Records every header request, the binding that produced it, and the
+/// fingerprint behind it so tests can assert that (a) the request and
+/// verify attestations share the same `fph` and `pk` but (b) their
+/// bindings are tagged distinctly and the `sig` is fresh on each call.
 actor RecordingAttestationProvider: DeviceAttestationProviding {
     let fingerprint: DeviceFingerprint
     let identity: any DeviceIdentityStoring
 
     private(set) var headerCalls: [String] = []
     private(set) var attestationCalls: [DeviceAttestation] = []
+    private(set) var bindingCalls: [AttestationBinding] = []
 
     init(fingerprint: DeviceFingerprint, identity: any DeviceIdentityStoring) {
         self.fingerprint = fingerprint
@@ -35,21 +36,23 @@ actor RecordingAttestationProvider: DeviceAttestationProviding {
         fingerprint
     }
 
-    nonisolated func currentAttestation() async throws -> DeviceAttestation {
+    nonisolated func currentAttestation(binding: AttestationBinding) async throws -> DeviceAttestation {
         let attestation = try await DeviceAttestationBuilder.build(
             fingerprint: fingerprint,
             identity: identity,
+            binding: binding,
         )
-        await record(attestation)
+        await record(attestation: attestation, binding: binding)
         return attestation
     }
 
-    private func record(_ attestation: DeviceAttestation) {
+    private func record(attestation: DeviceAttestation, binding: AttestationBinding) {
         attestationCalls.append(attestation)
+        bindingCalls.append(binding)
     }
 
-    nonisolated func currentAttestationHeader() async throws -> String {
-        let attestation = try await currentAttestation()
+    nonisolated func currentAttestationHeader(binding: AttestationBinding) async throws -> String {
+        let attestation = try await currentAttestation(binding: binding)
         let header = try DeviceAttestationEncoder.encodeHeaderValue(attestation)
         await recordHeader(header)
         return header
@@ -96,6 +99,7 @@ struct MagicLinkCoordinatorTests {
             client: client,
             store: store,
             attestationProvider: provider,
+            clock: { Date(timeIntervalSince1970: 1_700_000_042) },
         )
 
         try await coord.requestMagicLink(email: "cat@example.com")
@@ -112,15 +116,21 @@ struct MagicLinkCoordinatorTests {
         #expect(attestation.version == DeviceAttestation.currentVersion)
         #expect(attestation.fingerprintHash.count == 32)
         #expect(attestation.publicKeySPKI == (try await identity.publicKeySPKI()))
+        // Request flow must bind to the wall-clock second.
+        #expect(attestation.binding == .request(timestamp: 1_700_000_042))
+        let bindings = await provider.bindingCalls
+        #expect(bindings == [.request(timestamp: 1_700_000_042)])
     }
 
     @Test
-    func requestAndCompletePairSharesFphAndPk() async throws {
-        // The crux of the phishing defence: `fph` (hash of the canonical
-        // fingerprint) and `pk` (public key) must be byte-identical on
-        // request and verify. `sig` differs each call — ECDSA is
-        // non-deterministic; server verifies each signature against the
-        // stable public key rather than byte-comparing signatures.
+    func requestAndCompletePairSharesFphAndPkButDiffersOnBinding() async throws {
+        // The crux of the phishing + replay defence: `fph` (hash of the
+        // canonical fingerprint) and `pk` (public key) are byte-identical
+        // on request and verify so the server can confirm same device;
+        // the `bnd` differs (timestamp on request vs token on verify) so
+        // a capture of one cannot be replayed as the other; `sig`
+        // differs every call — ECDSA is non-deterministic and the signed
+        // bytes include the distinct binding.
         let mock = MockHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 200, headers: [:], body: Data("{}".utf8))),
             .response(.json(["user": ["id": "u", "emailVerified": true]], token: "tok")),
@@ -139,6 +149,7 @@ struct MagicLinkCoordinatorTests {
             client: client,
             store: store,
             attestationProvider: provider,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
         )
 
         try await coord.requestMagicLink(email: "cat@example.com")
@@ -157,8 +168,43 @@ struct MagicLinkCoordinatorTests {
                 "same device + same fingerprint ⇒ identical fph")
         #expect(requestAttestation.publicKeySPKI == completeAttestation.publicKeySPKI,
                 "same SE key ⇒ identical pk")
+        #expect(requestAttestation.binding != completeAttestation.binding,
+                "request and verify must use distinctly-tagged bindings")
+        #expect(requestAttestation.binding == .request(timestamp: 1_700_000_000))
+        #expect(completeAttestation.binding == .verify(token: "T"))
         #expect(requestAttestation.signature != completeAttestation.signature,
-                "ECDSA is non-deterministic ⇒ fresh sig per call")
+                "ECDSA over distinct signed bytes ⇒ fresh sig per call")
+    }
+
+    @Test
+    func completeMagicLinkBindsVerifyToTokenFromURL() async throws {
+        // A capture of the request-time attestation cannot satisfy the
+        // verify endpoint because the token encoded in the binding
+        // changes per-link. Here we assert the verify-call binding
+        // equals exactly the token parsed from the URL.
+        let mock = MockHTTPClient(outcomes: [
+            .response(.json(["user": ["id": "u", "emailVerified": true]], token: "bearer")),
+        ])
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: mock,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let fingerprint = makeFingerprint(installID: installID)
+        let provider = RecordingAttestationProvider(fingerprint: fingerprint, identity: identity)
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            attestationProvider: provider,
+        )
+        let url = URL(string: "https://link.catlaser.example/app/magic-link?token=unique-per-link")!
+        _ = try await coord.completeMagicLink(url: url)
+
+        let bindings = await provider.bindingCalls
+        #expect(bindings == [.verify(token: "unique-per-link")])
     }
 
     @Test
@@ -374,7 +420,7 @@ struct MagicLinkCoordinatorTests {
                 throw AuthError.attestationFailed("fingerprint broken")
             }
 
-            func currentAttestation() async throws -> DeviceAttestation {
+            func currentAttestation(binding _: AttestationBinding) async throws -> DeviceAttestation {
                 throw AuthError.attestationFailed("broken")
             }
         }
@@ -391,6 +437,38 @@ struct MagicLinkCoordinatorTests {
             Issue.record("expected attestationFailed")
         } catch let AuthError.attestationFailed(msg) {
             #expect(msg == "broken")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await mock.sendCount() == 0)
+    }
+
+    @Test
+    func requestRejectsNonPositiveClock() async throws {
+        // A device that boots without time sync (rare, but possible on
+        // locked-down or fresh hardware) will report epoch-0 or earlier.
+        // Emitting `req:0` or `req:-42` poisons server-side skew checks,
+        // so the coordinator refuses to build an attestation at all.
+        let mock = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let provider = StubDeviceAttestationProvider(
+            fingerprint: makeFingerprint(installID: installID),
+            identity: identity,
+        )
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            attestationProvider: provider,
+            clock: { Date(timeIntervalSince1970: 0) },
+        )
+        do {
+            try await coord.requestMagicLink(email: "a@b.com")
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.lowercased().contains("clock"))
         } catch {
             Issue.record("unexpected error: \(error)")
         }

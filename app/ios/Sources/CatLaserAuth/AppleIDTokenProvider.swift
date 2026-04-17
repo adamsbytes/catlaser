@@ -25,7 +25,10 @@ public final class AppleIDTokenProvider: NSObject, AppleIDTokenProviding, @unche
             request.nonce = nonceHash
 
             let controller = ASAuthorizationController(authorizationRequests: [request])
-            let delegate = AppleAuthDelegate(continuation: continuation)
+            let delegate = AppleAuthDelegate(
+                continuation: continuation,
+                expectedNonceHash: nonceHash,
+            )
             let presenter = AppleAuthPresenter(context: context)
 
             controller.delegate = delegate
@@ -38,11 +41,16 @@ public final class AppleIDTokenProvider: NSObject, AppleIDTokenProviding, @unche
 
 private final class AppleAuthDelegate: NSObject, ASAuthorizationControllerDelegate {
     private var continuation: CheckedContinuation<ProviderIDToken, Error>?
+    private let expectedNonceHash: String
     private var retainedController: ASAuthorizationController?
     private var retainedPresenter: AppleAuthPresenter?
 
-    init(continuation: CheckedContinuation<ProviderIDToken, Error>) {
+    init(
+        continuation: CheckedContinuation<ProviderIDToken, Error>,
+        expectedNonceHash: String,
+    ) {
         self.continuation = continuation
+        self.expectedNonceHash = expectedNonceHash
         super.init()
     }
 
@@ -66,6 +74,22 @@ private final class AppleAuthDelegate: NSObject, ASAuthorizationControllerDelega
               !tokenString.isEmpty
         else {
             continuation?.resume(throwing: AuthError.missingIDToken)
+            continuation = nil
+            return
+        }
+        // Defense in depth against a compromised AuthenticationServices
+        // path: Apple's ID token must carry our pre-committed nonce hash
+        // verbatim in its `nonce` claim. Server re-verifies this, but
+        // catching a tampered token here refuses to propagate bad
+        // credentials any further into the stack (and avoids a network
+        // round-trip that could leak anything).
+        do {
+            try IDTokenClaims.verifyNonce(
+                idToken: tokenString,
+                expectedNonce: expectedNonceHash,
+            )
+        } catch {
+            continuation?.resume(throwing: error)
             continuation = nil
             return
         }
