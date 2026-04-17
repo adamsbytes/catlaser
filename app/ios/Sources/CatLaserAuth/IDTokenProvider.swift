@@ -48,6 +48,7 @@ public protocol AppleIDTokenProviding: Sendable {
 
 public protocol GoogleIDTokenProviding: Sendable {
     func requestIDToken(
+        rawNonce: String,
         context: ProviderPresentationContext,
     ) async throws -> ProviderIDToken
 }

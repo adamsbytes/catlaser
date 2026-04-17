@@ -45,19 +45,22 @@ actor MockGoogleProvider: GoogleIDTokenProviding {
 
     private var outcomes: [Outcome]
     private(set) var callCount = 0
+    private(set) var receivedNonces: [String] = []
 
     init(outcomes: [Outcome]) {
         self.outcomes = outcomes
     }
 
     nonisolated func requestIDToken(
+        rawNonce: String,
         context _: ProviderPresentationContext,
     ) async throws -> ProviderIDToken {
-        try await consume()
+        try await consume(rawNonce: rawNonce)
     }
 
-    private func consume() throws -> ProviderIDToken {
+    private func consume(rawNonce: String) throws -> ProviderIDToken {
         callCount += 1
+        receivedNonces.append(rawNonce)
         guard !outcomes.isEmpty else {
             throw AuthError.providerInternal("MockGoogleProvider: no outcomes")
         }
@@ -156,11 +159,17 @@ struct AuthCoordinatorTests {
         #expect(session.provider == .google)
         #expect(try await store.load() == session)
 
+        // Google OIDC echoes the raw nonce verbatim in the ID token, so the
+        // coordinator forwards the same raw value to the server for comparison.
+        let nonces = await google.receivedNonces
+        #expect(nonces.count == 1)
+        #expect(!nonces[0].isEmpty)
+
         let body = try #require(await http.lastRequest()?.body)
         let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         let idToken = parsed?["idToken"] as? [String: Any]
         #expect(idToken?["accessToken"] as? String == "atk")
-        #expect(idToken?["nonce"] == nil)
+        #expect(idToken?["nonce"] as? String == nonces[0])
     }
 
     @Test
@@ -358,6 +367,46 @@ struct AuthCoordinatorTests {
         )
         try await coord.signOut()
         #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func googleRawNonceDiffersAcrossCalls() async throws {
+        let http = MockHTTPClient(outcomes: [
+            .response(.json(["user": ["id": "u"]], token: "b1")),
+            .response(.json(["user": ["id": "u"]], token: "b2")),
+        ])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let google = MockGoogleProvider(outcomes: [
+            .token(ProviderIDToken(token: "idt1", rawNonce: nil, accessToken: nil)),
+            .token(ProviderIDToken(token: "idt2", rawNonce: nil, accessToken: nil)),
+        ])
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: google,
+        )
+        _ = try await coord.signInWithGoogle(context: makeContext())
+        _ = try await coord.signInWithGoogle(context: makeContext())
+
+        let received = await google.receivedNonces
+        #expect(received.count == 2)
+        #expect(received[0] != received[1], "each sign-in must use a fresh nonce")
+
+        let bodies = await http.requests().map(\.body)
+        let nonces = bodies.compactMap { body -> String? in
+            guard let body else { return nil }
+            let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            let idToken = obj?["idToken"] as? [String: Any]
+            return idToken?["nonce"] as? String
+        }
+        #expect(nonces.count == 2)
+        #expect(nonces[0] != nonces[1])
+        // The nonce sent to the provider equals the nonce forwarded to the
+        // server (Google echoes the raw value — no hashing on this path).
+        #expect(nonces[0] == received[0])
+        #expect(nonces[1] == received[1])
     }
 
     @Test

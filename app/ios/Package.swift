@@ -24,8 +24,8 @@ let package = Package(
             from: "1.30.0",
         ),
         .package(
-            url: "https://github.com/google/GoogleSignIn-iOS.git",
-            from: "9.1.0",
+            url: "https://github.com/openid/AppAuth-iOS.git",
+            from: "2.0.0",
         ),
         .package(
             url: "https://github.com/apple/swift-crypto.git",
@@ -49,8 +49,8 @@ let package = Package(
             name: "CatLaserAuth",
             dependencies: [
                 .product(
-                    name: "GoogleSignIn",
-                    package: "GoogleSignIn-iOS",
+                    name: "AppAuth",
+                    package: "AppAuth-iOS",
                     condition: .when(platforms: [.iOS, .macOS]),
                 ),
                 .product(

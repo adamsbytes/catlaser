@@ -56,10 +56,16 @@ public actor AuthCoordinator {
         guard let provider = googleProvider else {
             throw AuthError.providerUnavailable("Google provider not configured")
         }
-        let providerToken = try await provider.requestIDToken(context: context)
+        let nonce: Nonce
+        do {
+            nonce = try nonceGenerator.make()
+        } catch {
+            throw AuthError.providerInternal("nonce generation: \(error.localizedDescription)")
+        }
+        let providerToken = try await provider.requestIDToken(rawNonce: nonce.raw, context: context)
         let idToken = SocialIDToken(
             token: providerToken.token,
-            rawNonce: nil,
+            rawNonce: nonce.raw,
             accessToken: providerToken.accessToken,
         )
         let session = try await client.exchangeSocial(provider: .google, idToken: idToken)
