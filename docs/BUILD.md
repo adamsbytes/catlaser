@@ -63,7 +63,7 @@
   - [X] CI: lint + test (Rust + Python) + release image builds
 
 [ ] App — iOS (SwiftUI, primary)
-  - [ ] Proto codegen (swift-protobuf from app.proto)
+  - [X] Proto codegen (swift-protobuf from app.proto)
   - [ ] Firebase Auth (sign-in with Apple/Google)
   - [ ] Sign in screen
   - [ ] Live view (LiveKit iOS SDK, WebRTC)

@@ -6,3 +6,8 @@ plugins:
     out: python/catlaser_brain/proto
   - protoc_builtin: pyi
     out: python/catlaser_brain/proto
+  - remote: buf.build/apple/swift:v1.36.1
+    out: app/ios/Sources/CatLaserProto/Generated
+    opt:
+      - Visibility=Public
+      - FileNaming=PathToUnderscores

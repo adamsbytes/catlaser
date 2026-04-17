@@ -18,3 +18,11 @@ deploy/rootfs/usr/bin/catlaser-visiond
 deploy/rootfs/usr/bin/catlaser-brain
 deploy/rootfs/usr/lib/catlaser-brain/catlaser_brain/
 deploy/rootfs/usr/lib/*.rknn
+
+# SwiftPM build artifacts
+app/ios/.build/
+app/ios/.swiftpm/
+app/ios/DerivedData/
+app/ios/Package.resolved
+app/ios/**/xcuserdata/
+app/ios/**/project.xcworkspace/

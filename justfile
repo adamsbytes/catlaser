@@ -5,6 +5,7 @@ check:
     cargo doc --no-deps --document-private-items
     cargo deny check
     just py-check
+    just ios-check
     just shellcheck
 
 check-mcu:
@@ -87,3 +88,11 @@ py-fmt:
 
 py-test:
     cd python && .venv/bin/python -m pytest
+
+ios-build:
+    cd app/ios && swift build
+
+ios-test:
+    cd app/ios && swift test
+
+ios-check: ios-build ios-test
