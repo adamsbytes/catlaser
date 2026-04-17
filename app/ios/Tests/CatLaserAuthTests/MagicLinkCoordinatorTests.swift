@@ -444,11 +444,66 @@ struct MagicLinkCoordinatorTests {
     }
 
     @Test
-    func requestRejectsNonPositiveClock() async throws {
+    func requestRejectsEpochZeroClock() async throws {
         // A device that boots without time sync (rare, but possible on
         // locked-down or fresh hardware) will report epoch-0 or earlier.
         // Emitting `req:0` or `req:-42` poisons server-side skew checks,
         // so the coordinator refuses to build an attestation at all.
+        try await expectImplausibleClockRejected(
+            at: Date(timeIntervalSince1970: 0),
+        )
+    }
+
+    @Test
+    func requestRejectsNegativeClock() async throws {
+        try await expectImplausibleClockRejected(
+            at: Date(timeIntervalSince1970: -1_000_000),
+        )
+    }
+
+    @Test
+    func requestRejectsClockBeforePlausibleMinimum() async throws {
+        // One second before the lower bound (2020-01-01 UTC). A device
+        // reporting a timestamp this old has a broken RTC — signing
+        // with it would only push the server's near-now skew check into
+        // a reject, but we want a clean client-side failure, not a
+        // wasted server round-trip.
+        let justTooEarly = AuthCoordinator.minPlausibleRequestTimestamp - 1
+        try await expectImplausibleClockRejected(
+            at: Date(timeIntervalSince1970: TimeInterval(justTooEarly)),
+        )
+    }
+
+    @Test
+    func requestRejectsClockBeyondPlausibleMaximum() async throws {
+        // One second past the upper bound (2100-01-01 UTC). Signing
+        // attestations for the far future is the whole point of a
+        // replay attempt against the skew window — if the attacker can
+        // tamper with the clock and exfiltrate the header, they can
+        // wait for real time to catch up. Refuse.
+        let justTooLate = AuthCoordinator.maxPlausibleRequestTimestamp + 1
+        try await expectImplausibleClockRejected(
+            at: Date(timeIntervalSince1970: TimeInterval(justTooLate)),
+        )
+    }
+
+    @Test
+    func requestAcceptsClockAtPlausibleBounds() async throws {
+        // Both bounds are inclusive — assert the happy path at each
+        // edge so we don't regress into rejecting legitimate edge
+        // timestamps.
+        try await expectPlausibleClockAccepted(
+            atUnixSeconds: AuthCoordinator.minPlausibleRequestTimestamp,
+        )
+        try await expectPlausibleClockAccepted(
+            atUnixSeconds: AuthCoordinator.maxPlausibleRequestTimestamp,
+        )
+    }
+
+    private func expectImplausibleClockRejected(
+        at date: Date,
+        sourceLocation: SourceLocation = #_sourceLocation,
+    ) async throws {
         let mock = MockHTTPClient(outcomes: [])
         let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
         let identity = SoftwareIdentityStore()
@@ -462,16 +517,53 @@ struct MagicLinkCoordinatorTests {
             client: client,
             store: store,
             attestationProvider: provider,
-            clock: { Date(timeIntervalSince1970: 0) },
+            clock: { date },
         )
         do {
             try await coord.requestMagicLink(email: "a@b.com")
-            Issue.record("expected attestationFailed")
+            Issue.record("expected attestationFailed", sourceLocation: sourceLocation)
         } catch let AuthError.attestationFailed(msg) {
-            #expect(msg.lowercased().contains("clock"))
+            #expect(
+                msg.lowercased().contains("clock"),
+                "message '\(msg)' did not mention the clock",
+                sourceLocation: sourceLocation,
+            )
         } catch {
-            Issue.record("unexpected error: \(error)")
+            Issue.record("unexpected error: \(error)", sourceLocation: sourceLocation)
         }
-        #expect(await mock.sendCount() == 0)
+        #expect(await mock.sendCount() == 0, sourceLocation: sourceLocation)
+    }
+
+    private func expectPlausibleClockAccepted(
+        atUnixSeconds seconds: Int64,
+        sourceLocation: SourceLocation = #_sourceLocation,
+    ) async throws {
+        let mock = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 200, headers: [:], body: Data("{}".utf8))),
+        ])
+        let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let provider = StubDeviceAttestationProvider(
+            fingerprint: makeFingerprint(installID: installID),
+            identity: identity,
+        )
+        let coord = AuthCoordinator(
+            client: client,
+            store: InMemoryBearerTokenStore(),
+            attestationProvider: provider,
+            clock: { Date(timeIntervalSince1970: TimeInterval(seconds)) },
+        )
+        try await coord.requestMagicLink(email: "a@b.com")
+        let req = try #require(await mock.lastRequest(), sourceLocation: sourceLocation)
+        let header = try #require(
+            req.header(DeviceAttestationEncoder.headerName),
+            sourceLocation: sourceLocation,
+        )
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        #expect(
+            decoded.binding == .request(timestamp: seconds),
+            sourceLocation: sourceLocation,
+        )
     }
 }

@@ -65,9 +65,16 @@ struct AttestationBindingTests {
     }
 
     @Test
+    func socialRendersTaggedRawNonce() {
+        #expect(AttestationBinding.social(rawNonce: "raw-nonce-abc").wireValue == "sis:raw-nonce-abc")
+    }
+
+    @Test
     func wireBytesIsUtf8OfWireValue() {
         let binding = AttestationBinding.verify(token: "abc")
         #expect(binding.wireBytes == Data("ver:abc".utf8))
+        let social = AttestationBinding.social(rawNonce: "xyz")
+        #expect(social.wireBytes == Data("sis:xyz".utf8))
     }
 
     @Test
@@ -80,6 +87,12 @@ struct AttestationBindingTests {
     func decodeRoundTripsVerify() throws {
         let decoded = try AttestationBinding.decode(wireValue: "ver:abc.def")
         #expect(decoded == .verify(token: "abc.def"))
+    }
+
+    @Test
+    func decodeRoundTripsSocial() throws {
+        let decoded = try AttestationBinding.decode(wireValue: "sis:raw-nonce-abc")
+        #expect(decoded == .social(rawNonce: "raw-nonce-abc"))
     }
 
     @Test
@@ -124,16 +137,30 @@ struct AttestationBindingTests {
     }
 
     @Test
+    func decodeRejectsEmptySocialNonce() {
+        expectDecodeFailure("sis:", matching: "empty")
+    }
+
+    @Test
+    func decodeRejectsControlCharsInSocialNonce() {
+        expectDecodeFailure("sis:abc\ndef", matching: "control")
+        expectDecodeFailure("sis:abc def", matching: "control")
+    }
+
+    @Test
     func decodeRejectsOversizedInput() {
         let big = String(repeating: "a", count: AttestationBinding.maxWireBytes + 1)
         expectDecodeFailure("ver:\(big)", matching: "exceeds")
+        expectDecodeFailure("sis:\(big)", matching: "exceeds")
     }
 
     @Test
     func signedBytesDifferAcrossBindings() async throws {
-        // Two attestations built from the same fingerprint + SE key but
+        // Attestations built from the same fingerprint + SE key but
         // with different bindings must produce different signed bytes.
-        // This is the crux of the replay defence.
+        // This is the crux of the replay defence — for every pair of
+        // distinct binding tags, a signature for one must NOT verify
+        // against the other's signed bytes.
         let identity = SoftwareIdentityStore()
         let fingerprint = makeFingerprint(installID: try await identity.installID())
         let reqAttestation = try await DeviceAttestationBuilder.build(
@@ -146,17 +173,36 @@ struct AttestationBindingTests {
             identity: identity,
             binding: .verify(token: "t"),
         )
+        let sisAttestation = try await DeviceAttestationBuilder.build(
+            fingerprint: fingerprint,
+            identity: identity,
+            binding: .social(rawNonce: "n"),
+        )
         let reqSigned = reqAttestation.fingerprintHash + reqAttestation.binding.wireBytes
         let verSigned = verAttestation.fingerprintHash + verAttestation.binding.wireBytes
+        let sisSigned = sisAttestation.fingerprintHash + sisAttestation.binding.wireBytes
         #expect(reqSigned != verSigned, "request and verify bindings must produce distinct signed bytes")
+        #expect(reqSigned != sisSigned, "request and social bindings must produce distinct signed bytes")
+        #expect(verSigned != sisSigned, "verify and social bindings must produce distinct signed bytes")
 
-        // A request-time signature must NOT verify as a verify-time
-        // signature under the same key — replay across contexts is the
-        // attacker's prize and this is what prevents it.
+        // Every pair of distinct-context signatures must fail to
+        // verify against another context's signed bytes.
         let key = try P256.Signing.PublicKey(derRepresentation: reqAttestation.publicKeySPKI)
         let reqSig = try P256.Signing.ECDSASignature(derRepresentation: reqAttestation.signature)
+        let verSig = try P256.Signing.ECDSASignature(derRepresentation: verAttestation.signature)
+        let sisSig = try P256.Signing.ECDSASignature(derRepresentation: sisAttestation.signature)
         #expect(!key.isValidSignature(reqSig, for: verSigned),
                 "request-time signature must not verify against verify-time signed bytes")
+        #expect(!key.isValidSignature(reqSig, for: sisSigned),
+                "request-time signature must not verify against social-signed bytes")
+        #expect(!key.isValidSignature(verSig, for: reqSigned),
+                "verify-time signature must not verify against request-time signed bytes")
+        #expect(!key.isValidSignature(verSig, for: sisSigned),
+                "verify-time signature must not verify against social-signed bytes")
+        #expect(!key.isValidSignature(sisSig, for: reqSigned),
+                "social signature must not verify against request-time signed bytes")
+        #expect(!key.isValidSignature(sisSig, for: verSigned),
+                "social signature must not verify against verify-time signed bytes")
     }
 
     private func expectDecodeFailure(
@@ -208,6 +254,15 @@ struct DeviceAttestationEncoderTests {
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
         #expect(decoded == attestation)
         #expect(decoded.binding == .verify(token: "single-use-token"))
+    }
+
+    @Test
+    func roundTripsSocialBinding() throws {
+        let attestation = sample(binding: .social(rawNonce: "raw-nonce-xyz"))
+        let encoded = try DeviceAttestationEncoder.encodeHeaderValue(attestation)
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
+        #expect(decoded == attestation)
+        #expect(decoded.binding == .social(rawNonce: "raw-nonce-xyz"))
     }
 
     @Test

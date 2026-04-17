@@ -5,6 +5,18 @@ import Foundation
 /// `AuthConfig`; an attacker-controlled `auth.example.com.evil.com` or
 /// `http://auth.example.com/...` must never produce a valid callback.
 public struct MagicLinkCallback: Sendable, Equatable {
+    /// Upper bound on the raw (percent-decoded) token UTF-8 byte count.
+    ///
+    /// Better-auth magic-link tokens are 32-byte base64url-no-pad values —
+    /// 43 characters. 256 bytes is ~6× that, generous enough to absorb
+    /// any reasonable server-side rotation (longer tokens, different
+    /// encoding) while still small enough to shut down obvious abuse
+    /// vectors: a crafted Universal Link with a multi-megabyte `token=`
+    /// payload would otherwise be decoded and then echoed back to the
+    /// server in the verify request URL. We fail fast at the callback
+    /// boundary instead of letting `URLComponents` build a giant URL.
+    public static let maxTokenBytes = 256
+
     public let token: String
 
     public init(
@@ -55,6 +67,13 @@ public struct MagicLinkCallback: Sendable, Equatable {
         let disallowed = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
         if raw.unicodeScalars.contains(where: disallowed.contains) {
             throw AuthError.invalidMagicLink("token contains control characters")
+        }
+        // Length cap. Measured in UTF-8 bytes (not Character count) so
+        // multi-byte scalars cannot bypass the limit.
+        if raw.utf8.count > Self.maxTokenBytes {
+            throw AuthError.invalidMagicLink(
+                "token exceeds \(Self.maxTokenBytes) bytes (got \(raw.utf8.count))",
+            )
         }
         self.token = raw
     }

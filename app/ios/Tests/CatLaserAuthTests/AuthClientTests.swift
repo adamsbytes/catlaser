@@ -34,6 +34,7 @@ struct AuthClientTests {
         let session = try await client.exchangeSocial(
             provider: .apple,
             idToken: SocialIDToken(token: "id.token", rawNonce: "raw", accessToken: nil),
+            attestationHeader: "ATTEST",
         )
 
         #expect(session.bearerToken == "bearer-xyz")
@@ -47,6 +48,7 @@ struct AuthClientTests {
         #expect(request?.method == "POST")
         #expect(request?.headers["Content-Type"] == "application/json")
         #expect(request?.headers["Accept"] == "application/json")
+        #expect(request?.header(DeviceAttestationEncoder.headerName) == "ATTEST")
         let body = try #require(request?.body)
         let bodyString = String(data: body, encoding: .utf8)
         #expect(bodyString == "{\"idToken\":{\"nonce\":\"raw\",\"token\":\"id.token\"},\"provider\":\"apple\"}")
@@ -64,6 +66,7 @@ struct AuthClientTests {
         let session = try await client.exchangeSocial(
             provider: .google,
             idToken: SocialIDToken(token: "g.id.token", rawNonce: nil, accessToken: "g.access"),
+            attestationHeader: "GHDR",
         )
 
         #expect(session.bearerToken == "gbearer")
@@ -71,13 +74,53 @@ struct AuthClientTests {
         #expect(session.user.name == "Bob")
         #expect(session.provider == .google)
 
-        let body = try #require(await mock.lastRequest()?.body)
+        let req = try #require(await mock.lastRequest())
+        #expect(req.header(DeviceAttestationEncoder.headerName) == "GHDR")
+        let body = try #require(req.body)
         let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         let idToken = parsed?["idToken"] as? [String: Any]
         #expect(parsed?["provider"] as? String == "google")
         #expect(idToken?["token"] as? String == "g.id.token")
         #expect(idToken?["accessToken"] as? String == "g.access")
         #expect(idToken?["nonce"] == nil)
+    }
+
+    @Test
+    func exchangeSocialSendsAttestationHeader() async throws {
+        // Social sign-in carries the same v3 device attestation header as
+        // magic-link does. Without it, a stolen provider ID token could be
+        // exchanged from a different device. Assert the exact header name
+        // matches the encoder's configured header key (no duplication, no
+        // rename drift) and the value is preserved byte-for-byte.
+        let (client, mock) = try makeClient(
+            outcomes: [.response(.json(["user": ["id": "u"]], token: "b"))],
+        )
+        _ = try await client.exchangeSocial(
+            provider: .apple,
+            idToken: SocialIDToken(token: "t", rawNonce: "n"),
+            attestationHeader: "the-exact-header-value",
+        )
+        let req = try #require(await mock.lastRequest())
+        #expect(DeviceAttestationEncoder.headerName == "x-device-attestation")
+        #expect(req.header(DeviceAttestationEncoder.headerName) == "the-exact-header-value")
+    }
+
+    @Test
+    func exchangeSocialRejectsEmptyAttestationHeader() async throws {
+        let (client, mock) = try makeClient(outcomes: [])
+        do {
+            _ = try await client.exchangeSocial(
+                provider: .apple,
+                idToken: SocialIDToken(token: "t", rawNonce: "n"),
+                attestationHeader: "",
+            )
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.contains("empty"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await mock.sendCount() == 0)
     }
 
     @Test
@@ -90,6 +133,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "t", rawNonce: "n", accessToken: nil),
+                attestationHeader: "h",
             )
         }
     }
@@ -103,6 +147,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "t", rawNonce: "n"),
+                attestationHeader: "h",
             )
         }
     }
@@ -119,6 +164,7 @@ struct AuthClientTests {
         let session = try await client.exchangeSocial(
             provider: .apple,
             idToken: SocialIDToken(token: "t", rawNonce: "n"),
+            attestationHeader: "h",
         )
         #expect(session.bearerToken == "hdr-token")
     }
@@ -135,6 +181,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "t", rawNonce: "n"),
+                attestationHeader: "h",
             )
             Issue.record("expected malformedResponse")
         } catch let error as AuthError {
@@ -152,6 +199,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "   ", rawNonce: "n"),
+                attestationHeader: "h",
             )
         }
         #expect(await mock.sendCount() == 0)
@@ -167,6 +215,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "t", rawNonce: "n"),
+                attestationHeader: "h",
             )
             Issue.record("expected error")
         } catch let AuthError.credentialInvalid(message) {
@@ -184,6 +233,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .google,
                 idToken: SocialIDToken(token: "t"),
+                attestationHeader: "h",
             )
             Issue.record("expected error")
         } catch let AuthError.credentialInvalid(message) {
@@ -203,6 +253,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "t", rawNonce: "n"),
+                attestationHeader: "h",
             )
             Issue.record("expected error")
         } catch let AuthError.serverError(status, message) {
@@ -221,6 +272,7 @@ struct AuthClientTests {
             _ = try await client.exchangeSocial(
                 provider: .apple,
                 idToken: SocialIDToken(token: "t", rawNonce: "n"),
+                attestationHeader: "h",
             )
         }
     }
@@ -277,6 +329,7 @@ struct AuthClientTests {
         let session = try await client.exchangeSocial(
             provider: .apple,
             idToken: SocialIDToken(token: "id", rawNonce: "n"),
+            attestationHeader: "h",
         )
         #expect(session.bearerToken == "header-bearer", "header value takes precedence per bearer plugin contract")
         #expect(session.user.id == "u-real")
@@ -295,6 +348,7 @@ struct AuthClientTests {
         _ = try await client.exchangeSocial(
             provider: .apple,
             idToken: SocialIDToken(token: "A", rawNonce: "B", accessToken: "C"),
+            attestationHeader: "h",
         )
         let body = try #require(await mock.lastRequest()?.body)
         let bodyString = String(data: body, encoding: .utf8)

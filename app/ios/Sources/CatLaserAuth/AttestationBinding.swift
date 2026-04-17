@@ -8,7 +8,7 @@ import Foundation
 /// pinning hook). Binding each signature to a context-specific value
 /// collapses that window to a single request.
 ///
-/// Two variants, one per auth step:
+/// Three variants, one per auth step:
 ///
 /// * `.request(timestamp:)` — placed on the outbound `requestMagicLink`
 ///   call. Timestamp is Unix seconds at the moment the attestation is
@@ -22,8 +22,19 @@ import Foundation
 ///   a different token. Request and verify signatures are disjoint by
 ///   construction even when every other input is identical.
 ///
+/// * `.social(rawNonce:)` — placed on the `exchangeSocial` call for
+///   Apple / Google ID-token sign-in. The raw nonce is client-generated
+///   per sign-in and also echoed in the provider ID token's `nonce`
+///   claim (hashed for Apple, verbatim for Google); server compares the
+///   claim against the `bnd` payload and the request-body `idToken.nonce`
+///   for a three-way match. Binding to the nonce means a captured
+///   attestation for a spent nonce can never satisfy a fresh sign-in,
+///   and a captured (idToken, nonce, attestation) triple cannot be
+///   replayed from a different device because the SE private key never
+///   leaves the device that signed the nonce in the first place.
+///
 /// Wire format: the binding renders to a tagged UTF-8 string
-/// (`"req:<ts>"` or `"ver:<token>"`) that is both:
+/// (`"req:<ts>"`, `"ver:<token>"`, or `"sis:<rawNonce>"`) that is both:
 ///
 /// 1. Placed on the wire under the `bnd` key of the attestation payload.
 /// 2. Appended to the 32-byte `fph` hash and fed as the ECDSA message —
@@ -31,16 +42,18 @@ import Foundation
 ///
 /// The tagging prevents cross-context confusion: a server that strips the
 /// prefix before parsing would still refuse to accept a `ver:` signature
-/// as a `req:` input, because the raw signed bytes differ in their first
-/// four characters.
+/// as a `req:` input (or a `sis:` signature as either), because the raw
+/// signed bytes differ in their first four characters.
 public enum AttestationBinding: Sendable, Equatable {
     case request(timestamp: Int64)
     case verify(token: String)
+    case social(rawNonce: String)
 
-    /// Upper bound on the UTF-8 size of `wireBytes`. Magic-link tokens are
-    /// small (tens of bytes); this bound exists so a malformed caller
-    /// cannot inflate the attestation header. Enforced by
-    /// `DeviceAttestationEncoder` before placing the binding on the wire.
+    /// Upper bound on the UTF-8 size of `wireBytes`. Magic-link tokens and
+    /// raw nonces are small (tens of bytes); this bound exists so a
+    /// malformed caller cannot inflate the attestation header. Enforced
+    /// by `DeviceAttestationEncoder` before placing the binding on the
+    /// wire.
     public static let maxWireBytes = 1024
 
     /// Canonical UTF-8 encoding placed on the wire under `bnd` and mixed
@@ -49,6 +62,7 @@ public enum AttestationBinding: Sendable, Equatable {
         switch self {
         case let .request(timestamp): "req:\(timestamp)"
         case let .verify(token): "ver:\(token)"
+        case let .social(rawNonce): "sis:\(rawNonce)"
         }
     }
 
@@ -61,7 +75,7 @@ public enum AttestationBinding: Sendable, Equatable {
     ///
     /// Tolerates nothing: unknown tag, empty payload, leading-zero /
     /// signed / non-numeric timestamps, and control characters in the
-    /// token all reject.
+    /// token or nonce all reject.
     public static func decode(wireValue: String) throws(AuthError) -> AttestationBinding {
         guard wireValue.utf8.count <= maxWireBytes else {
             throw .attestationFailed("bnd exceeds \(maxWireBytes) bytes (got \(wireValue.utf8.count))")
@@ -82,7 +96,17 @@ public enum AttestationBinding: Sendable, Equatable {
             }
             return .verify(token: token)
         }
-        throw .attestationFailed("bnd has no recognised tag (expected 'req:' or 'ver:')")
+        if let rawNonce = wireValue.prefixStrippedIfMatches("sis:") {
+            guard !rawNonce.isEmpty else {
+                throw .attestationFailed("bnd social raw nonce is empty")
+            }
+            let disallowed = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+            if rawNonce.unicodeScalars.contains(where: disallowed.contains) {
+                throw .attestationFailed("bnd social raw nonce contains control characters")
+            }
+            return .social(rawNonce: rawNonce)
+        }
+        throw .attestationFailed("bnd has no recognised tag (expected 'req:', 'ver:', or 'sis:')")
     }
 }
 

@@ -35,13 +35,27 @@ public struct AuthClient: Sendable {
         self.decoder = decoder
     }
 
+    /// Exchange a provider-issued ID token for a bearer session. The
+    /// `attestationHeader` binds the exchange to the SE key that generated
+    /// the sign-in nonce: the attestation's `bnd` encodes `"sis:<rawNonce>"`
+    /// and the server cross-references this against the `idToken.nonce`
+    /// field in the request body and the `nonce` claim in the signed ID
+    /// token. A captured `(idToken, nonce, attestation)` triple cannot be
+    /// replayed from a different device — the SE private key never
+    /// leaves the device that minted the signature — and cannot be
+    /// replayed on the same device either, because the nonce is
+    /// single-use at the server.
     public func exchangeSocial(
         provider: SocialProvider,
         idToken: SocialIDToken,
+        attestationHeader: String,
     ) async throws -> AuthSession {
         let trimmedToken = idToken.token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedToken.isEmpty else {
             throw AuthError.missingIDToken
+        }
+        guard !attestationHeader.isEmpty else {
+            throw AuthError.attestationFailed("empty attestation header")
         }
         let payload = SocialSignInRequest(
             provider: provider,
@@ -63,6 +77,7 @@ public struct AuthClient: Sendable {
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(attestationHeader, forHTTPHeaderField: DeviceAttestationEncoder.headerName)
 
         let response = try await http.send(request)
 

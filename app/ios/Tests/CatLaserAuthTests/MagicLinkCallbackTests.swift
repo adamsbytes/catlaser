@@ -156,12 +156,50 @@ struct MagicLinkCallbackTests {
     }
 
     @Test
-    func acceptsVeryLongLegitimateToken() throws {
+    func acceptsTokenAtExactCap() throws {
+        // The cap is an inclusive upper bound — a token of exactly
+        // `maxTokenBytes` is legitimate and must round-trip cleanly.
+        // Better-auth tokens are nowhere near this size in practice; we
+        // keep the ceiling generous to avoid false rejections from any
+        // future server-side token-format change.
         let config = try makeConfig()
-        let token = String(repeating: "A", count: 512)
+        let token = String(repeating: "A", count: MagicLinkCallback.maxTokenBytes)
         let url = URL(string: "https://link.catlaser.example/app/magic-link?token=\(token)")!
         let callback = try MagicLinkCallback(url: url, config: config)
         #expect(callback.token == token)
+        #expect(callback.token.utf8.count == MagicLinkCallback.maxTokenBytes)
+    }
+
+    @Test
+    func rejectsOversizedToken() throws {
+        // One byte over the cap must fail. Without this bound a crafted
+        // Universal Link with a multi-MB `token=` payload would be
+        // decoded, threaded through `URLComponents`, and echoed into
+        // the verify request — needless waste and an amplification
+        // vector for the server.
+        let config = try makeConfig()
+        let token = String(repeating: "A", count: MagicLinkCallback.maxTokenBytes + 1)
+        let url = URL(string: "https://link.catlaser.example/app/magic-link?token=\(token)")!
+        expectInvalidMagicLink(url: url, config: config, matching: "exceeds")
+    }
+
+    @Test
+    func rejectsMultibyteTokenOversByUtf8Count() throws {
+        // The cap is measured in UTF-8 bytes, not Swift Character count.
+        // A string of fewer Characters whose UTF-8 serialisation exceeds
+        // the cap must still be rejected so multi-byte scalars cannot
+        // sneak a larger payload through a character-count check.
+        let config = try makeConfig()
+        // Each of these is 3 UTF-8 bytes ("あ" = E3 81 82). 86 copies
+        // encode to 258 bytes — over the 256-byte cap.
+        let raw = String(repeating: "\u{3042}", count: 86)
+        #expect(raw.count < MagicLinkCallback.maxTokenBytes,
+                "precondition: character count must look 'small' to fool a naive check")
+        #expect(raw.utf8.count > MagicLinkCallback.maxTokenBytes,
+                "precondition: UTF-8 byte count must exceed the cap")
+        let encoded = try #require(raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed))
+        let url = URL(string: "https://link.catlaser.example/app/magic-link?token=\(encoded)")!
+        expectInvalidMagicLink(url: url, config: config, matching: "exceeds")
     }
 
     @Test

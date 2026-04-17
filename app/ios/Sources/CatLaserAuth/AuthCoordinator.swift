@@ -1,6 +1,22 @@
 import Foundation
 
 public actor AuthCoordinator {
+    /// Earliest plausible Unix-seconds value for a request-time binding.
+    /// 2020-01-01 UTC — predates every iPhone the app supports, and well
+    /// before this product existed. A device reporting a timestamp below
+    /// this has a broken clock; emitting `req:<bogus>` would only serve
+    /// to push the server's skew check off the near-now window, so the
+    /// coordinator refuses to build an attestation at all.
+    public static let minPlausibleRequestTimestamp: Int64 = 1_577_836_800
+
+    /// Latest plausible Unix-seconds value for a request-time binding.
+    /// 2100-01-01 UTC — more than seven decades out. A device reporting
+    /// a timestamp beyond this has a deliberately or accidentally
+    /// forward-set clock; signing for the far future lets an attacker
+    /// who exfiltrates the header replay it indefinitely as the real
+    /// clock catches up, which defeats the ~60s skew defence. Refuse.
+    public static let maxPlausibleRequestTimestamp: Int64 = 4_102_444_800
+
     private let client: AuthClient
     private let store: any BearerTokenStore
     private let nonceGenerator: NonceGenerator
@@ -50,9 +66,20 @@ public actor AuthCoordinator {
         try await store.load()
     }
 
+    /// Apple sign-in. The flow commits a SHA-256-hashed nonce in the
+    /// authorization request, receives an ID token whose `nonce` claim
+    /// must match that hash, and posts the raw nonce to the server so it
+    /// can re-hash and re-verify. A SE-backed attestation binds the
+    /// token exchange to the device: its `bnd` is `"sis:<rawNonce>"` and
+    /// the signed ECDSA message spans `fph_raw || bnd_utf8`. A captured
+    /// attestation cannot be replayed — the server treats the nonce as
+    /// single-use and the SE private key never leaves the device.
     public func signInWithApple(context: ProviderPresentationContext) async throws -> AuthSession {
         guard let provider = appleProvider else {
             throw AuthError.providerUnavailable("Apple provider not configured")
+        }
+        guard let attestationProvider else {
+            throw AuthError.providerUnavailable("Attestation provider not configured")
         }
         let nonce: Nonce
         do {
@@ -66,14 +93,30 @@ public actor AuthCoordinator {
             rawNonce: nonce.raw,
             accessToken: providerToken.accessToken,
         )
-        let session = try await client.exchangeSocial(provider: .apple, idToken: idToken)
+        let header = try await attestationProvider.currentAttestationHeader(
+            binding: .social(rawNonce: nonce.raw),
+        )
+        let session = try await client.exchangeSocial(
+            provider: .apple,
+            idToken: idToken,
+            attestationHeader: header,
+        )
         try await store.save(session)
         return session
     }
 
+    /// Google sign-in. The Authorization Code + PKCE flow pre-commits a
+    /// raw nonce (echoed verbatim in the ID token's `nonce` claim), and
+    /// the subsequent token exchange carries a SE-backed attestation
+    /// whose `bnd` is `"sis:<rawNonce>"`. Server-side binding + single-use
+    /// nonce handling make both replay-from-elsewhere and
+    /// replay-on-same-device structurally impossible.
     public func signInWithGoogle(context: ProviderPresentationContext) async throws -> AuthSession {
         guard let provider = googleProvider else {
             throw AuthError.providerUnavailable("Google provider not configured")
+        }
+        guard let attestationProvider else {
+            throw AuthError.providerUnavailable("Attestation provider not configured")
         }
         let nonce: Nonce
         do {
@@ -87,7 +130,14 @@ public actor AuthCoordinator {
             rawNonce: nonce.raw,
             accessToken: providerToken.accessToken,
         )
-        let session = try await client.exchangeSocial(provider: .google, idToken: idToken)
+        let header = try await attestationProvider.currentAttestationHeader(
+            binding: .social(rawNonce: nonce.raw),
+        )
+        let session = try await client.exchangeSocial(
+            provider: .google,
+            idToken: idToken,
+            attestationHeader: header,
+        )
         try await store.save(session)
         return session
     }
@@ -103,8 +153,15 @@ public actor AuthCoordinator {
             throw AuthError.providerUnavailable("Magic link provider not configured")
         }
         let timestamp = Int64(clock().timeIntervalSince1970)
-        guard timestamp > 0 else {
-            throw AuthError.attestationFailed("system clock reports non-positive Unix seconds (\(timestamp))")
+        guard timestamp >= AuthCoordinator.minPlausibleRequestTimestamp,
+              timestamp <= AuthCoordinator.maxPlausibleRequestTimestamp
+        else {
+            throw AuthError.attestationFailed(
+                "system clock reports an implausible Unix-seconds value (\(timestamp));"
+                    + " expected ["
+                    + "\(AuthCoordinator.minPlausibleRequestTimestamp), "
+                    + "\(AuthCoordinator.maxPlausibleRequestTimestamp)]",
+            )
         }
         let header = try await attestationProvider.currentAttestationHeader(
             binding: .request(timestamp: timestamp),

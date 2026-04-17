@@ -93,6 +93,41 @@ private func makeConfig() throws -> AuthConfig {
     )
 }
 
+private func makeSocialFingerprint() -> DeviceFingerprint {
+    DeviceFingerprint(
+        platform: "ios",
+        model: "iPhone15,4",
+        systemName: "iOS",
+        osVersion: "17.4",
+        locale: "en_US",
+        timezone: "UTC",
+        appVersion: "1.0.0",
+        appBuild: "1",
+        bundleID: "com.catlaser.app",
+        installID: "social-install",
+    )
+}
+
+private func makeAttestationProvider(
+    identity: any DeviceIdentityStoring,
+) async throws -> RecordingAttestationProvider {
+    let installID = try await identity.installID()
+    var fingerprint = makeSocialFingerprint()
+    fingerprint = DeviceFingerprint(
+        platform: fingerprint.platform,
+        model: fingerprint.model,
+        systemName: fingerprint.systemName,
+        osVersion: fingerprint.osVersion,
+        locale: fingerprint.locale,
+        timezone: fingerprint.timezone,
+        appVersion: fingerprint.appVersion,
+        appBuild: fingerprint.appBuild,
+        bundleID: fingerprint.bundleID,
+        installID: installID,
+    )
+    return RecordingAttestationProvider(fingerprint: fingerprint, identity: identity)
+}
+
 @Suite("AuthCoordinator")
 struct AuthCoordinatorTests {
     @Test
@@ -107,6 +142,8 @@ struct AuthCoordinatorTests {
         )
         let applied = ProviderIDToken(token: "apple-idt", rawNonce: nil, accessToken: nil)
         let apple = MockAppleProvider(outcomes: [.token(applied)])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
@@ -114,6 +151,7 @@ struct AuthCoordinatorTests {
             nonceGenerator: NonceGenerator(),
             appleProvider: apple,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
 
         let session = try await coord.signInWithApple(context: makeContext())
@@ -139,6 +177,76 @@ struct AuthCoordinatorTests {
     }
 
     @Test
+    func appleSignInSendsAttestationHeaderBoundToRawNonce() async throws {
+        // Social sign-in carries a v3 device attestation whose `bnd`
+        // encodes `"sis:<rawNonce>"`. Verify the header is on the wire,
+        // its signed message ties to the same raw nonce we post in the
+        // request body, and the cryptographic pieces (fph/pk) were
+        // produced by the SE identity we handed the provider.
+        let http = MockHTTPClient(outcomes: [
+            .response(.json(["user": ["id": "u"]], token: "b")),
+        ])
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        let apple = MockAppleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let coord = AuthCoordinator(
+            client: client,
+            store: InMemoryBearerTokenStore(),
+            appleProvider: apple,
+            googleProvider: nil,
+            attestationProvider: attestation,
+        )
+
+        _ = try await coord.signInWithApple(context: makeContext())
+
+        let req = try #require(await http.lastRequest())
+        let header = try #require(req.header(DeviceAttestationEncoder.headerName))
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        let body = try #require(req.body)
+        let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let idToken = parsed?["idToken"] as? [String: Any]
+        let rawNonceInBody = try #require(idToken?["nonce"] as? String)
+        #expect(decoded.binding == .social(rawNonce: rawNonceInBody),
+                "bnd must bind the attestation to the raw nonce echoed in the request body")
+        #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
+        #expect(decoded.fingerprintHash.count == 32)
+    }
+
+    @Test
+    func appleSignInRequiresAttestationProvider() async throws {
+        // Without an attestation provider the coordinator refuses to
+        // kick off social sign-in at all — no network call, no key
+        // attempt, no state mutation. Mirrors the magic-link contract so
+        // every authenticated path carries SE-bound device proof.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let apple = MockAppleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: apple,
+            googleProvider: nil,
+            attestationProvider: nil,
+        )
+        do {
+            _ = try await coord.signInWithApple(context: makeContext())
+            Issue.record("expected providerUnavailable")
+        } catch let AuthError.providerUnavailable(msg) {
+            #expect(msg.lowercased().contains("attestation"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil)
+    }
+
+    @Test
     func googleSignInSuccess() async throws {
         let http = MockHTTPClient(outcomes: [
             .response(.json(["user": ["id": "g-user"]], token: "bearer-g")),
@@ -150,12 +258,15 @@ struct AuthCoordinatorTests {
         )
         let token = ProviderIDToken(token: "google-idt", rawNonce: nil, accessToken: "atk")
         let google = MockGoogleProvider(outcomes: [.token(token)])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: google,
+            attestationProvider: attestation,
         )
 
         let session = try await coord.signInWithGoogle(context: makeContext())
@@ -177,15 +288,75 @@ struct AuthCoordinatorTests {
     }
 
     @Test
+    func googleSignInSendsAttestationHeaderBoundToRawNonce() async throws {
+        let http = MockHTTPClient(outcomes: [
+            .response(.json(["user": ["id": "u"]], token: "b")),
+        ])
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        let google = MockGoogleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let coord = AuthCoordinator(
+            client: client,
+            store: InMemoryBearerTokenStore(),
+            appleProvider: nil,
+            googleProvider: google,
+            attestationProvider: attestation,
+        )
+
+        _ = try await coord.signInWithGoogle(context: makeContext())
+
+        let req = try #require(await http.lastRequest())
+        let header = try #require(req.header(DeviceAttestationEncoder.headerName))
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        let rawNonceSent = try #require((await google.receivedNonces).first)
+        #expect(decoded.binding == .social(rawNonce: rawNonceSent),
+                "bnd must bind the attestation to the raw nonce sent to Google")
+        #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
+    }
+
+    @Test
+    func googleSignInRequiresAttestationProvider() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let google = MockGoogleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: google,
+            attestationProvider: nil,
+        )
+        do {
+            _ = try await coord.signInWithGoogle(context: makeContext())
+            Issue.record("expected providerUnavailable")
+        } catch let AuthError.providerUnavailable(msg) {
+            #expect(msg.lowercased().contains("attestation"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil)
+    }
+
+    @Test
     func appleMissingProviderThrows() async throws {
         let http = MockHTTPClient(outcomes: [])
         let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
         do {
             _ = try await coord.signInWithApple(context: makeContext())
@@ -201,12 +372,15 @@ struct AuthCoordinatorTests {
     func googleMissingProviderThrows() async throws {
         let http = MockHTTPClient(outcomes: [])
         let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
         do {
             _ = try await coord.signInWithGoogle(context: makeContext())
@@ -223,12 +397,15 @@ struct AuthCoordinatorTests {
         let http = MockHTTPClient(outcomes: [])
         let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
         let apple = MockAppleProvider(outcomes: [.failure(.cancelled)])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: apple,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
 
         await #expect(throws: AuthError.cancelled) {
@@ -243,12 +420,15 @@ struct AuthCoordinatorTests {
         let http = MockHTTPClient(outcomes: [])
         let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
         let google = MockGoogleProvider(outcomes: [.failure(.providerInternal("GID exploded"))])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: google,
+            attestationProvider: attestation,
         )
         do {
             _ = try await coord.signInWithGoogle(context: makeContext())
@@ -269,12 +449,15 @@ struct AuthCoordinatorTests {
         ])
         let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
         let apple = MockAppleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: apple,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
         do {
             _ = try await coord.signInWithApple(context: makeContext())
@@ -384,12 +567,15 @@ struct AuthCoordinatorTests {
             .token(ProviderIDToken(token: "idt1", rawNonce: nil, accessToken: nil)),
             .token(ProviderIDToken(token: "idt2", rawNonce: nil, accessToken: nil)),
         ])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: google,
+            attestationProvider: attestation,
         )
         _ = try await coord.signInWithGoogle(context: makeContext())
         _ = try await coord.signInWithGoogle(context: makeContext())
@@ -411,6 +597,16 @@ struct AuthCoordinatorTests {
         // server (Google echoes the raw value — no hashing on this path).
         #expect(nonces[0] == received[0])
         #expect(nonces[1] == received[1])
+
+        // Each attestation must bind to its own raw nonce — swapping a
+        // captured first-sign-in header into the second request would
+        // fail server-side because the bnd would not match the nonce in
+        // the body.
+        let bindings = await attestation.bindingCalls
+        #expect(bindings == [
+            .social(rawNonce: received[0]),
+            .social(rawNonce: received[1]),
+        ])
     }
 
     @Test
@@ -424,12 +620,15 @@ struct AuthCoordinatorTests {
             .token(ProviderIDToken(token: "idt1")),
             .token(ProviderIDToken(token: "idt2")),
         ])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: apple,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
         _ = try await coord.signInWithApple(context: makeContext())
         _ = try await coord.signInWithApple(context: makeContext())
@@ -447,5 +646,11 @@ struct AuthCoordinatorTests {
         }
         #expect(nonces.count == 2)
         #expect(nonces[0] != nonces[1])
+
+        let bindings = await attestation.bindingCalls
+        #expect(bindings == [
+            .social(rawNonce: nonces[0]),
+            .social(rawNonce: nonces[1]),
+        ])
     }
 }

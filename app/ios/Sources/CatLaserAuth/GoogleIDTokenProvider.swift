@@ -15,7 +15,33 @@ import AppKit
 /// that returned a different token for a different user would be caught
 /// locally before it ever reaches the wire).
 ///
-/// **Redirect URL policy** (strict). `redirectURL` must:
+/// ## Endpoints are hardcoded, not discovered
+///
+/// Google's OIDC authorization and token endpoints have been stable at the
+/// URLs below for well over a decade. Hardcoding them eliminates the
+/// discovery-document round-trip entirely — and with it the attack
+/// surface where a network adversary with a rogue system-trusted CA
+/// could rewrite `/.well-known/openid-configuration` to redirect the
+/// authorization endpoint to an attacker-controlled page that harvests
+/// Google credentials, or redirect the token endpoint to capture the
+/// PKCE verifier + authorization code. The endpoints are what the app
+/// ships with; no network response can move them.
+///
+/// ## Network path is pinned
+///
+/// AppAuth uses `NSURLSession` for the token-exchange POST. (The
+/// authorization step runs inside `ASWebAuthenticationSession`, which is
+/// Safari-process — we cannot pin it, but it is out-of-process and
+/// user-visible.) Callers supply a pinned `URLSession` at init time;
+/// `requestIDToken` installs it on the AppAuth-wide singleton via
+/// `OIDURLSessionProvider.setSession(_:)` before each authorization, so
+/// the token-exchange call is SPKI-pinned. Setting the session every
+/// call is idempotent and costs nothing; it also ensures no third-party
+/// dependency can silently swap the session out between our sign-ins.
+///
+/// ## Redirect URL policy
+///
+/// `redirectURL` must:
 ///
 /// 1. Have scheme `https`.
 /// 2. Specify a host present in `allowedRedirectHosts`.
@@ -36,9 +62,17 @@ import AppKit
 /// back to Safari and the flow cannot complete — which is the desired
 /// fail-closed behaviour.
 public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sendable {
-    /// Google's OIDC issuer. The discovery document at
-    /// `<issuer>/.well-known/openid-configuration` is fetched on first use
-    /// and supplies the authorization and token endpoints.
+    /// Google's OIDC authorization endpoint. Stable URL, shipped in the
+    /// app binary rather than discovered at runtime.
+    public static let authorizationEndpoint = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+
+    /// Google's OIDC token-exchange endpoint. Stable URL, shipped in the
+    /// app binary rather than discovered at runtime.
+    public static let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token")!
+
+    /// OIDC issuer identifier for Google. Used as the `issuer` field on
+    /// `OIDServiceConfiguration` for book-keeping; we do not fetch the
+    /// discovery document from it.
     public static let defaultIssuerURL = URL(string: "https://accounts.google.com")!
 
     /// The default scopes map one-to-one to the identity claims Better Auth's
@@ -47,7 +81,8 @@ public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sen
 
     private let clientID: String
     private let redirectURL: URL
-    private let issuerURL: URL
+    private let pinnedSession: URLSession
+    private let configuration: OIDServiceConfiguration
     private let scopes: [String]
     private let flowBox = FlowBox()
 
@@ -55,19 +90,21 @@ public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sen
         clientID: String,
         redirectURL: URL,
         allowedRedirectHosts: Set<String>,
-        issuerURL: URL = GoogleIDTokenProvider.defaultIssuerURL,
+        pinnedSession: URLSession,
         scopes: [String] = GoogleIDTokenProvider.defaultScopes,
     ) throws(AuthError) {
         try OAuthRedirectPolicy.validate(redirectURL, allowedHosts: allowedRedirectHosts)
-        guard let issuerScheme = issuerURL.scheme?.lowercased(), issuerScheme == "https" else {
-            throw .invalidRedirectURL("issuer URL must use https scheme (got \(issuerURL.scheme ?? "nil"))")
-        }
         guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw .providerInternal("Google client ID must not be empty")
         }
         self.clientID = clientID
         self.redirectURL = redirectURL
-        self.issuerURL = issuerURL
+        self.pinnedSession = pinnedSession
+        self.configuration = OIDServiceConfiguration(
+            authorizationEndpoint: GoogleIDTokenProvider.authorizationEndpoint,
+            tokenEndpoint: GoogleIDTokenProvider.tokenEndpoint,
+            issuer: GoogleIDTokenProvider.defaultIssuerURL,
+        )
         self.scopes = scopes
     }
 
@@ -89,12 +126,17 @@ public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sen
         guard !rawNonce.isEmpty else {
             throw AuthError.providerInternal("Google: rawNonce must not be empty")
         }
-        let config = try await discoverConfiguration()
+        // Route AppAuth's internal NSURLSession calls (most importantly
+        // the token-exchange POST) through the pinned session. Safe to
+        // call every time — OIDURLSessionProvider is a process-wide
+        // singleton and we re-assert our session before each flow so no
+        // other dependency can silently replace it between sign-ins.
+        OIDURLSessionProvider.setSession(pinnedSession)
         // Convenience init generates a fresh `state` and a consistent
         // PKCE verifier+challenge (S256) automatically. We only override the
         // nonce so the ID token comes back bound to our pre-committed value.
         let request = OIDAuthorizationRequest(
-            configuration: config,
+            configuration: configuration,
             clientId: clientID,
             scopes: scopes,
             redirectURL: redirectURL,
@@ -106,26 +148,6 @@ public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sen
         let token = try extract(from: state, rawNonce: rawNonce)
         try IDTokenClaims.verifyNonce(idToken: token.token, expectedNonce: rawNonce)
         return token
-    }
-
-    private func discoverConfiguration() async throws -> OIDServiceConfiguration {
-        try await withCheckedThrowingContinuation { continuation in
-            OIDAuthorizationService.discoverConfiguration(forIssuer: self.issuerURL) { config, error in
-                if let error {
-                    continuation.resume(throwing: AuthError.providerInternal(
-                        "Google discovery failed: \(error.localizedDescription)",
-                    ))
-                    return
-                }
-                guard let config else {
-                    continuation.resume(throwing: AuthError.providerInternal(
-                        "Google discovery returned no configuration",
-                    ))
-                    return
-                }
-                continuation.resume(returning: config)
-            }
-        }
     }
 
     #if canImport(UIKit) && !os(watchOS)
