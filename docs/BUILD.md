@@ -64,7 +64,7 @@
 
 [ ] App — iOS (SwiftUI, primary)
   - [X] Proto codegen (swift-protobuf from app.proto)
-  - [ ] Sign in with Apple + Google (AuthenticationServices + GoogleSignIn SDK, ID token exchanged for better-auth bearer)
+  - [X] Sign in with Apple + Google (AuthenticationServices + GoogleSignIn SDK, ID token exchanged for better-auth bearer)
   - [ ] Sign in with email magic link (Universal Links target, device fingerprint payload sent at request time)
   - [ ] Sign in screen
   - [ ] Live view (LiveKit iOS SDK, WebRTC)
