@@ -63,7 +63,7 @@
   - [X] CI: lint + test (Rust + Python) + release image builds
 
 [ ] Coordination Server (better-auth)
-  - [ ] better-auth base (Postgres schema, bearer plugin, trusted origins pinned to Universal Link host)
+  - [X] better-auth base (Postgres schema, bearer plugin, trusted origins pinned to Universal Link host)
   - [ ] Social providers (Apple + Google, nonce three-way match: body + ID token claim + attestation bnd)
   - [ ] Magic-link plugin (callbackURL allowlisted to Universal Link host — reject client-supplied hosts to block phishing-relay takeover)
   - [ ] Universal Link handler (inert HTML at universalLinkPath, distinct from /api/auth/magic-link/verify; AASA serving iOS bundle ID)

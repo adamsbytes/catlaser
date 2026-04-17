@@ -28,12 +28,11 @@
     "allowUnusedLabels": false,
     "forceConsistentCasingInFileNames": true,
     "erasableSyntaxOnly": true,
-    "isolatedDeclarations": true,
 
     "paths": {
       "~/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*", "test/**/*"],
+  "include": ["src/**/*", "test/**/*", "drizzle.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

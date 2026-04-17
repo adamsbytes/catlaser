@@ -539,7 +539,7 @@ export default defineConfig(
   },
 
   {
-    files: ['*.config.{js,ts,mjs}', 'eslint.config.js'],
+    files: ['*.config.{js,ts,mjs}', 'eslint.config.js', 'drizzle.config.ts'],
     rules: {
       'no-console': 'off',
       '@typescript-eslint/explicit-module-boundary-types': 'off',

@@ -10,17 +10,26 @@
     "lint": "prettier --write . && eslint . --cache",
     "lint:fix": "prettier --write . && eslint . --fix --cache",
     "typecheck": "tsc --noEmit",
-    "test": "bun run docker:up && bun test; CODE=$?; bun run docker:down; exit $CODE",
+    "test": "bun run docker:up && bun run db:migrate && bun test; CODE=$?; bun run docker:down; exit $CODE",
     "docker:up": "docker compose up -d --wait",
-    "docker:down": "docker compose down"
+    "docker:down": "docker compose down",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun run src/db/migrate.ts",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "auth:generate": "better-auth generate --config ./src/lib/auth.ts --output ./src/db/schema.ts --yes"
   },
   "dependencies": {
+    "better-auth": "^1.6.5",
+    "drizzle-orm": "^0.45.2",
     "pino": "^10.3.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@better-auth/cli": "^1.4.21",
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.3.12",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^10.2.0",
     "eslint-plugin-drizzle": "^0.2.3",
     "eslint-plugin-import-x": "^4.16.2",
