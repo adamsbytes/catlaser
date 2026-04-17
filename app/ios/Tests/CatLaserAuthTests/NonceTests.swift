@@ -95,4 +95,54 @@ struct NonceTests {
         #expect(nonce.raw == "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
         #expect(nonce.hashed.count == 64)
     }
+
+    // MARK: - Platform CSPRNG (M2)
+
+    @Test
+    func systemRandomBytesReturnsRequestedLength() throws {
+        let bytes = try NonceGenerator.systemRandomBytes(32)
+        #expect(bytes.count == 32)
+    }
+
+    @Test
+    func systemRandomBytesReturnsEmptyForZero() throws {
+        let bytes = try NonceGenerator.systemRandomBytes(0)
+        #expect(bytes.isEmpty)
+    }
+
+    @Test
+    func systemRandomBytesDoesNotReturnAllZeros() throws {
+        // 32 zero bytes has ~2^-256 probability from a CSPRNG. If this test
+        // fails deterministically, the RNG is unseeded or broken, not unlucky.
+        let bytes = try NonceGenerator.systemRandomBytes(32)
+        #expect(bytes.contains { $0 != 0 }, "CSPRNG returned 32 zero bytes — RNG is broken")
+    }
+
+    @Test
+    func systemRandomBytesDiffersAcrossCalls() throws {
+        let a = try NonceGenerator.systemRandomBytes(32)
+        let b = try NonceGenerator.systemRandomBytes(32)
+        #expect(a != b, "two consecutive 32-byte draws from a CSPRNG collided — RNG is broken")
+    }
+
+    @Test
+    func systemRandomBytesHasReasonableEntropy() throws {
+        // A single 4096-byte draw from a CSPRNG should cover a large fraction
+        // of the byte value space. Not a rigorous test — a real entropy test
+        // would use dieharder — but catches an RNG that's stuck on a small
+        // cycle or returning repeated patterns.
+        let bytes = try NonceGenerator.systemRandomBytes(4096)
+        let unique = Set(bytes)
+        #expect(unique.count >= 200, "only \(unique.count) distinct byte values in 4096 draws — RNG is degenerate")
+    }
+
+    @Test
+    func defaultInitUsesSystemRandomBytes() throws {
+        // Two sequential `make()` calls on a default-initialized generator
+        // must use the system CSPRNG, so they must not collide.
+        let generator = NonceGenerator()
+        let a = try generator.make()
+        let b = try generator.make()
+        #expect(a.raw != b.raw)
+    }
 }

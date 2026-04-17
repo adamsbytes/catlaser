@@ -4,9 +4,12 @@ import Security
 
 /// Keychain-backed install ID. Stored with
 /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and
-/// `kSecAttrSynchronizable = false` — the ID stays on this device, never
-/// syncs via iCloud Keychain, and survives app reinstall (by Apple's default
-/// behaviour) which is the correct trade-off for a fingerprint seed.
+/// `kSecAttrSynchronizable = false` — the ID stays on this device and never
+/// syncs via iCloud Keychain. On iOS 10.3+ the keychain item is deleted when
+/// the app is uninstalled, which is acceptable: the fingerprint seed
+/// regenerates on reinstall, producing a device-mismatch against any
+/// in-flight magic-link token issued to the previous install — exactly what
+/// we want.
 public struct KeychainInstallIDStore: InstallIDStoring {
     public let service: String
     public let account: String
@@ -103,7 +106,6 @@ public struct KeychainInstallIDStore: InstallIDStoring {
             for (key, value) in payload {
                 attributes[key] = value
             }
-            attributes[kSecAttrSynchronizable as String] = kCFBooleanFalse
             let addStatus = SecItemAdd(attributes as CFDictionary, nil)
             switch addStatus {
             case errSecSuccess, errSecDuplicateItem:
@@ -116,11 +118,18 @@ public struct KeychainInstallIDStore: InstallIDStoring {
         }
     }
 
+    /// Base query for all read/update/add/delete operations. Explicitly
+    /// scoped to non-synchronizing items: omitting `kSecAttrSynchronizable`
+    /// causes matches against both synced and non-synced items, which would
+    /// let an iCloud-Keychain-shared install ID silently defeat the
+    /// per-device fingerprint if one ever appeared in the keychain
+    /// (accidental write, restored backup, misconfigured access group).
     private func baseQuery() -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
         ]
         if let accessGroup {
             query[kSecAttrAccessGroup as String] = accessGroup

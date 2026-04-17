@@ -27,10 +27,19 @@ public protocol HTTPClient: Sendable {
     func send(_ request: URLRequest) async throws -> HTTPResponse
 }
 
+/// Thin async wrapper over `URLSession.data(for:)`.
+///
+/// The default initializer is intentionally absent. A production auth HTTP
+/// client MUST be built via `URLSessionHTTPClient.pinned(pinning:)`, which
+/// attaches a TLS-pinning delegate and an ephemeral (no-cache, no-cookie)
+/// session configuration. The `init(session:)` escape hatch exists only
+/// for tests that wire their own `URLSession` — tests that want to stub
+/// out the network entirely should use `MockHTTPClient` in the test
+/// target instead.
 public struct URLSessionHTTPClient: HTTPClient {
     private let session: URLSession
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession) {
         self.session = session
     }
 

@@ -82,6 +82,7 @@ private final class Counter: @unchecked Sendable {
 }
 
 #if canImport(Security) && canImport(Darwin)
+import Security
 
 @Suite("KeychainInstallIDStore")
 struct KeychainInstallIDStoreTests {
@@ -144,6 +145,118 @@ struct KeychainInstallIDStoreTests {
             Issue.record("unexpected error: \(error)")
         }
         try await store.reset()
+    }
+
+    // MARK: - H1: kSecAttrSynchronizable enforcement
+
+    @Test
+    func persistedItemIsNotSynchronizable() async throws {
+        // Security-critical: the install ID must never land in an iCloud-Keychain-
+        // synchronizing slot. If it does, every device paired to the user's iCloud
+        // account reads the same install ID, collapsing the per-device fingerprint
+        // defence against email-interception phishing.
+        let uuid = UUID().uuidString
+        let service = "com.catlaser.tests.install.\(uuid)"
+        let store = KeychainInstallIDStore(
+            service: service,
+            account: "install-id",
+            accessGroup: nil,
+            generator: { "unit-test-id" },
+        )
+        _ = try await store.currentID()
+        defer { Task { try? await store.reset() } }
+
+        // Query for synchronizable items only — must not see ours.
+        let syncQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: "install-id",
+            kSecAttrSynchronizable as String: kCFBooleanTrue as Any,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let syncStatus = SecItemCopyMatching(syncQuery as CFDictionary, &item)
+        #expect(syncStatus == errSecItemNotFound, "install ID was written with synchronizable=true — leaks across iCloud Keychain paired devices")
+
+        // Query explicitly for non-synchronizable items — must see ours.
+        let nonSyncQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: "install-id",
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var found: CFTypeRef?
+        let nonSyncStatus = SecItemCopyMatching(nonSyncQuery as CFDictionary, &found)
+        #expect(nonSyncStatus == errSecSuccess, "install ID must be findable under synchronizable=false")
+        if let data = found as? Data, let value = String(data: data, encoding: .utf8) {
+            #expect(value == "unit-test-id")
+        } else {
+            Issue.record("expected Data with UTF-8 content")
+        }
+    }
+
+    @Test
+    func ignoresPreExistingSynchronizableItemUnderSameServiceAndAccount() async throws {
+        // Attacker scenario: a previous build (or a buggy restore-from-backup)
+        // left a synchronizable item under the same (service, account). Our
+        // store must ignore it entirely — read must fall through to
+        // generation, and write must not silently update the sync item.
+        let uuid = UUID().uuidString
+        let service = "com.catlaser.tests.install.\(uuid)"
+        let account = "install-id"
+
+        // Inject a synchronizable value by hand.
+        let injected = "POISONED-SYNC-VALUE"
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanTrue as Any,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecValueData as String: Data(injected.utf8),
+        ]
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        // May fail in some test environments that don't permit synchronizable
+        // writes (no iCloud keychain entitlement). In that case the scenario
+        // we're defending against can't occur on this machine, and the test
+        // is vacuously satisfied — skip.
+        guard addStatus == errSecSuccess else { return }
+        defer {
+            let cleanup: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecAttrSynchronizable as String: kCFBooleanTrue as Any,
+            ]
+            _ = SecItemDelete(cleanup as CFDictionary)
+        }
+
+        let store = KeychainInstallIDStore(
+            service: service,
+            account: account,
+            accessGroup: nil,
+            generator: { "CORRECT-NONSYNC-VALUE" },
+        )
+        let read = try await store.currentID()
+        #expect(read == "CORRECT-NONSYNC-VALUE", "store must not return the synchronizable poisoned value")
+        #expect(read != injected)
+        try await store.reset()
+
+        // Poisoned sync item must still be intact — our delete must not have
+        // purged it (defence-in-depth: we don't touch items that aren't ours).
+        let verifyQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanTrue as Any,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+        ]
+        var leftover: CFTypeRef?
+        let verifyStatus = SecItemCopyMatching(verifyQuery as CFDictionary, &leftover)
+        #expect(verifyStatus == errSecSuccess, "non-synchronizable reset must not touch the synchronizable item")
     }
 }
 

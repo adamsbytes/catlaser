@@ -14,6 +14,15 @@ public enum AuthError: Error, Equatable, Sendable {
     case invalidEmail
     case invalidMagicLink(String?)
     case fingerprintCaptureFailed(String)
+    /// User declined biometric/passcode auth, auth returned false, or the
+    /// keychain read hit `errSecUserCanceled`/`errSecAuthFailed`. Carries
+    /// the underlying OSStatus where available so callers can distinguish
+    /// "user said no" (retryable) from "lockout" (not).
+    case biometricFailed(status: Int32)
+    /// The device has no enrolled biometrics AND no passcode, or
+    /// `SecAccessControlCreateWithFlags` refused to build the ACL.
+    /// Unrecoverable without user action in Settings.
+    case biometricUnavailable(String)
 
     public var isRetriable: Bool {
         switch self {

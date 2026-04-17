@@ -14,7 +14,7 @@ public struct AuthClient: Sendable {
 
     public init(
         config: AuthConfig,
-        http: any HTTPClient = URLSessionHTTPClient(),
+        http: any HTTPClient,
     ) {
         self.init(config: config, http: http, clock: { Date() })
     }
