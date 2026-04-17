@@ -10,7 +10,31 @@ import AppKit
 /// Google sign-in that runs the OIDC Authorization Code + PKCE flow with
 /// an explicit `nonce`. The raw nonce is sent in the authorization request
 /// and must be echoed back verbatim in the issued ID token's `nonce` claim;
-/// the server rechecks this on token exchange, closing the replay window.
+/// the server rechecks this on token exchange, and so does this client as
+/// defence in depth (a compromised in-app browser / hooked AppAuth session
+/// that returned a different token for a different user would be caught
+/// locally before it ever reaches the wire).
+///
+/// **Redirect URL policy** (strict). `redirectURL` must:
+///
+/// 1. Have scheme `https`.
+/// 2. Specify a host present in `allowedRedirectHosts`.
+/// 3. Specify no port.
+/// 4. Carry no userinfo.
+///
+/// Custom URL schemes (`com.example:/oauth`, `com.googleusercontent.apps.*`,
+/// app-specific reverse-DNS) are **rejected**. iOS custom-scheme routing
+/// has no ownership verification — any other installed app can claim the
+/// same scheme and intercept the OAuth response code. An HTTPS Universal
+/// Link restricted to an AASA-claimed domain makes interception impossible
+/// because Apple's secure domain-association step requires the app to
+/// prove bundle-ID ownership of the domain.
+///
+/// The server **must** host an `apple-app-site-association` file on each
+/// host listed in `allowedRedirectHosts` registering the OAuth callback
+/// path with this app's bundle identifier. Without that AASA, iOS falls
+/// back to Safari and the flow cannot complete — which is the desired
+/// fail-closed behaviour.
 public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sendable {
     /// Google's OIDC issuer. The discovery document at
     /// `<issuer>/.well-known/openid-configuration` is fetched on first use
@@ -30,9 +54,17 @@ public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sen
     public init(
         clientID: String,
         redirectURL: URL,
+        allowedRedirectHosts: Set<String>,
         issuerURL: URL = GoogleIDTokenProvider.defaultIssuerURL,
         scopes: [String] = GoogleIDTokenProvider.defaultScopes,
-    ) {
+    ) throws(AuthError) {
+        try OAuthRedirectPolicy.validate(redirectURL, allowedHosts: allowedRedirectHosts)
+        guard let issuerScheme = issuerURL.scheme?.lowercased(), issuerScheme == "https" else {
+            throw .invalidRedirectURL("issuer URL must use https scheme (got \(issuerURL.scheme ?? "nil"))")
+        }
+        guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw .providerInternal("Google client ID must not be empty")
+        }
         self.clientID = clientID
         self.redirectURL = redirectURL
         self.issuerURL = issuerURL
@@ -71,7 +103,9 @@ public final class GoogleIDTokenProvider: GoogleIDTokenProviding, @unchecked Sen
             additionalParameters: nil,
         )
         let state = try await present(request: request, context: context)
-        return try extract(from: state, rawNonce: rawNonce)
+        let token = try extract(from: state, rawNonce: rawNonce)
+        try IDTokenClaims.verifyNonce(idToken: token.token, expectedNonce: rawNonce)
+        return token
     }
 
     private func discoverConfiguration() async throws -> OIDServiceConfiguration {

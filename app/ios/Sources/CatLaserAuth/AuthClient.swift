@@ -79,23 +79,27 @@ public struct AuthClient: Sendable {
         }
     }
 
-    /// Request a magic-link email for the given address. The device fingerprint
-    /// header is stored by the server against the issued token so it can be
-    /// compared at link completion.
+    /// Request a magic-link email for the given address. The attestation
+    /// header is stored by the server against the issued token so it can
+    /// be compared at link completion. The callback URL (where the email
+    /// points) is derived from `AuthConfig.magicLinkCallbackURL` — a
+    /// Universal-Link-only path distinct from the API verify endpoint.
     public func requestMagicLink(
         email: String,
-        callbackURL: String?,
-        fingerprintHeader: String,
+        attestationHeader: String,
     ) async throws {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.isPlausibleEmail(trimmedEmail) else {
             throw AuthError.invalidEmail
         }
-        guard !fingerprintHeader.isEmpty else {
-            throw AuthError.fingerprintCaptureFailed("empty fingerprint header")
+        guard !attestationHeader.isEmpty else {
+            throw AuthError.attestationFailed("empty attestation header")
         }
 
-        let payload = MagicLinkRequestBody(email: trimmedEmail, callbackURL: callbackURL)
+        let payload = MagicLinkRequestBody(
+            email: trimmedEmail,
+            callbackURL: config.magicLinkCallbackURL.absoluteString,
+        )
         let body: Data
         do {
             body = try encoder.encode(payload)
@@ -108,7 +112,7 @@ public struct AuthClient: Sendable {
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(fingerprintHeader, forHTTPHeaderField: DeviceFingerprintEncoder.headerName)
+        request.setValue(attestationHeader, forHTTPHeaderField: DeviceAttestationEncoder.headerName)
 
         let response = try await http.send(request)
 
@@ -127,19 +131,21 @@ public struct AuthClient: Sendable {
         }
     }
 
-    /// Complete a magic-link sign-in. Sends the token together with the same
-    /// device fingerprint captured at request time; the server rejects with
-    /// 403 `DEVICE_MISMATCH` if they disagree.
+    /// Complete a magic-link sign-in. Sends the token together with a
+    /// fresh attestation whose `fph` and `pk` must byte-match the values
+    /// recorded at request time and whose `sig` must verify under the
+    /// same SE key. Server rejects with 403 `DEVICE_MISMATCH` if any of
+    /// those three conditions fail.
     public func completeMagicLink(
         token: String,
-        fingerprintHeader: String,
+        attestationHeader: String,
     ) async throws -> AuthSession {
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedToken.isEmpty else {
             throw AuthError.invalidMagicLink("empty token")
         }
-        guard !fingerprintHeader.isEmpty else {
-            throw AuthError.fingerprintCaptureFailed("empty fingerprint header")
+        guard !attestationHeader.isEmpty else {
+            throw AuthError.attestationFailed("empty attestation header")
         }
 
         guard var components = URLComponents(url: config.magicLinkVerifyURL, resolvingAgainstBaseURL: false) else {
@@ -156,7 +162,7 @@ public struct AuthClient: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(fingerprintHeader, forHTTPHeaderField: DeviceFingerprintEncoder.headerName)
+        request.setValue(attestationHeader, forHTTPHeaderField: DeviceAttestationEncoder.headerName)
 
         let response = try await http.send(request)
 

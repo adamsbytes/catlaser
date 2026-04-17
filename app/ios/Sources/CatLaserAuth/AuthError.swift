@@ -13,7 +13,21 @@ public enum AuthError: Error, Equatable, Sendable {
     case providerInternal(String)
     case invalidEmail
     case invalidMagicLink(String?)
-    case fingerprintCaptureFailed(String)
+    /// Failed to assemble the device attestation: canonical JSON encoding,
+    /// SHA-256 hashing, identity-store lookup, or SE signing failed.
+    case attestationFailed(String)
+    /// Hardware Secure Enclave is absent or refused key creation / signing.
+    /// Unrecoverable on this device without a repair; the app cannot sign in.
+    case secureEnclaveUnavailable(String)
+    /// A provider's configured redirect URL failed the strict validation
+    /// check (not https, host not in allowlist, etc.). Constructed at
+    /// provider-init time; never thrown from a runtime sign-in path.
+    case invalidRedirectURL(String)
+    /// The identity provider's returned ID token failed a client-side
+    /// sanity check (malformed JWT, nonce claim missing or mismatched).
+    /// The server also verifies these; this is defence in depth against a
+    /// compromised webview / hooked agent returning a tampered token.
+    case idTokenClaimMismatch(String)
     /// User declined biometric/passcode auth, auth returned false, or the
     /// keychain read hit `errSecUserCanceled`/`errSecAuthFailed`. Carries
     /// the underlying OSStatus where available so callers can distinguish

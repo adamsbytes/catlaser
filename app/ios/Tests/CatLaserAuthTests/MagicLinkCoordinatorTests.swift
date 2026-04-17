@@ -8,37 +8,54 @@ private func makeConfig() throws -> AuthConfig {
         baseURL: URL(string: "https://auth.catlaser.example")!,
         appleServiceID: "svc",
         googleClientID: "cid",
+        bundleID: "com.catlaser.app",
+        universalLinkHost: "link.catlaser.example",
+        universalLinkPath: "/app/magic-link",
+        oauthRedirectHosts: ["auth.catlaser.example"],
     )
 }
 
-/// Records every fingerprint-header request, and asserts that all headers
-/// match — the crux of the phishing defence is that request-time and
-/// completion-time headers are byte-identical.
-actor RecordingFingerprintProvider: DeviceFingerprintProviding {
+/// Records every header request and the fingerprint behind it so tests
+/// can assert that (a) the two attestations across the request/verify
+/// pair share the same `fph` and `pk`, and (b) the `sig` is a fresh value
+/// on each call (ECDSA is non-deterministic by design).
+actor RecordingAttestationProvider: DeviceAttestationProviding {
     let fingerprint: DeviceFingerprint
-    private(set) var headerCalls: [String] = []
-    private(set) var fingerprintCalls = 0
+    let identity: any DeviceIdentityStoring
 
-    init(fingerprint: DeviceFingerprint) {
+    private(set) var headerCalls: [String] = []
+    private(set) var attestationCalls: [DeviceAttestation] = []
+
+    init(fingerprint: DeviceFingerprint, identity: any DeviceIdentityStoring) {
         self.fingerprint = fingerprint
+        self.identity = identity
     }
 
     nonisolated func currentFingerprint() async throws -> DeviceFingerprint {
-        await recordFingerprintCall()
-        return fingerprint
+        fingerprint
     }
 
-    private func recordFingerprintCall() {
-        fingerprintCalls += 1
+    nonisolated func currentAttestation() async throws -> DeviceAttestation {
+        let attestation = try await DeviceAttestationBuilder.build(
+            fingerprint: fingerprint,
+            identity: identity,
+        )
+        await record(attestation)
+        return attestation
     }
 
-    nonisolated func currentFingerprintHeader() async throws -> String {
-        let header = try DeviceFingerprintEncoder.encodeHeaderValue(fingerprint)
-        await recordHeaderCall(header)
+    private func record(_ attestation: DeviceAttestation) {
+        attestationCalls.append(attestation)
+    }
+
+    nonisolated func currentAttestationHeader() async throws -> String {
+        let attestation = try await currentAttestation()
+        let header = try DeviceAttestationEncoder.encodeHeaderValue(attestation)
+        await recordHeader(header)
         return header
     }
 
-    private func recordHeaderCall(_ header: String) {
+    private func recordHeader(_ header: String) {
         headerCalls.append(header)
     }
 }
@@ -61,7 +78,7 @@ private func makeFingerprint(installID: String = "test-install") -> DeviceFinger
 @Suite("AuthCoordinator magic link")
 struct MagicLinkCoordinatorTests {
     @Test
-    func requestMagicLinkSendsFingerprintHeader() async throws {
+    func requestMagicLinkSendsAttestationHeader() async throws {
         let mock = MockHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 200, headers: [:], body: Data("{}".utf8))),
         ])
@@ -70,61 +87,40 @@ struct MagicLinkCoordinatorTests {
             http: mock,
             clock: { Date(timeIntervalSince1970: 1_700_000_000) },
         )
-        let fingerprint = makeFingerprint()
-        let provider = RecordingFingerprintProvider(fingerprint: fingerprint)
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let fingerprint = makeFingerprint(installID: installID)
+        let provider = RecordingAttestationProvider(fingerprint: fingerprint, identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
-            fingerprintProvider: provider,
-            magicLinkCallbackURL: "https://auth.catlaser.example/api/auth/magic-link/verify",
+            attestationProvider: provider,
         )
 
         try await coord.requestMagicLink(email: "cat@example.com")
 
         let req = try #require(await mock.lastRequest())
-        let header = req.header(DeviceFingerprintEncoder.headerName)
-        let expected = try DeviceFingerprintEncoder.encodeHeaderValue(fingerprint)
-        #expect(header == expected)
+        let header = try #require(req.header(DeviceAttestationEncoder.headerName))
         #expect(await provider.headerCalls.count == 1)
+        #expect(header == (await provider.headerCalls[0]))
         // No session persisted at request time (link hasn't been completed).
         #expect(try await store.load() == nil)
+
+        // Decode and sanity-check the header contents.
+        let attestation = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        #expect(attestation.version == DeviceAttestation.currentVersion)
+        #expect(attestation.fingerprintHash.count == 32)
+        #expect(attestation.publicKeySPKI == (try await identity.publicKeySPKI()))
     }
 
     @Test
-    func completeMagicLinkFromURLExchangesAndPersists() async throws {
-        let mock = MockHTTPClient(outcomes: [
-            .response(.json(["user": ["id": "u-ml", "email": "cat@example.com", "emailVerified": true]], token: "bearer-ml")),
-        ])
-        let client = AuthClient(
-            config: try makeConfig(),
-            http: mock,
-            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
-        )
-        let fingerprint = makeFingerprint()
-        let provider = RecordingFingerprintProvider(fingerprint: fingerprint)
-        let store = InMemoryBearerTokenStore()
-        let coord = AuthCoordinator(
-            client: client,
-            store: store,
-            fingerprintProvider: provider,
-        )
-        let url = URL(string: "https://auth.catlaser.example/api/auth/magic-link/verify?token=opaque123")!
-        let session = try await coord.completeMagicLink(url: url)
-
-        #expect(session.bearerToken == "bearer-ml")
-        #expect(session.provider == .magicLink)
-        #expect(session.user.id == "u-ml")
-        #expect(try await store.load() == session)
-
-        let req = try #require(await mock.lastRequest())
-        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/magic-link/verify?token=opaque123")
-        #expect(req.header(DeviceFingerprintEncoder.headerName)
-            == (try DeviceFingerprintEncoder.encodeHeaderValue(fingerprint)))
-    }
-
-    @Test
-    func requestAndCompleteUseIdenticalFingerprintHeader() async throws {
+    func requestAndCompletePairSharesFphAndPk() async throws {
+        // The crux of the phishing defence: `fph` (hash of the canonical
+        // fingerprint) and `pk` (public key) must be byte-identical on
+        // request and verify. `sig` differs each call — ECDSA is
+        // non-deterministic; server verifies each signature against the
+        // stable public key rather than byte-comparing signatures.
         let mock = MockHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 200, headers: [:], body: Data("{}".utf8))),
             .response(.json(["user": ["id": "u", "emailVerified": true]], token: "tok")),
@@ -134,28 +130,74 @@ struct MagicLinkCoordinatorTests {
             http: mock,
             clock: { Date(timeIntervalSince1970: 1_700_000_000) },
         )
-        let fingerprint = makeFingerprint()
-        let provider = RecordingFingerprintProvider(fingerprint: fingerprint)
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let fingerprint = makeFingerprint(installID: installID)
+        let provider = RecordingAttestationProvider(fingerprint: fingerprint, identity: identity)
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
-            fingerprintProvider: provider,
+            attestationProvider: provider,
         )
 
         try await coord.requestMagicLink(email: "cat@example.com")
-        _ = try await coord.completeMagicLink(url: URL(string: "https://auth.catlaser.example/api/auth/magic-link/verify?token=T")!)
+        _ = try await coord.completeMagicLink(url: URL(string: "https://link.catlaser.example/app/magic-link?token=T")!)
 
         let requests = await mock.requests()
         #expect(requests.count == 2)
-        let requestHeader = requests[0].header(DeviceFingerprintEncoder.headerName)
-        let completeHeader = requests[1].header(DeviceFingerprintEncoder.headerName)
-        #expect(requestHeader != nil)
-        #expect(requestHeader == completeHeader, "same device ⇒ identical fingerprint header")
+
+        let requestHeader = try #require(requests[0].header(DeviceAttestationEncoder.headerName))
+        let completeHeader = try #require(requests[1].header(DeviceAttestationEncoder.headerName))
+
+        let requestAttestation = try DeviceAttestationEncoder.decodeHeaderValue(requestHeader)
+        let completeAttestation = try DeviceAttestationEncoder.decodeHeaderValue(completeHeader)
+
+        #expect(requestAttestation.fingerprintHash == completeAttestation.fingerprintHash,
+                "same device + same fingerprint ⇒ identical fph")
+        #expect(requestAttestation.publicKeySPKI == completeAttestation.publicKeySPKI,
+                "same SE key ⇒ identical pk")
+        #expect(requestAttestation.signature != completeAttestation.signature,
+                "ECDSA is non-deterministic ⇒ fresh sig per call")
     }
 
     @Test
-    func missingFingerprintProviderBlocksRequest() async throws {
+    func completeMagicLinkFromURLExchangesAndPersists() async throws {
+        let mock = MockHTTPClient(outcomes: [
+            .response(.json(
+                ["user": ["id": "u-ml", "email": "cat@example.com", "emailVerified": true]],
+                token: "bearer-ml",
+            )),
+        ])
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: mock,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let fingerprint = makeFingerprint(installID: installID)
+        let provider = StubDeviceAttestationProvider(fingerprint: fingerprint, identity: identity)
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            attestationProvider: provider,
+        )
+        let url = URL(string: "https://link.catlaser.example/app/magic-link?token=opaque123")!
+        let session = try await coord.completeMagicLink(url: url)
+
+        #expect(session.bearerToken == "bearer-ml")
+        #expect(session.provider == .magicLink)
+        #expect(session.user.id == "u-ml")
+        #expect(try await store.load() == session)
+
+        let req = try #require(await mock.lastRequest())
+        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/magic-link/verify?token=opaque123")
+    }
+
+    @Test
+    func missingAttestationProviderBlocksRequest() async throws {
         let mock = MockHTTPClient(outcomes: [])
         let client = AuthClient(
             config: try makeConfig(),
@@ -163,10 +205,7 @@ struct MagicLinkCoordinatorTests {
             clock: { Date() },
         )
         let store = InMemoryBearerTokenStore()
-        let coord = AuthCoordinator(
-            client: client,
-            store: store,
-        )
+        let coord = AuthCoordinator(client: client, store: store)
         do {
             try await coord.requestMagicLink(email: "a@b.com")
             Issue.record("expected providerUnavailable")
@@ -179,7 +218,7 @@ struct MagicLinkCoordinatorTests {
     }
 
     @Test
-    func missingFingerprintProviderBlocksCompletion() async throws {
+    func missingAttestationProviderBlocksCompletion() async throws {
         let mock = MockHTTPClient(outcomes: [])
         let client = AuthClient(
             config: try makeConfig(),
@@ -187,11 +226,8 @@ struct MagicLinkCoordinatorTests {
             clock: { Date() },
         )
         let store = InMemoryBearerTokenStore()
-        let coord = AuthCoordinator(
-            client: client,
-            store: store,
-        )
-        let url = URL(string: "https://auth.catlaser.example/api/auth/magic-link/verify?token=T")!
+        let coord = AuthCoordinator(client: client, store: store)
+        let url = URL(string: "https://link.catlaser.example/app/magic-link?token=T")!
         await #expect(throws: (any Error).self) {
             _ = try await coord.completeMagicLink(url: url)
         }
@@ -202,19 +238,20 @@ struct MagicLinkCoordinatorTests {
     @Test
     func completeWithBadURLDoesNotHitNetworkOrStore() async throws {
         let mock = MockHTTPClient(outcomes: [])
-        let client = AuthClient(
-            config: try makeConfig(),
-            http: mock,
-            clock: { Date() },
+        let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let provider = StubDeviceAttestationProvider(
+            fingerprint: makeFingerprint(installID: installID),
+            identity: identity,
         )
-        let provider = RecordingFingerprintProvider(fingerprint: makeFingerprint())
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
-            fingerprintProvider: provider,
+            attestationProvider: provider,
         )
-        let url = URL(string: "https://evil.example/api/auth/magic-link/verify?token=T")!
+        let url = URL(string: "https://evil.example/app/magic-link?token=T")!
         do {
             _ = try await coord.completeMagicLink(url: url)
             Issue.record("expected invalidMagicLink")
@@ -229,18 +266,11 @@ struct MagicLinkCoordinatorTests {
 
     @Test
     func serverMismatchRetainsPreviousSession() async throws {
-        // If the user had an existing session and the magic-link completion
-        // fails (device mismatch etc.), we must NOT clobber the stored
-        // session. Coordinator only persists on success.
         let body = try JSONSerialization.data(withJSONObject: ["code": "DEVICE_MISMATCH"])
         let mock = MockHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 403, headers: [:], body: body)),
         ])
-        let client = AuthClient(
-            config: try makeConfig(),
-            http: mock,
-            clock: { Date() },
-        )
+        let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
         let existing = AuthSession(
             bearerToken: "still-valid",
             user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
@@ -248,13 +278,18 @@ struct MagicLinkCoordinatorTests {
             establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
         )
         let store = InMemoryBearerTokenStore(initial: existing)
-        let provider = RecordingFingerprintProvider(fingerprint: makeFingerprint())
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let provider = StubDeviceAttestationProvider(
+            fingerprint: makeFingerprint(installID: installID),
+            identity: identity,
+        )
         let coord = AuthCoordinator(
             client: client,
             store: store,
-            fingerprintProvider: provider,
+            attestationProvider: provider,
         )
-        let url = URL(string: "https://auth.catlaser.example/api/auth/magic-link/verify?token=T")!
+        let url = URL(string: "https://link.catlaser.example/app/magic-link?token=T")!
         do {
             _ = try await coord.completeMagicLink(url: url)
             Issue.record("expected invalidMagicLink")
@@ -309,12 +344,17 @@ struct MagicLinkCoordinatorTests {
             .response(HTTPResponse(statusCode: 503, headers: [:], body: Data("down".utf8))),
         ])
         let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
-        let provider = RecordingFingerprintProvider(fingerprint: makeFingerprint())
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let provider = StubDeviceAttestationProvider(
+            fingerprint: makeFingerprint(installID: installID),
+            identity: identity,
+        )
         let store = InMemoryBearerTokenStore()
         let coord = AuthCoordinator(
             client: client,
             store: store,
-            fingerprintProvider: provider,
+            attestationProvider: provider,
         )
         do {
             try await coord.requestMagicLink(email: "a@b.com")
@@ -328,10 +368,14 @@ struct MagicLinkCoordinatorTests {
     }
 
     @Test
-    func providerFingerprintFailurePropagates() async throws {
-        struct Failing: DeviceFingerprintProviding {
+    func providerAttestationFailurePropagates() async throws {
+        struct Failing: DeviceAttestationProviding {
             func currentFingerprint() async throws -> DeviceFingerprint {
-                throw AuthError.fingerprintCaptureFailed("broken")
+                throw AuthError.attestationFailed("fingerprint broken")
+            }
+
+            func currentAttestation() async throws -> DeviceAttestation {
+                throw AuthError.attestationFailed("broken")
             }
         }
         let mock = MockHTTPClient(outcomes: [])
@@ -340,12 +384,12 @@ struct MagicLinkCoordinatorTests {
         let coord = AuthCoordinator(
             client: client,
             store: store,
-            fingerprintProvider: Failing(),
+            attestationProvider: Failing(),
         )
         do {
             try await coord.requestMagicLink(email: "a@b.com")
-            Issue.record("expected fingerprintCaptureFailed")
-        } catch let AuthError.fingerprintCaptureFailed(msg) {
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
             #expect(msg == "broken")
         } catch {
             Issue.record("unexpected error: \(error)")

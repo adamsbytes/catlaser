@@ -86,6 +86,10 @@ private func makeConfig() throws -> AuthConfig {
         baseURL: URL(string: "https://auth.example")!,
         appleServiceID: "svc",
         googleClientID: "cid",
+        bundleID: "com.catlaser.app",
+        universalLinkHost: "link.example",
+        universalLinkPath: "/app/magic-link",
+        oauthRedirectHosts: ["auth.example"],
     )
 }
 

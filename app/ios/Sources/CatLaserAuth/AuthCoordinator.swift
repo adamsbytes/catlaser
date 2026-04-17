@@ -6,8 +6,7 @@ public actor AuthCoordinator {
     private let nonceGenerator: NonceGenerator
     private let appleProvider: (any AppleIDTokenProviding)?
     private let googleProvider: (any GoogleIDTokenProviding)?
-    private let fingerprintProvider: (any DeviceFingerprintProviding)?
-    private let magicLinkCallbackURL: String?
+    private let attestationProvider: (any DeviceAttestationProviding)?
 
     public init(
         client: AuthClient,
@@ -15,16 +14,14 @@ public actor AuthCoordinator {
         nonceGenerator: NonceGenerator = NonceGenerator(),
         appleProvider: (any AppleIDTokenProviding)? = nil,
         googleProvider: (any GoogleIDTokenProviding)? = nil,
-        fingerprintProvider: (any DeviceFingerprintProviding)? = nil,
-        magicLinkCallbackURL: String? = nil,
+        attestationProvider: (any DeviceAttestationProviding)? = nil,
     ) {
         self.client = client
         self.store = store
         self.nonceGenerator = nonceGenerator
         self.appleProvider = appleProvider
         self.googleProvider = googleProvider
-        self.fingerprintProvider = fingerprintProvider
-        self.magicLinkCallbackURL = magicLinkCallbackURL
+        self.attestationProvider = attestationProvider
     }
 
     public func currentSession() async throws -> AuthSession? {
@@ -73,35 +70,34 @@ public actor AuthCoordinator {
         return session
     }
 
-    /// Kick off a magic-link sign-in. Captures the current device fingerprint
-    /// and posts it (together with the email) to the coordination server,
-    /// which sends a link to the user's inbox. Completion happens in
+    /// Kick off a magic-link sign-in. Builds a signed device attestation
+    /// and posts it (with the email) to the coordination server, which
+    /// sends a link to the user's inbox. Completion happens in
     /// `completeMagicLink(url:)` when the user taps the email.
     public func requestMagicLink(email: String) async throws {
-        guard let fingerprintProvider else {
+        guard let attestationProvider else {
             throw AuthError.providerUnavailable("Magic link provider not configured")
         }
-        let header = try await fingerprintProvider.currentFingerprintHeader()
+        let header = try await attestationProvider.currentAttestationHeader()
         try await client.requestMagicLink(
             email: email,
-            callbackURL: magicLinkCallbackURL,
-            fingerprintHeader: header,
+            attestationHeader: header,
         )
     }
 
-    /// Complete a magic-link sign-in from a Universal Link callback. Parses
-    /// the URL, re-captures the current fingerprint (which must still match
-    /// the server's stored copy to pass phishing defence), exchanges for a
+    /// Complete a magic-link sign-in from a Universal Link callback.
+    /// Parses the URL, rebuilds a fresh attestation (whose `fph` and `pk`
+    /// must still byte-match the server's stored copy), exchanges for a
     /// bearer token, and persists the session.
     public func completeMagicLink(url: URL) async throws -> AuthSession {
-        guard let fingerprintProvider else {
+        guard let attestationProvider else {
             throw AuthError.providerUnavailable("Magic link provider not configured")
         }
         let callback = try MagicLinkCallback(url: url, config: client.config)
-        let header = try await fingerprintProvider.currentFingerprintHeader()
+        let header = try await attestationProvider.currentAttestationHeader()
         let session = try await client.completeMagicLink(
             token: callback.token,
-            fingerprintHeader: header,
+            attestationHeader: header,
         )
         try await store.save(session)
         return session

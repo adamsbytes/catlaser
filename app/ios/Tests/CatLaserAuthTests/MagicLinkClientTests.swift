@@ -8,6 +8,10 @@ private func makeConfig(base: String = "https://auth.catlaser.example") throws -
         baseURL: URL(string: base)!,
         appleServiceID: "svc",
         googleClientID: "cid",
+        bundleID: "com.catlaser.app",
+        universalLinkHost: "link.catlaser.example",
+        universalLinkPath: "/app/magic-link",
+        oauthRedirectHosts: ["auth.catlaser.example"],
     )
 }
 
@@ -30,19 +34,20 @@ struct AuthClientRequestMagicLinkTests {
         ])
         try await client.requestMagicLink(
             email: "cat@example.com",
-            callbackURL: "https://auth.catlaser.example/api/auth/magic-link/verify",
-            fingerprintHeader: "ZmluZ2VycHJpbnQ=",
+            attestationHeader: "QVRURVNU",
         )
         let req = try #require(await mock.lastRequest())
         #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/sign-in/magic-link")
         #expect(req.method == "POST")
         #expect(req.header("Content-Type") == "application/json")
         #expect(req.header("Accept") == "application/json")
-        #expect(req.header(DeviceFingerprintEncoder.headerName) == "ZmluZ2VycHJpbnQ=")
+        #expect(req.header(DeviceAttestationEncoder.headerName) == "QVRURVNU")
         let body = try #require(req.body)
         let parsed = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         #expect(parsed["email"] as? String == "cat@example.com")
-        #expect(parsed["callbackURL"] as? String == "https://auth.catlaser.example/api/auth/magic-link/verify")
+        // The client always fills the callback URL from the config's
+        // universal-link host/path, which is distinct from the API path.
+        #expect(parsed["callbackURL"] as? String == "https://link.catlaser.example/app/magic-link")
     }
 
     @Test
@@ -52,25 +57,18 @@ struct AuthClientRequestMagicLinkTests {
         ])
         try await client.requestMagicLink(
             email: "  cat@example.com\n",
-            callbackURL: nil,
-            fingerprintHeader: "fp",
+            attestationHeader: "h",
         )
         let body = try #require(await mock.lastRequest()?.body)
         let parsed = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         #expect(parsed["email"] as? String == "cat@example.com")
-        // callbackURL omitted when nil
-        #expect(parsed["callbackURL"] == nil)
     }
 
     @Test
     func rejectsEmptyEmailWithoutHittingNetwork() async throws {
         let (client, mock) = try makeClient(outcomes: [])
         await #expect(throws: AuthError.invalidEmail) {
-            try await client.requestMagicLink(
-                email: "   ",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "   ", attestationHeader: "h")
         }
         #expect(await mock.sendCount() == 0)
     }
@@ -79,11 +77,7 @@ struct AuthClientRequestMagicLinkTests {
     func rejectsMalformedEmail() async throws {
         let (client, mock) = try makeClient(outcomes: [])
         await #expect(throws: AuthError.invalidEmail) {
-            try await client.requestMagicLink(
-                email: "not-an-email",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "not-an-email", attestationHeader: "h")
         }
         #expect(await mock.sendCount() == 0)
     }
@@ -92,11 +86,7 @@ struct AuthClientRequestMagicLinkTests {
     func rejectsEmailWithEmbeddedWhitespace() async throws {
         let (client, mock) = try makeClient(outcomes: [])
         await #expect(throws: AuthError.invalidEmail) {
-            try await client.requestMagicLink(
-                email: "a b@example.com",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "a b@example.com", attestationHeader: "h")
         }
         #expect(await mock.sendCount() == 0)
     }
@@ -107,26 +97,18 @@ struct AuthClientRequestMagicLinkTests {
         let email = "\(local)@example.com"
         let (client, mock) = try makeClient(outcomes: [])
         await #expect(throws: AuthError.invalidEmail) {
-            try await client.requestMagicLink(
-                email: email,
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: email, attestationHeader: "h")
         }
         #expect(await mock.sendCount() == 0)
     }
 
     @Test
-    func rejectsEmptyFingerprintHeader() async throws {
+    func rejectsEmptyAttestationHeader() async throws {
         let (client, mock) = try makeClient(outcomes: [])
         do {
-            try await client.requestMagicLink(
-                email: "a@b.com",
-                callbackURL: nil,
-                fingerprintHeader: "",
-            )
-            Issue.record("expected fingerprintCaptureFailed")
-        } catch let AuthError.fingerprintCaptureFailed(msg) {
+            try await client.requestMagicLink(email: "a@b.com", attestationHeader: "")
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
             #expect(msg.contains("empty"))
         } catch {
             Issue.record("unexpected error: \(error)")
@@ -140,11 +122,7 @@ struct AuthClientRequestMagicLinkTests {
             .response(HTTPResponse(statusCode: 400, headers: [:], body: Data("{}".utf8))),
         ])
         await #expect(throws: AuthError.invalidEmail) {
-            try await client.requestMagicLink(
-                email: "a@b.com",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "a@b.com", attestationHeader: "h")
         }
     }
 
@@ -154,11 +132,7 @@ struct AuthClientRequestMagicLinkTests {
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data("denied".utf8))),
         ])
         do {
-            try await client.requestMagicLink(
-                email: "a@b.com",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "a@b.com", attestationHeader: "h")
             Issue.record("expected credentialInvalid")
         } catch let AuthError.credentialInvalid(msg) {
             #expect(msg == "denied")
@@ -174,11 +148,7 @@ struct AuthClientRequestMagicLinkTests {
             .response(HTTPResponse(statusCode: 503, headers: [:], body: body)),
         ])
         do {
-            try await client.requestMagicLink(
-                email: "a@b.com",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "a@b.com", attestationHeader: "h")
             Issue.record("expected serverError")
         } catch let AuthError.serverError(status, message) {
             #expect(status == 503)
@@ -193,11 +163,7 @@ struct AuthClientRequestMagicLinkTests {
         struct Boom: Error {}
         let (client, _) = try makeClient(outcomes: [.failure(Boom())])
         await #expect(throws: (any Error).self) {
-            try await client.requestMagicLink(
-                email: "a@b.com",
-                callbackURL: nil,
-                fingerprintHeader: "fp",
-            )
+            try await client.requestMagicLink(email: "a@b.com", attestationHeader: "h")
         }
     }
 }
@@ -221,7 +187,7 @@ struct AuthClientCompleteMagicLinkTests {
         ])
         let session = try await client.completeMagicLink(
             token: "valid-token",
-            fingerprintHeader: "fp-abc",
+            attestationHeader: "ATTEST",
         )
         #expect(session.bearerToken == "bearer-ml")
         #expect(session.user.id == "u1")
@@ -232,7 +198,7 @@ struct AuthClientCompleteMagicLinkTests {
         #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/magic-link/verify?token=valid-token")
         #expect(req.method == "GET")
         #expect(req.header("Accept") == "application/json")
-        #expect(req.header(DeviceFingerprintEncoder.headerName) == "fp-abc")
+        #expect(req.header(DeviceAttestationEncoder.headerName) == "ATTEST")
     }
 
     @Test
@@ -242,7 +208,7 @@ struct AuthClientCompleteMagicLinkTests {
         ])
         _ = try await client.completeMagicLink(
             token: "a+b=c/d",
-            fingerprintHeader: "fp",
+            attestationHeader: "h",
         )
         let req = try #require(await mock.lastRequest())
         // `URLComponents` percent-encodes reserved chars in query values.
@@ -256,10 +222,7 @@ struct AuthClientCompleteMagicLinkTests {
     func rejectsEmptyToken() async throws {
         let (client, mock) = try makeClient(outcomes: [])
         do {
-            _ = try await client.completeMagicLink(
-                token: "   ",
-                fingerprintHeader: "fp",
-            )
+            _ = try await client.completeMagicLink(token: "   ", attestationHeader: "h")
             Issue.record("expected invalidMagicLink")
         } catch let AuthError.invalidMagicLink(msg) {
             #expect(msg?.contains("empty") == true)
@@ -270,15 +233,12 @@ struct AuthClientCompleteMagicLinkTests {
     }
 
     @Test
-    func rejectsEmptyFingerprintHeader() async throws {
+    func rejectsEmptyAttestationHeader() async throws {
         let (client, mock) = try makeClient(outcomes: [])
         do {
-            _ = try await client.completeMagicLink(
-                token: "abc",
-                fingerprintHeader: "",
-            )
-            Issue.record("expected fingerprintCaptureFailed")
-        } catch AuthError.fingerprintCaptureFailed {
+            _ = try await client.completeMagicLink(token: "abc", attestationHeader: "")
+            Issue.record("expected attestationFailed")
+        } catch AuthError.attestationFailed {
             // expected
         } catch {
             Issue.record("unexpected error: \(error)")
@@ -292,7 +252,7 @@ struct AuthClientCompleteMagicLinkTests {
             .response(.json(["user": ["id": "u"]], token: nil)),
         ])
         await #expect(throws: AuthError.missingBearerToken) {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
         }
     }
 
@@ -305,7 +265,7 @@ struct AuthClientCompleteMagicLinkTests {
             .response(HTTPResponse(statusCode: 403, headers: [:], body: body)),
         ])
         do {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
             Issue.record("expected invalidMagicLink")
         } catch let AuthError.invalidMagicLink(msg) {
             #expect(msg == "device mismatch")
@@ -320,7 +280,7 @@ struct AuthClientCompleteMagicLinkTests {
             .response(HTTPResponse(statusCode: 410, headers: [:], body: Data("expired".utf8))),
         ])
         do {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
             Issue.record("expected invalidMagicLink")
         } catch let AuthError.invalidMagicLink(msg) {
             #expect(msg == "expired")
@@ -335,7 +295,7 @@ struct AuthClientCompleteMagicLinkTests {
             .response(HTTPResponse(statusCode: 400, headers: [:], body: Data("bad request".utf8))),
         ])
         do {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
             Issue.record("expected invalidMagicLink")
         } catch AuthError.invalidMagicLink {
             // expected
@@ -350,7 +310,7 @@ struct AuthClientCompleteMagicLinkTests {
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data("no".utf8))),
         ])
         do {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
             Issue.record("expected credentialInvalid")
         } catch AuthError.credentialInvalid {
             // expected
@@ -365,7 +325,7 @@ struct AuthClientCompleteMagicLinkTests {
             .response(HTTPResponse(statusCode: 500, headers: [:], body: Data())),
         ])
         await #expect(throws: AuthError.serverError(status: 500, message: nil)) {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
         }
     }
 
@@ -379,7 +339,7 @@ struct AuthClientCompleteMagicLinkTests {
             )),
         ])
         do {
-            _ = try await client.completeMagicLink(token: "t", fingerprintHeader: "fp")
+            _ = try await client.completeMagicLink(token: "t", attestationHeader: "h")
             Issue.record("expected malformedResponse")
         } catch AuthError.malformedResponse {
             // expected

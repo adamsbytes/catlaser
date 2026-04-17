@@ -6,54 +6,57 @@ import UIKit
 import Darwin
 #endif
 
-public protocol DeviceFingerprintProviding: Sendable {
+public protocol DeviceAttestationProviding: Sendable {
     func currentFingerprint() async throws -> DeviceFingerprint
-    func currentFingerprintHeader() async throws -> String
+    func currentAttestation() async throws -> DeviceAttestation
+    func currentAttestationHeader() async throws -> String
 }
 
-public extension DeviceFingerprintProviding {
-    func currentFingerprintHeader() async throws -> String {
-        let fingerprint = try await currentFingerprint()
-        return try DeviceFingerprintEncoder.encodeHeaderValue(fingerprint)
+public extension DeviceAttestationProviding {
+    func currentAttestationHeader() async throws -> String {
+        let attestation = try await currentAttestation()
+        return try DeviceAttestationEncoder.encodeHeaderValue(attestation)
     }
 }
 
 /// Default provider used at runtime. Reads device metadata from UIDevice /
-/// ProcessInfo / Bundle / Locale, and pulls the persistent install ID from a
-/// `InstallIDStoring` implementation (Keychain-backed in production).
+/// ProcessInfo / Bundle / Locale, pulls the install ID from the identity
+/// store (Secure Enclave in production), and assembles a signed
+/// attestation.
 ///
-/// The provider is deterministic under a fixed input: two calls on the same
-/// device with the same install ID produce identical fingerprints, so the
-/// server can compare request-time and completion-time payloads byte-for-byte
-/// where desired.
-public struct SystemDeviceFingerprintProvider: DeviceFingerprintProviding {
-    private let installIDStore: any InstallIDStoring
+/// The provider is deterministic for the static fields: two calls within
+/// the same app session produce identical fingerprints (and therefore
+/// identical `fph` hashes). The signature varies per call by design —
+/// ECDSA is non-deterministic; server verifies each signature against the
+/// stable public key rather than byte-comparing signatures.
+public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
+    private let identity: any DeviceIdentityStoring
     private let bundle: Bundle
     private let localeProvider: @Sendable () -> Locale
     private let timezoneProvider: @Sendable () -> TimeZone
     private let deviceInfo: DeviceInfo
 
     public init(
-        installIDStore: any InstallIDStoring,
+        identity: any DeviceIdentityStoring,
         bundle: Bundle = .main,
     ) {
         self.init(
-            installIDStore: installIDStore,
+            identity: identity,
             bundle: bundle,
             localeProvider: { Locale.current },
             timezoneProvider: { TimeZone.current },
-            deviceInfo: SystemDeviceFingerprintProvider.platformDeviceInfo(),
+            deviceInfo: SystemDeviceAttestationProvider.platformDeviceInfo(),
         )
     }
 
     init(
-        installIDStore: any InstallIDStoring,
+        identity: any DeviceIdentityStoring,
         bundle: Bundle,
         localeProvider: @escaping @Sendable () -> Locale,
         timezoneProvider: @escaping @Sendable () -> TimeZone,
         deviceInfo: DeviceInfo,
     ) {
-        self.installIDStore = installIDStore
+        self.identity = identity
         self.bundle = bundle
         self.localeProvider = localeProvider
         self.timezoneProvider = timezoneProvider
@@ -61,9 +64,9 @@ public struct SystemDeviceFingerprintProvider: DeviceFingerprintProviding {
     }
 
     public func currentFingerprint() async throws -> DeviceFingerprint {
-        let installID = try await installIDStore.currentID()
+        let installID = try await identity.installID()
         guard !installID.isEmpty else {
-            throw AuthError.fingerprintCaptureFailed("install ID store returned empty value")
+            throw AuthError.attestationFailed("identity store returned empty install ID")
         }
 
         let appVersion = (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? ""
@@ -81,6 +84,14 @@ public struct SystemDeviceFingerprintProvider: DeviceFingerprintProviding {
             appBuild: appBuild,
             bundleID: bundleID,
             installID: installID,
+        )
+    }
+
+    public func currentAttestation() async throws -> DeviceAttestation {
+        let fingerprint = try await currentFingerprint()
+        return try await DeviceAttestationBuilder.build(
+            fingerprint: fingerprint,
+            identity: identity,
         )
     }
 }
@@ -101,7 +112,7 @@ public struct DeviceInfo: Sendable, Equatable {
     }
 }
 
-extension SystemDeviceFingerprintProvider {
+extension SystemDeviceAttestationProvider {
     static func platformDeviceInfo() -> DeviceInfo {
         let model = hardwareModel() ?? fallbackModel()
         #if canImport(UIKit) && !os(watchOS)
@@ -187,16 +198,23 @@ extension SystemDeviceFingerprintProvider {
     }
 }
 
-/// Deterministic provider used in tests. Returns whatever fingerprint is
-/// configured on construction, without touching UIKit or the install-ID store.
-public struct StubDeviceFingerprintProvider: DeviceFingerprintProviding {
+/// Deterministic provider used in tests. Assembled from a preset
+/// `DeviceFingerprint` plus a seeded `DeviceIdentityStoring`; produces
+/// stable `fph` / `pk` bytes across calls, and valid (fresh) signatures.
+public struct StubDeviceAttestationProvider: DeviceAttestationProviding {
     private let fingerprint: DeviceFingerprint
+    private let identity: any DeviceIdentityStoring
 
-    public init(fingerprint: DeviceFingerprint) {
+    public init(fingerprint: DeviceFingerprint, identity: any DeviceIdentityStoring) {
         self.fingerprint = fingerprint
+        self.identity = identity
     }
 
     public func currentFingerprint() async throws -> DeviceFingerprint {
         fingerprint
+    }
+
+    public func currentAttestation() async throws -> DeviceAttestation {
+        try await DeviceAttestationBuilder.build(fingerprint: fingerprint, identity: identity)
     }
 }

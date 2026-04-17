@@ -64,13 +64,34 @@ struct AuthErrorTests {
     func invalidMagicLinkNotRetriable() {
         #expect(AuthError.invalidMagicLink(nil).isRetriable == false)
         #expect(AuthError.invalidEmail.isRetriable == false)
-        #expect(AuthError.fingerprintCaptureFailed("x").isRetriable == false)
+        #expect(AuthError.attestationFailed("x").isRetriable == false)
     }
 
     @Test
-    func fingerprintCaptureFailedEquality() {
-        #expect(AuthError.fingerprintCaptureFailed("x") == AuthError.fingerprintCaptureFailed("x"))
-        #expect(AuthError.fingerprintCaptureFailed("x") != AuthError.fingerprintCaptureFailed("y"))
-        #expect(AuthError.fingerprintCaptureFailed("x") != AuthError.invalidEmail)
+    func attestationFailedEquality() {
+        #expect(AuthError.attestationFailed("x") == AuthError.attestationFailed("x"))
+        #expect(AuthError.attestationFailed("x") != AuthError.attestationFailed("y"))
+        #expect(AuthError.attestationFailed("x") != AuthError.invalidEmail)
+    }
+
+    @Test
+    func secureEnclaveUnavailableEquality() {
+        #expect(AuthError.secureEnclaveUnavailable("no SE") == AuthError.secureEnclaveUnavailable("no SE"))
+        #expect(AuthError.secureEnclaveUnavailable("a") != AuthError.secureEnclaveUnavailable("b"))
+        #expect(AuthError.secureEnclaveUnavailable("x").isRetriable == false)
+    }
+
+    @Test
+    func invalidRedirectURLEquality() {
+        #expect(AuthError.invalidRedirectURL("bad scheme") == AuthError.invalidRedirectURL("bad scheme"))
+        #expect(AuthError.invalidRedirectURL("a") != AuthError.invalidRedirectURL("b"))
+        #expect(AuthError.invalidRedirectURL("x").isRetriable == false)
+    }
+
+    @Test
+    func idTokenClaimMismatchEquality() {
+        #expect(AuthError.idTokenClaimMismatch("nonce") == AuthError.idTokenClaimMismatch("nonce"))
+        #expect(AuthError.idTokenClaimMismatch("a") != AuthError.idTokenClaimMismatch("b"))
+        #expect(AuthError.idTokenClaimMismatch("x").isRetriable == false)
     }
 }

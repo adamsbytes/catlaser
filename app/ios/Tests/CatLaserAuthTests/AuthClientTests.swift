@@ -14,6 +14,10 @@ struct AuthClientTests {
             baseURL: URL(string: "https://auth.example")!,
             appleServiceID: "svc",
             googleClientID: "cid",
+            bundleID: "com.catlaser.app",
+            universalLinkHost: "link.example",
+            universalLinkPath: "/app/magic-link",
+            oauthRedirectHosts: ["auth.example"],
         )
         let client = AuthClient(config: config, http: mock, clock: clock)
         return (client, mock)

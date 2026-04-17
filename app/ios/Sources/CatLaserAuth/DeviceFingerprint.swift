@@ -1,16 +1,18 @@
 import Foundation
 
-/// The request-time device fingerprint payload sent to the coordination server
-/// when requesting a magic link. The same fingerprint is re-sent at link
-/// completion; the server compares the two to defend against email-interception
-/// phishing (an attacker who captures the email cannot complete sign-in from
-/// a different device).
+/// Canonical set of device descriptors that, hashed together, form the
+/// per-install fingerprint used to bind a magic-link request to its
+/// completion. The raw JSON is NEVER sent over the wire — the client
+/// only transmits `sha256(canonicalJSONBytes)` inside a
+/// `DeviceAttestation`. This keeps model/OS/locale/timezone/installID
+/// out of server-side request logs while still allowing the server to do
+/// a byte-equality check between request time and verify time.
 ///
-/// Schema is vendored from `better-auth-device-fingerprint` and adapted for
-/// native mobile clients — browser-centric fields (viewport, DPR, etc.) are
-/// replaced with identifiers that are stable on mobile but vary between
-/// devices: hardware model, OS version, locale, timezone, app build, and a
-/// Keychain-bound install ID.
+/// Schema is adapted from `better-auth-device-fingerprint` for native
+/// mobile: browser-centric fields (viewport, DPR, etc.) are replaced with
+/// identifiers that are stable on mobile but vary between devices —
+/// hardware model, OS version, locale, timezone, app build, bundle ID,
+/// and the SE-key-derived install ID.
 public struct DeviceFingerprint: Sendable, Equatable, Codable {
     public let platform: String
     public let model: String
@@ -46,45 +48,25 @@ public struct DeviceFingerprint: Sendable, Equatable, Codable {
         self.bundleID = bundleID
         self.installID = installID
     }
-}
 
-public enum DeviceFingerprintEncoder {
-    /// Wire header name consumed by the server-side plugin.
-    public static let headerName = "x-device-fingerprint"
-
-    /// Upper bound on the serialized base64 value. HTTP stacks typically reject
-    /// header values past 8 KiB; we keep a conservative ceiling to avoid
-    /// surprises. The adapted schema serializes to ~350 bytes in practice.
-    public static let maxHeaderValueBytes = 4096
-
-    public static func encodeHeaderValue(_ fingerprint: DeviceFingerprint) throws(AuthError) -> String {
+    /// Deterministic canonical serialization used as input to the SHA-256
+    /// hash placed on the wire.
+    ///
+    /// Contract (must be preserved for server-port compatibility):
+    ///
+    /// * JSON object with keys sorted lexicographically.
+    /// * UTF-8 encoded.
+    /// * No whitespace outside string values.
+    /// * Forward slashes NOT escaped (`"/"` not `"\/"`).
+    /// * All fields present and non-null; missing values render as empty
+    ///   strings (populated by the provider, not omitted).
+    public func canonicalJSONBytes() throws(AuthError) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let data: Data
         do {
-            data = try encoder.encode(fingerprint)
+            return try encoder.encode(self)
         } catch {
-            throw AuthError.fingerprintCaptureFailed("encode failed: \(error.localizedDescription)")
-        }
-        let base64 = data.base64EncodedString()
-        guard base64.utf8.count <= maxHeaderValueBytes else {
-            throw AuthError.fingerprintCaptureFailed(
-                "header value exceeds \(maxHeaderValueBytes) bytes (got \(base64.utf8.count))",
-            )
-        }
-        return base64
-    }
-
-    /// Decode a header value back to a fingerprint. Used by tests and by the
-    /// server plugin when porting to Swift; not used by the app at runtime.
-    public static func decodeHeaderValue(_ value: String) throws(AuthError) -> DeviceFingerprint {
-        guard let data = Data(base64Encoded: value) else {
-            throw AuthError.fingerprintCaptureFailed("invalid base64 header")
-        }
-        do {
-            return try JSONDecoder().decode(DeviceFingerprint.self, from: data)
-        } catch {
-            throw AuthError.fingerprintCaptureFailed("decode failed: \(error.localizedDescription)")
+            throw .attestationFailed("canonical JSON encode failed: \(error.localizedDescription)")
         }
     }
 }

@@ -29,17 +29,18 @@ public protocol HTTPClient: Sendable {
 
 /// Thin async wrapper over `URLSession.data(for:)`.
 ///
-/// The default initializer is intentionally absent. A production auth HTTP
-/// client MUST be built via `URLSessionHTTPClient.pinned(pinning:)`, which
-/// attaches a TLS-pinning delegate and an ephemeral (no-cache, no-cookie)
-/// session configuration. The `init(session:)` escape hatch exists only
-/// for tests that wire their own `URLSession` — tests that want to stub
-/// out the network entirely should use `MockHTTPClient` in the test
-/// target instead.
+/// There is **no public initializer**. Production callers must build one
+/// via `URLSessionHTTPClient.pinned(pinning:)`, which attaches a
+/// TLS-pinning delegate and an ephemeral (no-cache, no-cookie) session
+/// configuration. The `init(session:)` escape hatch is package-private
+/// so that only the bundled pinned factory and tests with
+/// `@testable import` can reach it — downstream product code cannot
+/// accidentally construct a non-pinned client and pass it into
+/// `AuthClient`.
 public struct URLSessionHTTPClient: HTTPClient {
     private let session: URLSession
 
-    public init(session: URLSession) {
+    init(session: URLSession) {
         self.session = session
     }
 
