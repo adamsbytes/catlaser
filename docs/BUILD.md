@@ -62,11 +62,24 @@
   - [X] catlaser-update.sh (OTA updates)
   - [X] CI: lint + test (Rust + Python) + release image builds
 
+[ ] Coordination Server (better-auth)
+  - [ ] better-auth base (Postgres schema, bearer plugin, trusted origins pinned to Universal Link host)
+  - [ ] Social providers (Apple + Google, nonce three-way match: body + ID token claim + attestation bnd)
+  - [ ] Magic-link plugin (callbackURL allowlisted to Universal Link host — reject client-supplied hosts to block phishing-relay takeover)
+  - [ ] Universal Link handler (inert HTML at universalLinkPath, distinct from /api/auth/magic-link/verify; AASA serving iOS bundle ID)
+  - [ ] Device attestation plugin — v3 (SPKI parse, ECDSA verify over fph || bnd, per-tag binding parse)
+  - [ ] Binding enforcement (req: ±60s skew, ver: stored fph + pk byte-equal, sis: nonce three-way, out: ±60s skew, api: ±60s skew)
+  - [ ] Protected-route attestation middleware (api: binding on every authenticated call, per-session SE pubkey stored at sign-in, signature verify gates the request)
+  - [ ] Idempotency keys on mutating routes (server dedupes within skew window to block write-replay on captured attestations)
+  - [ ] Rate limiting (per-email + per-IP cooldown, enumeration-resistant identical 200 responses)
+  - [ ] Cloudflare Tunnel deployment (cloudflared on VM, no inbound ports) + client pins 3–4 public roots CF chains through
+
 [ ] App — iOS (SwiftUI, primary)
   - [X] Proto codegen (swift-protobuf from app.proto)
   - [X] Sign in with Apple + Google (AuthenticationServices + GoogleSignIn SDK, ID token exchanged for better-auth bearer)
-  - [X] Sign in with email magic link (Universal Links target, device fingerprint payload sent at request time)
+  - [X] Sign in with email magic link (Universal Links target, SE-signed attestation bound to each request and verify call)
   - [X] Sign in screen
+  - [ ] Signed HTTP client wrapper (SE-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
   - [ ] Live view (LiveKit iOS SDK, WebRTC)
   - [ ] History + cat profiles (stats, naming, management)
   - [ ] Schedule setup (auto-play times, quiet hours)
@@ -75,6 +88,7 @@
 [ ] App — Android (Jetpack Compose, port)
   - [ ] Proto codegen (protobuf-kotlin from app.proto)
   - [ ] Sign in with Google (Credential Manager, ID token exchanged for better-auth bearer)
-  - [ ] Sign in with email magic link (App Links target, device fingerprint payload sent at request time)
+  - [ ] Sign in with email magic link (App Links target, Keystore-signed attestation bound to each request and verify call)
+  - [ ] Signed HTTP client wrapper (Keystore-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
   - [ ] Port all screens from iOS (same flows, Compose equivalents)
   - [ ] Push notifications (FCM)
