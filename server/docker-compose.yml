@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: catlaser
+      POSTGRES_PASSWORD: catlaser
+      POSTGRES_DB: catlaser
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U catlaser -d catlaser']
+      interval: 1s
+      timeout: 3s
+      retries: 30

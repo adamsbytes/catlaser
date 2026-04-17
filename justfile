@@ -6,6 +6,7 @@ check:
     cargo deny check
     just py-check
     just ios-check
+    just server-check
     just shellcheck
 
 check-mcu:
@@ -96,3 +97,17 @@ ios-test:
     cd app/ios && swift test
 
 ios-check: ios-build ios-test
+
+server-check:
+    cd server && bun run lint
+    cd server && bun run typecheck
+    cd server && bun run test
+
+server-dev:
+    cd server && bun run dev
+
+server-docker-up:
+    cd server && bun run docker:up
+
+server-docker-down:
+    cd server && bun run docker:down
