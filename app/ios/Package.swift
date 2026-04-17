@@ -17,6 +17,10 @@ let package = Package(
             name: "CatLaserAuth",
             targets: ["CatLaserAuth"],
         ),
+        .library(
+            name: "CatLaserApp",
+            targets: ["CatLaserApp"],
+        ),
     ],
     dependencies: [
         .package(
@@ -65,6 +69,21 @@ let package = Package(
             name: "CatLaserAuthTests",
             dependencies: ["CatLaserAuth"],
             path: "Tests/CatLaserAuthTests",
+        ),
+        .target(
+            name: "CatLaserApp",
+            dependencies: [
+                "CatLaserAuth",
+            ],
+            path: "Sources/CatLaserApp",
+        ),
+        .testTarget(
+            name: "CatLaserAppTests",
+            dependencies: [
+                "CatLaserApp",
+                "CatLaserAuth",
+            ],
+            path: "Tests/CatLaserAppTests",
         ),
     ],
     swiftLanguageModes: [.v6],
