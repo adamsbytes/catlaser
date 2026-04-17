@@ -213,11 +213,26 @@ public struct AuthClient: Sendable {
         return regex.firstMatch(in: candidate, options: [], range: range) != nil
     }
 
-    public func signOut(session: AuthSession) async throws {
+    /// Invalidate the server-side session. Carries the same v3
+    /// `x-device-attestation` header as the other authenticated endpoints,
+    /// with `bnd = "out:<unix_seconds>"` so a captured magic-link-request
+    /// header cannot be replayed to sign a user out, and a captured
+    /// sign-out header is replay-bounded by the server's skew window.
+    /// A leaked bearer token alone is insufficient to revoke the
+    /// session — the attacker also needs a signature from the original
+    /// Secure-Enclave key.
+    public func signOut(
+        session: AuthSession,
+        attestationHeader: String,
+    ) async throws {
+        guard !attestationHeader.isEmpty else {
+            throw AuthError.attestationFailed("empty attestation header")
+        }
         var request = URLRequest(url: config.signOutURL)
         request.httpMethod = "POST"
         request.setValue("Bearer \(session.bearerToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(attestationHeader, forHTTPHeaderField: DeviceAttestationEncoder.headerName)
         let response = try await http.send(request)
         guard (200 ..< 300).contains(response.statusCode) else {
             throw AuthError.serverError(

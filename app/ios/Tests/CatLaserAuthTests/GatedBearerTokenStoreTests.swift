@@ -286,6 +286,103 @@ struct GatedBearerTokenStoreTests {
         #expect(loaded?.bearerToken == "two")
         #expect(prompts.count == 0, "save → load round trip must not prompt")
     }
+
+    // MARK: - cachedSession (non-prompting accessor used by sign-out)
+
+    @Test
+    func cachedSessionReturnsSessionWithoutPromptingOrTouchingUnderlying() async throws {
+        let clock = TestClock()
+        let prompts = PromptCounter()
+        let underlying = MockAuthenticatingStore()
+        let gate = makeGate(clock: clock, prompts: prompts)
+        let store = GatedBearerTokenStore(underlying: underlying, gate: gate)
+
+        let session = makeSession(token: "cached")
+        try await store.save(session)
+        let eventsAfterSave = await underlying.events
+
+        let cached = await store.cachedSession()
+        #expect(cached == session, "warm cache must yield the session directly")
+        #expect(prompts.count == 0, "cachedSession must never trigger a biometric prompt")
+        let eventsAfter = await underlying.events
+        #expect(
+            eventsAfter == eventsAfterSave,
+            "cachedSession must not issue a keychain read",
+        )
+    }
+
+    @Test
+    func cachedSessionReturnsNilFromColdCacheEvenWhenUnderlyingHasSession() async throws {
+        let clock = TestClock()
+        let prompts = PromptCounter()
+        // Pre-populate the underlying store with a session, but never
+        // load it through the gate — the cache stays cold.
+        let underlying = MockAuthenticatingStore(initial: makeSession(token: "in-keychain"))
+        let gate = makeGate(clock: clock, prompts: prompts)
+        let store = GatedBearerTokenStore(underlying: underlying, gate: gate)
+
+        let cached = await store.cachedSession()
+        #expect(cached == nil,
+                "cold cache must report nil even if a persisted session exists — cachedSession MUST NOT reach past the in-memory cache")
+        #expect(prompts.count == 0, "cachedSession must never trigger a biometric prompt")
+        let events = await underlying.events
+        #expect(events.isEmpty, "cachedSession must not hit the underlying keychain store")
+    }
+
+    @Test
+    func cachedSessionReturnsNilAfterInvalidate() async throws {
+        let clock = TestClock()
+        let prompts = PromptCounter()
+        let underlying = MockAuthenticatingStore()
+        let gate = makeGate(clock: clock, prompts: prompts)
+        let store = GatedBearerTokenStore(underlying: underlying, gate: gate)
+
+        try await store.save(makeSession(token: "one"))
+        #expect(await store.cachedSession() != nil)
+
+        await store.invalidateSession()
+        #expect(await store.cachedSession() == nil,
+                "invalidateSession must drop the cached session")
+        #expect(prompts.count == 0)
+    }
+
+    @Test
+    func cachedSessionReturnsNilAfterDelete() async throws {
+        let clock = TestClock()
+        let prompts = PromptCounter()
+        let underlying = MockAuthenticatingStore()
+        let gate = makeGate(clock: clock, prompts: prompts)
+        let store = GatedBearerTokenStore(underlying: underlying, gate: gate)
+
+        try await store.save(makeSession())
+        try await store.delete()
+        #expect(await store.cachedSession() == nil)
+        #expect(prompts.count == 0, "delete path must not prompt; cachedSession after delete must not prompt either")
+    }
+
+    @Test
+    func cachedSessionDoesNotRequireGateFreshness() async throws {
+        // Sign-out must work even if the idle window has lapsed: the
+        // cache remains valid as a *best-effort* server-notify source
+        // independent of the prompt-gating clock. Only `load()` honours
+        // the idle window; `cachedSession` reports the raw in-memory
+        // value because its entire purpose is to avoid any path that
+        // might prompt.
+        let clock = TestClock()
+        let prompts = PromptCounter()
+        let underlying = MockAuthenticatingStore()
+        let gate = makeGate(clock: clock, prompts: prompts, idleTimeout: 60)
+        let store = GatedBearerTokenStore(underlying: underlying, gate: gate)
+
+        try await store.save(makeSession(token: "stale-idle"))
+        clock.advance(by: 600) // idle window long-expired
+        #expect(await gate.isFresh() == false)
+
+        let cached = await store.cachedSession()
+        #expect(cached?.bearerToken == "stale-idle",
+                "cachedSession must not check gate freshness — sign-out runs after long idle and still needs the bearer")
+        #expect(prompts.count == 0)
+    }
 }
 
 #endif

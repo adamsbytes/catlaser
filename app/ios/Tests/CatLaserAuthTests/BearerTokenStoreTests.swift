@@ -62,6 +62,37 @@ struct InMemoryBearerTokenStoreTests {
     }
 
     @Test
+    func cachedSessionReflectsCurrentState() async throws {
+        let store = InMemoryBearerTokenStore()
+        #expect(await store.cachedSession() == nil)
+
+        let session = makeSession(token: "cached")
+        try await store.save(session)
+        #expect(await store.cachedSession() == session)
+
+        try await store.delete()
+        #expect(await store.cachedSession() == nil)
+    }
+
+    @Test
+    func cachedSessionDefaultReturnsNil() async {
+        // A store that inherits the default `cachedSession()` from the
+        // protocol extension must return nil. Regression guard for
+        // implementations that forget to override the default (e.g. the
+        // production `KeychainBearerTokenStore`, which has no in-process
+        // cache and therefore must report a cold cache — `signOut` then
+        // silently skips the server call instead of prompting).
+        struct NoCacheStore: BearerTokenStore {
+            func save(_: AuthSession) async throws {}
+            func load() async throws -> AuthSession? { nil }
+            func delete() async throws {}
+            // Deliberately NOT overriding cachedSession().
+        }
+        let store = NoCacheStore()
+        #expect(await store.cachedSession() == nil)
+    }
+
+    @Test
     func concurrentSavesSerialized() async throws {
         let store = InMemoryBearerTokenStore()
         await withTaskGroup(of: Void.self) { group in

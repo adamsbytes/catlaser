@@ -22,8 +22,8 @@ public extension DeviceAttestationProviding {
     }
 }
 
-/// Default provider used at runtime. Reads device metadata from UIDevice /
-/// ProcessInfo / Bundle / Locale, pulls the install ID from the identity
+/// Default provider used at runtime. Reads stable device metadata from
+/// `uname` / UIDevice / Bundle, pulls the install ID from the identity
 /// store (Secure Enclave in production), and assembles a signed
 /// attestation.
 ///
@@ -37,8 +37,6 @@ public extension DeviceAttestationProviding {
 public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
     private let identity: any DeviceIdentityStoring
     private let bundle: Bundle
-    private let localeProvider: @Sendable () -> Locale
-    private let timezoneProvider: @Sendable () -> TimeZone
     private let deviceInfo: DeviceInfo
 
     public init(
@@ -48,8 +46,6 @@ public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
         self.init(
             identity: identity,
             bundle: bundle,
-            localeProvider: { Locale.current },
-            timezoneProvider: { TimeZone.current },
             deviceInfo: SystemDeviceAttestationProvider.platformDeviceInfo(),
         )
     }
@@ -57,14 +53,10 @@ public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
     init(
         identity: any DeviceIdentityStoring,
         bundle: Bundle,
-        localeProvider: @escaping @Sendable () -> Locale,
-        timezoneProvider: @escaping @Sendable () -> TimeZone,
         deviceInfo: DeviceInfo,
     ) {
         self.identity = identity
         self.bundle = bundle
-        self.localeProvider = localeProvider
-        self.timezoneProvider = timezoneProvider
         self.deviceInfo = deviceInfo
     }
 
@@ -73,20 +65,12 @@ public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
         guard !installID.isEmpty else {
             throw AuthError.attestationFailed("identity store returned empty install ID")
         }
-
-        let appVersion = (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? ""
-        let appBuild = (bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? ""
         let bundleID = bundle.bundleIdentifier ?? ""
 
         return DeviceFingerprint(
             platform: deviceInfo.platform,
             model: deviceInfo.model,
             systemName: deviceInfo.systemName,
-            osVersion: deviceInfo.osVersion,
-            locale: localeProvider().identifier,
-            timezone: timezoneProvider().identifier,
-            appVersion: appVersion,
-            appBuild: appBuild,
             bundleID: bundleID,
             installID: installID,
         )
@@ -102,19 +86,17 @@ public struct SystemDeviceAttestationProvider: DeviceAttestationProviding {
     }
 }
 
-/// Snapshot of static device metadata. Injected to keep the provider testable
-/// on platforms without UIKit/AppKit (Linux CI).
+/// Snapshot of stable device metadata. Injected to keep the provider
+/// testable on platforms without UIKit/AppKit (Linux CI).
 public struct DeviceInfo: Sendable, Equatable {
     public let platform: String
     public let model: String
     public let systemName: String
-    public let osVersion: String
 
-    public init(platform: String, model: String, systemName: String, osVersion: String) {
+    public init(platform: String, model: String, systemName: String) {
         self.platform = platform
         self.model = model
         self.systemName = systemName
-        self.osVersion = osVersion
     }
 }
 
@@ -127,12 +109,8 @@ extension SystemDeviceAttestationProvider {
             platform: platformTag(),
             model: model,
             systemName: device.systemName,
-            osVersion: device.systemVersion,
         )
         #else
-        let info = ProcessInfo.processInfo
-        let v = info.operatingSystemVersion
-        let version = "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
         let systemName: String = {
             #if os(macOS)
             return "macOS"
@@ -148,7 +126,6 @@ extension SystemDeviceAttestationProvider {
             platform: platformTag(),
             model: model,
             systemName: systemName,
-            osVersion: version,
         )
         #endif
     }

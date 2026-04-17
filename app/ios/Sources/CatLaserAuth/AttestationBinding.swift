@@ -8,7 +8,7 @@ import Foundation
 /// pinning hook). Binding each signature to a context-specific value
 /// collapses that window to a single request.
 ///
-/// Three variants, one per auth step:
+/// Four variants, one per authenticated endpoint:
 ///
 /// * `.request(timestamp:)` — placed on the outbound `requestMagicLink`
 ///   call. Timestamp is Unix seconds at the moment the attestation is
@@ -33,8 +33,16 @@ import Foundation
 ///   replayed from a different device because the SE private key never
 ///   leaves the device that signed the nonce in the first place.
 ///
+/// * `.signOut(timestamp:)` — placed on the `signOut` call. Same
+///   timestamp + skew contract as `.request`; distinct tag prevents a
+///   captured `req:` signature from being submitted to the sign-out
+///   endpoint (and vice versa). Device-binds the revocation so a leaked
+///   bearer token alone cannot invalidate a session without also
+///   forging a signature under the original Secure-Enclave key.
+///
 /// Wire format: the binding renders to a tagged UTF-8 string
-/// (`"req:<ts>"`, `"ver:<token>"`, or `"sis:<rawNonce>"`) that is both:
+/// (`"req:<ts>"`, `"ver:<token>"`, `"sis:<rawNonce>"`, or
+/// `"out:<ts>"`) that is both:
 ///
 /// 1. Placed on the wire under the `bnd` key of the attestation payload.
 /// 2. Appended to the 32-byte `fph` hash and fed as the ECDSA message —
@@ -48,6 +56,7 @@ public enum AttestationBinding: Sendable, Equatable {
     case request(timestamp: Int64)
     case verify(token: String)
     case social(rawNonce: String)
+    case signOut(timestamp: Int64)
 
     /// Upper bound on the UTF-8 size of `wireBytes`. Magic-link tokens and
     /// raw nonces are small (tens of bytes); this bound exists so a
@@ -63,6 +72,7 @@ public enum AttestationBinding: Sendable, Equatable {
         case let .request(timestamp): "req:\(timestamp)"
         case let .verify(token): "ver:\(token)"
         case let .social(rawNonce): "sis:\(rawNonce)"
+        case let .signOut(timestamp): "out:\(timestamp)"
         }
     }
 
@@ -106,7 +116,13 @@ public enum AttestationBinding: Sendable, Equatable {
             }
             return .social(rawNonce: rawNonce)
         }
-        throw .attestationFailed("bnd has no recognised tag (expected 'req:', 'ver:', or 'sis:')")
+        if let ts = wireValue.prefixStrippedIfMatches("out:") {
+            guard let parsed = Int64(ts), parsed > 0, String(parsed) == ts else {
+                throw .attestationFailed("bnd sign-out timestamp is not a positive decimal Int64")
+            }
+            return .signOut(timestamp: parsed)
+        }
+        throw .attestationFailed("bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', or 'out:')")
     }
 }
 

@@ -4,24 +4,36 @@ import Foundation
 /// per-install fingerprint used to bind a magic-link request to its
 /// completion. The raw JSON is NEVER sent over the wire — the client
 /// only transmits `sha256(canonicalJSONBytes)` inside a
-/// `DeviceAttestation`. This keeps model/OS/locale/timezone/installID
-/// out of server-side request logs while still allowing the server to do
-/// a byte-equality check between request time and verify time.
+/// `DeviceAttestation`. This keeps the underlying identifiers out of
+/// server-side request logs while still allowing the server to do a
+/// byte-equality check between request time and verify time.
 ///
-/// Schema is adapted from `better-auth-device-fingerprint` for native
-/// mobile: browser-centric fields (viewport, DPR, etc.) are replaced with
-/// identifiers that are stable on mobile but vary between devices —
-/// hardware model, OS version, locale, timezone, app build, bundle ID,
-/// and the SE-key-derived install ID.
+/// Only **stable** identifiers participate in the fingerprint:
+///
+/// * `installID`: base64url(sha256(SPKI)) of the Secure-Enclave-rooted
+///   P-256 key. The load-bearing device identity — the SE private key
+///   cannot leave the device, so possession of a matching `installID` is
+///   proof of the same hardware.
+/// * `bundleID`: the app identifier. Immutable between store releases;
+///   a changed bundle ID means a different app.
+/// * `platform`, `systemName`, `model`: hardware descriptors. `platform`
+///   tags the OS family (`ios`, `macos`, …), `systemName` is the
+///   canonical OS name, and `model` is the hardware machine identifier
+///   (`iPhone15,4`) — all three are fixed for the lifetime of the
+///   device.
+///
+/// **Intentionally excluded** from the fingerprint: `osVersion`,
+/// `appVersion`, `appBuild`, `locale`, `timezone`. These drift across
+/// the ~5-minute magic-link window during ordinary use (OS point
+/// release, TestFlight build promotion, user crosses a time zone,
+/// Region change in Settings) and, if hashed in, would generate spurious
+/// `DEVICE_MISMATCH` rejections for legitimate users without adding any
+/// security value — the `installID` already binds identity to a key
+/// that cannot be exfiltrated.
 public struct DeviceFingerprint: Sendable, Equatable, Codable {
     public let platform: String
     public let model: String
     public let systemName: String
-    public let osVersion: String
-    public let locale: String
-    public let timezone: String
-    public let appVersion: String
-    public let appBuild: String
     public let bundleID: String
     public let installID: String
 
@@ -29,22 +41,12 @@ public struct DeviceFingerprint: Sendable, Equatable, Codable {
         platform: String,
         model: String,
         systemName: String,
-        osVersion: String,
-        locale: String,
-        timezone: String,
-        appVersion: String,
-        appBuild: String,
         bundleID: String,
         installID: String,
     ) {
         self.platform = platform
         self.model = model
         self.systemName = systemName
-        self.osVersion = osVersion
-        self.locale = locale
-        self.timezone = timezone
-        self.appVersion = appVersion
-        self.appBuild = appBuild
         self.bundleID = bundleID
         self.installID = installID
     }

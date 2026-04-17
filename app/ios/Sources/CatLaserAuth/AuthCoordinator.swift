@@ -152,17 +152,7 @@ public actor AuthCoordinator {
         guard let attestationProvider else {
             throw AuthError.providerUnavailable("Magic link provider not configured")
         }
-        let timestamp = Int64(clock().timeIntervalSince1970)
-        guard timestamp >= AuthCoordinator.minPlausibleRequestTimestamp,
-              timestamp <= AuthCoordinator.maxPlausibleRequestTimestamp
-        else {
-            throw AuthError.attestationFailed(
-                "system clock reports an implausible Unix-seconds value (\(timestamp));"
-                    + " expected ["
-                    + "\(AuthCoordinator.minPlausibleRequestTimestamp), "
-                    + "\(AuthCoordinator.maxPlausibleRequestTimestamp)]",
-            )
-        }
+        let timestamp = try plausibleRequestTimestamp()
         let header = try await attestationProvider.currentAttestationHeader(
             binding: .request(timestamp: timestamp),
         )
@@ -196,16 +186,71 @@ public actor AuthCoordinator {
         return session
     }
 
+    /// Revoke the session without ever prompting the user.
+    ///
+    /// Sign-out uses only the session already cached in memory. Reaching
+    /// into the keychain to satisfy an OS-level `.userPresence` ACL
+    /// would fire a biometric prompt — a UX trap when the user's
+    /// intent is to *stop* using the app. If the cache is cold (app was
+    /// just launched, scene was backgrounded and the session
+    /// invalidated, etc.) the server call is skipped entirely; local
+    /// session material is always cleared, and the bearer token expires
+    /// naturally server-side.
+    ///
+    /// When the cache is warm, the outbound revocation carries a fresh
+    /// `x-device-attestation` header bound to the current wall-clock
+    /// second (`bnd = "out:<unix_seconds>"`). This turns sign-out into
+    /// a cryptographically authenticated call — a leaked bearer token
+    /// alone cannot revoke the session; the caller must also produce a
+    /// fresh ECDSA signature under the original Secure-Enclave key.
+    /// Local state is still wiped even if the server call fails.
     public func signOut() async throws {
-        let existing = try await store.load()
-        if let existing {
-            do {
-                try await client.signOut(session: existing)
-            } catch {
-                try await store.delete()
-                throw error
-            }
+        let cachedSession = await store.cachedSession()
+        guard let cachedSession else {
+            try await store.delete()
+            return
+        }
+        guard let attestationProvider else {
+            // Misconfiguration: we hold a session to revoke but cannot
+            // sign an attestation for the server call. Fail the
+            // operation explicitly, but still wipe local state —
+            // otherwise the device is stuck holding a bearer with no
+            // working path to revoke it. The orphaned server-side
+            // bearer will expire naturally.
+            try await store.delete()
+            throw AuthError.providerUnavailable("Sign-out provider not configured")
+        }
+        let header: String
+        do {
+            let timestamp = try plausibleRequestTimestamp()
+            header = try await attestationProvider.currentAttestationHeader(
+                binding: .signOut(timestamp: timestamp),
+            )
+        } catch {
+            try await store.delete()
+            throw error
+        }
+        do {
+            try await client.signOut(session: cachedSession, attestationHeader: header)
+        } catch {
+            try await store.delete()
+            throw error
         }
         try await store.delete()
+    }
+
+    private func plausibleRequestTimestamp() throws(AuthError) -> Int64 {
+        let timestamp = Int64(clock().timeIntervalSince1970)
+        guard timestamp >= AuthCoordinator.minPlausibleRequestTimestamp,
+              timestamp <= AuthCoordinator.maxPlausibleRequestTimestamp
+        else {
+            throw .attestationFailed(
+                "system clock reports an implausible Unix-seconds value (\(timestamp));"
+                    + " expected ["
+                    + "\(AuthCoordinator.minPlausibleRequestTimestamp), "
+                    + "\(AuthCoordinator.maxPlausibleRequestTimestamp)]",
+            )
+        }
+        return timestamp
     }
 }

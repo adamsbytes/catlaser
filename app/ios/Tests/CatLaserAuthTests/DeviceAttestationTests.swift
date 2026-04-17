@@ -14,11 +14,6 @@ private func makeFingerprint(installID: String = "01234567-89AB-CDEF-0123-456789
         platform: "ios",
         model: "iPhone15,4",
         systemName: "iOS",
-        osVersion: "17.4.1",
-        locale: "en_US",
-        timezone: "America/Denver",
-        appVersion: "1.0.0",
-        appBuild: "42",
         bundleID: "com.catlaser.app",
         installID: installID,
     )
@@ -32,7 +27,7 @@ struct DeviceFingerprintCanonicalJSONTests {
         let bytes = try fingerprint.canonicalJSONBytes()
         let json = try #require(String(data: bytes, encoding: .utf8))
         #expect(json == """
-        {"appBuild":"42","appVersion":"1.0.0","bundleID":"com.catlaser.app","installID":"01234567-89AB-CDEF-0123-456789ABCDEF","locale":"en_US","model":"iPhone15,4","osVersion":"17.4.1","platform":"ios","systemName":"iOS","timezone":"America/Denver"}
+        {"bundleID":"com.catlaser.app","installID":"01234567-89AB-CDEF-0123-456789ABCDEF","model":"iPhone15,4","platform":"ios","systemName":"iOS"}
         """)
     }
 
@@ -48,6 +43,24 @@ struct DeviceFingerprintCanonicalJSONTests {
         let a = try makeFingerprint(installID: "a").canonicalJSONBytes()
         let b = try makeFingerprint(installID: "b").canonicalJSONBytes()
         #expect(a != b)
+    }
+
+    @Test
+    func canonicalJSONExcludesVolatileFields() throws {
+        // Regression guard: keep `osVersion`, `appVersion`, `appBuild`,
+        // `locale`, and `timezone` OUT of the canonical bytes. These
+        // drift on OS updates, TestFlight promotions, region changes,
+        // and time-zone crossings; hashing them in would produce
+        // spurious DEVICE_MISMATCH rejects for legitimate users whose
+        // device metadata shifted during the 5-minute magic-link window.
+        let bytes = try makeFingerprint().canonicalJSONBytes()
+        let json = try #require(String(data: bytes, encoding: .utf8))
+        for forbidden in ["osVersion", "appVersion", "appBuild", "locale", "timezone"] {
+            #expect(
+                !json.contains("\"\(forbidden)\":"),
+                "canonical JSON must not carry '\(forbidden)' — it is volatile and would trigger false DEVICE_MISMATCH. Got: \(json)",
+            )
+        }
     }
 }
 
@@ -70,11 +83,19 @@ struct AttestationBindingTests {
     }
 
     @Test
+    func signOutRendersTaggedUnixSeconds() {
+        #expect(AttestationBinding.signOut(timestamp: 1_700_000_000).wireValue == "out:1700000000")
+        #expect(AttestationBinding.signOut(timestamp: 1).wireValue == "out:1")
+    }
+
+    @Test
     func wireBytesIsUtf8OfWireValue() {
         let binding = AttestationBinding.verify(token: "abc")
         #expect(binding.wireBytes == Data("ver:abc".utf8))
         let social = AttestationBinding.social(rawNonce: "xyz")
         #expect(social.wireBytes == Data("sis:xyz".utf8))
+        let signOut = AttestationBinding.signOut(timestamp: 42)
+        #expect(signOut.wireBytes == Data("out:42".utf8))
     }
 
     @Test
@@ -93,6 +114,12 @@ struct AttestationBindingTests {
     func decodeRoundTripsSocial() throws {
         let decoded = try AttestationBinding.decode(wireValue: "sis:raw-nonce-abc")
         #expect(decoded == .social(rawNonce: "raw-nonce-abc"))
+    }
+
+    @Test
+    func decodeRoundTripsSignOut() throws {
+        let decoded = try AttestationBinding.decode(wireValue: "out:1700000000")
+        #expect(decoded == .signOut(timestamp: 1_700_000_000))
     }
 
     @Test
@@ -123,6 +150,16 @@ struct AttestationBindingTests {
     func decodeRejectsZeroTimestamp() {
         // Zero implies a broken / unset clock; treat as invalid.
         expectDecodeFailure("req:0", matching: "timestamp")
+    }
+
+    @Test
+    func decodeRejectsNonNumericSignOutTimestamp() {
+        expectDecodeFailure("out:notanumber", matching: "timestamp")
+        expectDecodeFailure("out:", matching: "timestamp")
+        expectDecodeFailure("out:-5", matching: "timestamp")
+        expectDecodeFailure("out:012345", matching: "timestamp")
+        expectDecodeFailure("out:1.5", matching: "timestamp")
+        expectDecodeFailure("out:0", matching: "timestamp")
     }
 
     @Test
@@ -160,7 +197,10 @@ struct AttestationBindingTests {
         // with different bindings must produce different signed bytes.
         // This is the crux of the replay defence — for every pair of
         // distinct binding tags, a signature for one must NOT verify
-        // against the other's signed bytes.
+        // against the other's signed bytes. Critically, `req:<ts>` and
+        // `out:<ts>` use the SAME timestamp format but distinct tags,
+        // so a captured magic-link-request header cannot be replayed
+        // against the sign-out endpoint and vice versa.
         let identity = SoftwareIdentityStore()
         let fingerprint = makeFingerprint(installID: try await identity.installID())
         let reqAttestation = try await DeviceAttestationBuilder.build(
@@ -178,12 +218,23 @@ struct AttestationBindingTests {
             identity: identity,
             binding: .social(rawNonce: "n"),
         )
+        let outAttestation = try await DeviceAttestationBuilder.build(
+            fingerprint: fingerprint,
+            identity: identity,
+            // Same numeric timestamp as `reqAttestation` — the tag alone
+            // must separate the signed bytes.
+            binding: .signOut(timestamp: 1_700_000_000),
+        )
         let reqSigned = reqAttestation.fingerprintHash + reqAttestation.binding.wireBytes
         let verSigned = verAttestation.fingerprintHash + verAttestation.binding.wireBytes
         let sisSigned = sisAttestation.fingerprintHash + sisAttestation.binding.wireBytes
+        let outSigned = outAttestation.fingerprintHash + outAttestation.binding.wireBytes
         #expect(reqSigned != verSigned, "request and verify bindings must produce distinct signed bytes")
         #expect(reqSigned != sisSigned, "request and social bindings must produce distinct signed bytes")
+        #expect(reqSigned != outSigned, "request and sign-out bindings must produce distinct signed bytes even at identical timestamps")
         #expect(verSigned != sisSigned, "verify and social bindings must produce distinct signed bytes")
+        #expect(verSigned != outSigned, "verify and sign-out bindings must produce distinct signed bytes")
+        #expect(sisSigned != outSigned, "social and sign-out bindings must produce distinct signed bytes")
 
         // Every pair of distinct-context signatures must fail to
         // verify against another context's signed bytes.
@@ -191,18 +242,31 @@ struct AttestationBindingTests {
         let reqSig = try P256.Signing.ECDSASignature(derRepresentation: reqAttestation.signature)
         let verSig = try P256.Signing.ECDSASignature(derRepresentation: verAttestation.signature)
         let sisSig = try P256.Signing.ECDSASignature(derRepresentation: sisAttestation.signature)
+        let outSig = try P256.Signing.ECDSASignature(derRepresentation: outAttestation.signature)
         #expect(!key.isValidSignature(reqSig, for: verSigned),
                 "request-time signature must not verify against verify-time signed bytes")
         #expect(!key.isValidSignature(reqSig, for: sisSigned),
                 "request-time signature must not verify against social-signed bytes")
+        #expect(!key.isValidSignature(reqSig, for: outSigned),
+                "request-time signature must not verify against sign-out signed bytes")
         #expect(!key.isValidSignature(verSig, for: reqSigned),
                 "verify-time signature must not verify against request-time signed bytes")
         #expect(!key.isValidSignature(verSig, for: sisSigned),
                 "verify-time signature must not verify against social-signed bytes")
+        #expect(!key.isValidSignature(verSig, for: outSigned),
+                "verify-time signature must not verify against sign-out signed bytes")
         #expect(!key.isValidSignature(sisSig, for: reqSigned),
                 "social signature must not verify against request-time signed bytes")
         #expect(!key.isValidSignature(sisSig, for: verSigned),
                 "social signature must not verify against verify-time signed bytes")
+        #expect(!key.isValidSignature(sisSig, for: outSigned),
+                "social signature must not verify against sign-out signed bytes")
+        #expect(!key.isValidSignature(outSig, for: reqSigned),
+                "sign-out signature must not verify against request-time signed bytes")
+        #expect(!key.isValidSignature(outSig, for: verSigned),
+                "sign-out signature must not verify against verify-time signed bytes")
+        #expect(!key.isValidSignature(outSig, for: sisSigned),
+                "sign-out signature must not verify against social-signed bytes")
     }
 
     private func expectDecodeFailure(
@@ -263,6 +327,15 @@ struct DeviceAttestationEncoderTests {
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
         #expect(decoded == attestation)
         #expect(decoded.binding == .social(rawNonce: "raw-nonce-xyz"))
+    }
+
+    @Test
+    func roundTripsSignOutBinding() throws {
+        let attestation = sample(binding: .signOut(timestamp: 1_700_000_000))
+        let encoded = try DeviceAttestationEncoder.encodeHeaderValue(attestation)
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
+        #expect(decoded == attestation)
+        #expect(decoded.binding == .signOut(timestamp: 1_700_000_000))
     }
 
     @Test
@@ -506,18 +579,12 @@ struct DeviceAttestationBuilderTests {
             identity: identity,
             binding: .request(timestamp: 1),
         )
-        var modified = makeFingerprint(installID: id)
-        modified = DeviceFingerprint(
-            platform: modified.platform,
+        let modified = DeviceFingerprint(
+            platform: "ios",
             model: "iPhone1,1",
-            systemName: modified.systemName,
-            osVersion: modified.osVersion,
-            locale: modified.locale,
-            timezone: modified.timezone,
-            appVersion: modified.appVersion,
-            appBuild: modified.appBuild,
-            bundleID: modified.bundleID,
-            installID: modified.installID,
+            systemName: "iOS",
+            bundleID: "com.catlaser.app",
+            installID: id,
         )
         let b = try await DeviceAttestationBuilder.build(
             fingerprint: modified,
@@ -606,40 +673,32 @@ struct DeviceAttestationBuilderTests {
 @Suite("SystemDeviceAttestationProvider")
 struct SystemDeviceAttestationProviderTests {
     @Test
-    func assemblesFullFingerprint() async throws {
+    func assemblesStableFingerprint() async throws {
         let deviceInfo = DeviceInfo(
             platform: "ios",
             model: "iPhone15,4",
             systemName: "iOS",
-            osVersion: "17.4.1",
         )
         let identity = SoftwareIdentityStore()
         let provider = SystemDeviceAttestationProvider(
             identity: identity,
             bundle: Bundle.main,
-            localeProvider: { Locale(identifier: "en_US") },
-            timezoneProvider: { TimeZone(identifier: "America/Denver")! },
             deviceInfo: deviceInfo,
         )
         let fingerprint = try await provider.currentFingerprint()
         #expect(fingerprint.platform == "ios")
         #expect(fingerprint.model == "iPhone15,4")
         #expect(fingerprint.systemName == "iOS")
-        #expect(fingerprint.osVersion == "17.4.1")
-        #expect(fingerprint.locale == "en_US")
-        #expect(fingerprint.timezone == "America/Denver")
         #expect(fingerprint.installID == (try await identity.installID()))
     }
 
     @Test
     func twoCallsReturnSameInstallID() async throws {
-        let deviceInfo = DeviceInfo(platform: "ios", model: "m", systemName: "s", osVersion: "v")
+        let deviceInfo = DeviceInfo(platform: "ios", model: "m", systemName: "s")
         let identity = SoftwareIdentityStore()
         let provider = SystemDeviceAttestationProvider(
             identity: identity,
             bundle: Bundle.main,
-            localeProvider: { Locale(identifier: "en_US") },
-            timezoneProvider: { TimeZone(identifier: "UTC")! },
             deviceInfo: deviceInfo,
         )
         let first = try await provider.currentFingerprint()
@@ -650,13 +709,11 @@ struct SystemDeviceAttestationProviderTests {
 
     @Test
     func attestationHeaderMatchesDirectEncode() async throws {
-        let deviceInfo = DeviceInfo(platform: "ios", model: "m", systemName: "s", osVersion: "v")
+        let deviceInfo = DeviceInfo(platform: "ios", model: "m", systemName: "s")
         let identity = SoftwareIdentityStore()
         let provider = SystemDeviceAttestationProvider(
             identity: identity,
             bundle: Bundle.main,
-            localeProvider: { Locale(identifier: "en_US") },
-            timezoneProvider: { TimeZone(identifier: "UTC")! },
             deviceInfo: deviceInfo,
         )
         let binding = AttestationBinding.request(timestamp: 1_700_000_000)

@@ -47,6 +47,13 @@ import Crypto
 ///   request-time signature cannot satisfy a verify call because the
 ///   signed bytes differ, and a verify-time signature cannot be re-used
 ///   with any other token.
+/// * On `exchangeSocial`: `bnd = "sis:<raw_nonce>"`. The nonce is
+///   single-use, echoed through the identity provider, and
+///   three-way-matched server-side (request body, ID-token claim, `bnd`).
+/// * On `signOut`: `bnd = "out:<now_seconds>"`. Same skew contract as
+///   the request-time binding; the distinct tag means a captured
+///   `req:<ts>` header cannot be replayed against the sign-out
+///   endpoint, and vice versa.
 ///
 /// The tagged prefix also prevents cross-context confusion in which a
 /// client or server strips the prefix before parsing — the raw bytes fed

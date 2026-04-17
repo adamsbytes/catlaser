@@ -278,7 +278,7 @@ struct AuthClientTests {
     }
 
     @Test
-    func signOutSendsBearer() async throws {
+    func signOutSendsBearerAndAttestationHeader() async throws {
         let (client, mock) = try makeClient(outcomes: [.response(.json([:], status: 200, token: nil))])
         let user = AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true)
         let session = AuthSession(
@@ -287,11 +287,33 @@ struct AuthClientTests {
             provider: .apple,
             establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
         )
-        try await client.signOut(session: session)
+        try await client.signOut(session: session, attestationHeader: "SIGN-OUT-HDR")
         let request = try #require(await mock.lastRequest())
         #expect(request.url?.absoluteString == "https://auth.example/api/auth/sign-out")
         #expect(request.method == "POST")
         #expect(request.headers["Authorization"] == "Bearer my-token")
+        #expect(request.header(DeviceAttestationEncoder.headerName) == "SIGN-OUT-HDR",
+                "revocation must carry the device attestation — a leaked bearer must not suffice")
+    }
+
+    @Test
+    func signOutRejectsEmptyAttestationHeader() async throws {
+        let (client, mock) = try makeClient(outcomes: [])
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        do {
+            try await client.signOut(session: session, attestationHeader: "")
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.contains("empty"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await mock.sendCount() == 0, "an unsigned sign-out must never hit the wire")
     }
 
     @Test
@@ -304,7 +326,7 @@ struct AuthClientTests {
             establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
         )
         await #expect(throws: AuthError.serverError(status: 500, message: nil)) {
-            try await client.signOut(session: session)
+            try await client.signOut(session: session, attestationHeader: "hdr")
         }
     }
 

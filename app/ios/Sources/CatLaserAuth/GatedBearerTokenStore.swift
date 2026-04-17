@@ -70,6 +70,16 @@ public actor GatedBearerTokenStore: BearerTokenStore {
         return session
     }
 
+    /// Returns the in-memory cached session without prompting, without
+    /// checking gate freshness, and without reading the keychain.
+    /// Returns nil whenever the cache is cold — the caller must treat
+    /// nil as "no session available without a prompt," *not* "no
+    /// session exists." Used by `AuthCoordinator.signOut` so revoking
+    /// a session never triggers a biometric UI.
+    public func cachedSession() async -> AuthSession? {
+        cached
+    }
+
     public func delete() async throws {
         cached = nil
         await gate.invalidate()

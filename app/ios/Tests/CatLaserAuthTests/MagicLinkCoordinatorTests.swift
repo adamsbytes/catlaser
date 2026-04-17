@@ -68,11 +68,6 @@ private func makeFingerprint(installID: String = "test-install") -> DeviceFinger
         platform: "ios",
         model: "iPhone15,4",
         systemName: "iOS",
-        osVersion: "17.4",
-        locale: "en_US",
-        timezone: "UTC",
-        appVersion: "1.0.0",
-        appBuild: "1",
         bundleID: "com.catlaser.app",
         installID: installID,
     )
@@ -368,7 +363,11 @@ struct MagicLinkCoordinatorTests {
         let mock = MockHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 200, headers: [:], body: Data())),
         ])
-        let client = AuthClient(config: try makeConfig(), http: mock, clock: { Date() })
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: mock,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
         let session = AuthSession(
             bearerToken: "bearer-ml",
             user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
@@ -376,11 +375,26 @@ struct MagicLinkCoordinatorTests {
             establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
         )
         let store = InMemoryBearerTokenStore(initial: session)
-        let coord = AuthCoordinator(client: client, store: store)
+        let identity = SoftwareIdentityStore()
+        let installID = try await identity.installID()
+        let provider = StubDeviceAttestationProvider(
+            fingerprint: makeFingerprint(installID: installID),
+            identity: identity,
+        )
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            attestationProvider: provider,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
         try await coord.signOut()
         let req = try #require(await mock.lastRequest())
         #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/sign-out")
         #expect(req.headers["Authorization"] == "Bearer bearer-ml")
+        let header = try #require(req.header(DeviceAttestationEncoder.headerName))
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        #expect(decoded.binding == .signOut(timestamp: 1_700_000_000))
+        #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
         #expect(try await store.load() == nil)
     }
 

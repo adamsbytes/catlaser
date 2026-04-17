@@ -93,18 +93,13 @@ private func makeConfig() throws -> AuthConfig {
     )
 }
 
-private func makeSocialFingerprint() -> DeviceFingerprint {
+private func makeSocialFingerprint(installID: String) -> DeviceFingerprint {
     DeviceFingerprint(
         platform: "ios",
         model: "iPhone15,4",
         systemName: "iOS",
-        osVersion: "17.4",
-        locale: "en_US",
-        timezone: "UTC",
-        appVersion: "1.0.0",
-        appBuild: "1",
         bundleID: "com.catlaser.app",
-        installID: "social-install",
+        installID: installID,
     )
 }
 
@@ -112,19 +107,7 @@ private func makeAttestationProvider(
     identity: any DeviceIdentityStoring,
 ) async throws -> RecordingAttestationProvider {
     let installID = try await identity.installID()
-    var fingerprint = makeSocialFingerprint()
-    fingerprint = DeviceFingerprint(
-        platform: fingerprint.platform,
-        model: fingerprint.model,
-        systemName: fingerprint.systemName,
-        osVersion: fingerprint.osVersion,
-        locale: fingerprint.locale,
-        timezone: fingerprint.timezone,
-        appVersion: fingerprint.appVersion,
-        appBuild: fingerprint.appBuild,
-        bundleID: fingerprint.bundleID,
-        installID: installID,
-    )
+    let fingerprint = makeSocialFingerprint(installID: installID)
     return RecordingAttestationProvider(fingerprint: fingerprint, identity: identity)
 }
 
@@ -495,7 +478,11 @@ struct AuthCoordinatorTests {
         let http = MockHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 200, headers: [:], body: Data())),
         ])
-        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
         let session = AuthSession(
             bearerToken: "to-kill",
             user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
@@ -503,17 +490,26 @@ struct AuthCoordinatorTests {
             establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
         )
         let store = InMemoryBearerTokenStore(initial: session)
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: nil,
+            attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
         )
         try await coord.signOut()
         #expect(try await store.load() == nil)
         let req = try #require(await http.lastRequest())
         #expect(req.url?.absoluteString == "https://auth.example/api/auth/sign-out")
         #expect(req.headers["Authorization"] == "Bearer to-kill")
+        let header = try #require(req.header(DeviceAttestationEncoder.headerName))
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        #expect(decoded.binding == .signOut(timestamp: 1_700_000_000),
+                "sign-out must carry a freshness-bound attestation under the out: tag")
+        #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
     }
 
     @Test
@@ -529,11 +525,14 @@ struct AuthCoordinatorTests {
             establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
         )
         let store = InMemoryBearerTokenStore(initial: session)
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
         let coord = AuthCoordinator(
             client: client,
             store: store,
             appleProvider: nil,
             googleProvider: nil,
+            attestationProvider: attestation,
         )
         await #expect(throws: AuthError.serverError(status: 500, message: nil)) {
             try await coord.signOut()
@@ -543,6 +542,9 @@ struct AuthCoordinatorTests {
 
     @Test
     func signOutWithNoSessionIsNoOp() async throws {
+        // Cold cache, no attestation provider needed — sign-out must
+        // still succeed without prompting or throwing, and must not hit
+        // the network.
         let http = MockHTTPClient(outcomes: [])
         let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
         let store = InMemoryBearerTokenStore()
@@ -554,6 +556,84 @@ struct AuthCoordinatorTests {
         )
         try await coord.signOut()
         #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil)
+    }
+
+    @Test
+    func signOutWithCachedSessionButNoAttestationProviderThrowsAndWipes() async throws {
+        // If the cache has a session — meaning we *would* notify the
+        // server — but there's no attestation provider configured, the
+        // coordinator must refuse to emit an unsigned sign-out call.
+        // Production invariant: every authenticated endpoint carries a
+        // device attestation. The local session is still wiped so the
+        // user is not left in a stuck "cannot sign out" state.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .google,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: nil,
+        )
+        do {
+            try await coord.signOut()
+            Issue.record("expected providerUnavailable")
+        } catch let AuthError.providerUnavailable(msg) {
+            #expect(msg.lowercased().contains("sign-out"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil, "local session must be wiped even when the server call is refused")
+    }
+
+    @Test
+    func signOutAttestationRebuildFailureStillWipesStore() async throws {
+        // An attestation-side failure (e.g. an implausible clock or a
+        // broken identity store) must not leave the user signed in
+        // locally. Sign-out's contract is "after this returns the
+        // device is logged out," even on the error path.
+        struct Failing: DeviceAttestationProviding {
+            func currentFingerprint() async throws -> DeviceFingerprint {
+                throw AuthError.attestationFailed("fingerprint broken")
+            }
+
+            func currentAttestation(binding _: AttestationBinding) async throws -> DeviceAttestation {
+                throw AuthError.attestationFailed("cannot build")
+            }
+        }
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            attestationProvider: Failing(),
+        )
+        do {
+            try await coord.signOut()
+            Issue.record("expected attestationFailed")
+        } catch AuthError.attestationFailed {
+            // expected
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil)
     }
 
     @Test
