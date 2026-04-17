@@ -139,4 +139,68 @@ struct AuthModelsTests {
         #expect(a == b)
         #expect(a != c)
     }
+
+    @Test
+    func authProviderRawValues() {
+        #expect(AuthProvider.apple.rawValue == "apple")
+        #expect(AuthProvider.google.rawValue == "google")
+        #expect(AuthProvider.magicLink.rawValue == "magic-link")
+        #expect(AuthProvider.allCases.count == 3)
+    }
+
+    @Test
+    func authProviderMirrorsSocialProvider() {
+        #expect(AuthProvider(social: .apple) == .apple)
+        #expect(AuthProvider(social: .google) == .google)
+    }
+
+    @Test
+    func magicLinkRequestBodyEncodesEmailAndCallback() throws {
+        let body = MagicLinkRequestBody(email: "a@b.com", callbackURL: "https://x/y")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(body)
+        let json = String(data: data, encoding: .utf8)
+        #expect(json == "{\"callbackURL\":\"https:\\/\\/x\\/y\",\"email\":\"a@b.com\"}")
+    }
+
+    @Test
+    func magicLinkRequestBodyOmitsNilCallback() throws {
+        let body = MagicLinkRequestBody(email: "a@b.com", callbackURL: nil)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(body)
+        let json = String(data: data, encoding: .utf8)
+        #expect(json == "{\"email\":\"a@b.com\"}")
+    }
+
+    @Test
+    func magicLinkVerifyResponseDecodes() throws {
+        let json = """
+        {"user":{"id":"u","email":"a@b.com","emailVerified":true}}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(MagicLinkVerifyResponse.self, from: json)
+        #expect(decoded.user.id == "u")
+        #expect(decoded.user.email == "a@b.com")
+    }
+
+    @Test
+    func authSessionRoundTripsWithMagicLinkProvider() throws {
+        let user = AuthUser(id: "u", email: "a@b.com", name: nil, image: nil, emailVerified: true)
+        let session = AuthSession(
+            bearerToken: "bearer",
+            user: user,
+            provider: .magicLink,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(session)
+        let jsonString = String(data: data, encoding: .utf8) ?? ""
+        #expect(jsonString.contains("\"provider\":\"magic-link\""))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(AuthSession.self, from: data)
+        #expect(decoded == session)
+    }
 }

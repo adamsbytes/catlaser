@@ -11,6 +11,9 @@ public enum AuthError: Error, Equatable, Sendable {
     case keychain(OSStatusCode)
     case providerUnavailable(String)
     case providerInternal(String)
+    case invalidEmail
+    case invalidMagicLink(String?)
+    case fingerprintCaptureFailed(String)
 
     public var isRetriable: Bool {
         switch self {

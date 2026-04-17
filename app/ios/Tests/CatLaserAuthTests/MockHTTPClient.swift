@@ -13,6 +13,18 @@ actor MockHTTPClient: HTTPClient {
         let method: String?
         let headers: [String: String]
         let body: Data?
+
+        /// Case-insensitive header lookup. HTTP header names are
+        /// case-insensitive per RFC 9110, and swift-corelibs-foundation
+        /// title-cases custom header names on Linux (Darwin preserves case),
+        /// so tests must not depend on the original casing.
+        func header(_ name: String) -> String? {
+            let lower = name.lowercased()
+            for (k, v) in headers where k.lowercased() == lower {
+                return v
+            }
+            return nil
+        }
     }
 
     enum Outcome: Sendable {

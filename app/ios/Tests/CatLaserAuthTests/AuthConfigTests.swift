@@ -130,4 +130,57 @@ struct AuthConfigTests {
         #expect(config.baseURL == url)
     }
 
+    @Test
+    func magicLinkRequestURLIsCorrect() throws {
+        let config = try AuthConfig(
+            baseURL: validBaseURL,
+            appleServiceID: "a",
+            googleClientID: "b",
+        )
+        #expect(config.magicLinkRequestURL.absoluteString
+            == "https://auth.catlaser.example/api/auth/sign-in/magic-link")
+    }
+
+    @Test
+    func magicLinkVerifyURLIsCorrect() throws {
+        let config = try AuthConfig(
+            baseURL: validBaseURL,
+            appleServiceID: "a",
+            googleClientID: "b",
+        )
+        #expect(config.magicLinkVerifyURL.absoluteString
+            == "https://auth.catlaser.example/api/auth/magic-link/verify")
+    }
+
+    @Test
+    func universalLinkHostIsLowercaseOfBaseHost() throws {
+        let url = URL(string: "HTTPS://Auth.CatLaser.Example")!
+        let config = try AuthConfig(
+            baseURL: url,
+            appleServiceID: "a",
+            googleClientID: "b",
+        )
+        #expect(config.universalLinkHost == "auth.catlaser.example")
+    }
+
+    @Test
+    func universalLinkPathMatchesVerifyURLPath() throws {
+        let config = try AuthConfig(
+            baseURL: validBaseURL,
+            appleServiceID: "a",
+            googleClientID: "b",
+        )
+        #expect(config.universalLinkPath == "/api/auth/magic-link/verify")
+    }
+
+    @Test
+    func universalLinkPathRespectsBaseURLPrefix() throws {
+        let base = URL(string: "https://auth.catlaser.example/tenants/42")!
+        let config = try AuthConfig(
+            baseURL: base,
+            appleServiceID: "a",
+            googleClientID: "b",
+        )
+        #expect(config.universalLinkPath == "/tenants/42/api/auth/magic-link/verify")
+    }
 }

@@ -107,13 +107,13 @@ struct SocialSignInResponse: Decodable, Equatable {
 public struct AuthSession: Sendable, Equatable, Codable {
     public let bearerToken: String
     public let user: AuthUser
-    public let provider: SocialProvider
+    public let provider: AuthProvider
     public let establishedAt: Date
 
     public init(
         bearerToken: String,
         user: AuthUser,
-        provider: SocialProvider,
+        provider: AuthProvider,
         establishedAt: Date,
     ) {
         self.bearerToken = bearerToken
@@ -134,7 +134,7 @@ public struct AuthSession: Sendable, Equatable, Codable {
         bearerToken = try c.decode(String.self, forKey: .bearerToken)
         user = try c.decode(AuthUser.self, forKey: .user)
         let providerRaw = try c.decode(String.self, forKey: .provider)
-        guard let parsed = SocialProvider(rawValue: providerRaw) else {
+        guard let parsed = AuthProvider(rawValue: providerRaw) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .provider,
                 in: c,
@@ -152,4 +152,24 @@ public struct AuthSession: Sendable, Equatable, Codable {
         try c.encode(provider.rawValue, forKey: .provider)
         try c.encode(establishedAt, forKey: .establishedAt)
     }
+}
+
+struct MagicLinkRequestBody: Encodable, Equatable {
+    let email: String
+    let callbackURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case email
+        case callbackURL
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(email, forKey: .email)
+        try c.encodeIfPresent(callbackURL, forKey: .callbackURL)
+    }
+}
+
+struct MagicLinkVerifyResponse: Decodable, Equatable {
+    let user: AuthUser
 }

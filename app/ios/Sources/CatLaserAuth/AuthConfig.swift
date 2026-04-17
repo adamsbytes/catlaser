@@ -13,7 +13,7 @@ public struct AuthConfig: Sendable, Equatable {
         guard let scheme = baseURL.scheme?.lowercased(), scheme == "https" else {
             throw AuthConfigError.insecureBaseURL
         }
-        guard baseURL.host?.isEmpty == false else {
+        guard let host = baseURL.host, !host.isEmpty else {
             throw AuthConfigError.invalidBaseURL
         }
         let trimmed = appleServiceID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,6 +35,25 @@ public struct AuthConfig: Sendable, Equatable {
 
     public var signOutURL: URL {
         baseURL.appendingPathComponent("api/auth/sign-out")
+    }
+
+    public var magicLinkRequestURL: URL {
+        baseURL.appendingPathComponent("api/auth/sign-in/magic-link")
+    }
+
+    public var magicLinkVerifyURL: URL {
+        baseURL.appendingPathComponent("api/auth/magic-link/verify")
+    }
+
+    /// The exact host (lowercased) the app should accept a Universal Link callback from.
+    public var universalLinkHost: String {
+        (baseURL.host ?? "").lowercased()
+    }
+
+    /// The exact path (including base-URL prefix if any) the app should accept a Universal Link
+    /// callback at. The email link resolves to this path with a `token` query parameter.
+    public var universalLinkPath: String {
+        magicLinkVerifyURL.path
     }
 }
 

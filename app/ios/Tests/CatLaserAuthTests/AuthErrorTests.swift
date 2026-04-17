@@ -52,4 +52,25 @@ struct AuthErrorTests {
         let err = AuthError.credentialInvalid("server rejected token abc123")
         #expect(err == AuthError.credentialInvalid("server rejected token abc123"))
     }
+
+    @Test
+    func invalidMagicLinkEquality() {
+        #expect(AuthError.invalidMagicLink("host mismatch") == AuthError.invalidMagicLink("host mismatch"))
+        #expect(AuthError.invalidMagicLink(nil) == AuthError.invalidMagicLink(nil))
+        #expect(AuthError.invalidMagicLink("a") != AuthError.invalidMagicLink("b"))
+    }
+
+    @Test
+    func invalidMagicLinkNotRetriable() {
+        #expect(AuthError.invalidMagicLink(nil).isRetriable == false)
+        #expect(AuthError.invalidEmail.isRetriable == false)
+        #expect(AuthError.fingerprintCaptureFailed("x").isRetriable == false)
+    }
+
+    @Test
+    func fingerprintCaptureFailedEquality() {
+        #expect(AuthError.fingerprintCaptureFailed("x") == AuthError.fingerprintCaptureFailed("x"))
+        #expect(AuthError.fingerprintCaptureFailed("x") != AuthError.fingerprintCaptureFailed("y"))
+        #expect(AuthError.fingerprintCaptureFailed("x") != AuthError.invalidEmail)
+    }
 }
