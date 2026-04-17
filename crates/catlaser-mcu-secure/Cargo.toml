@@ -5,6 +5,16 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# This is a bare-metal no_std/no_main image; it cannot be built as a
+# libtest harness (that would need the std `test` crate, which has no
+# implementation for thumbv8m.main-none-eabi). Disabling test+bench on
+# the bin target makes `cargo clippy --all-targets` scope to the real
+# image only, instead of emitting `E0463: can't find crate for test`.
+[[bin]]
+name = "catlaser-mcu-secure"
+test = false
+bench = false
+
 [dependencies]
 catlaser-common.workspace = true
 cortex-m.workspace = true

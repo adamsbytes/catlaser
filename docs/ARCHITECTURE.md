@@ -49,8 +49,9 @@
 
 **MCU**
 - RP2350 (Cortex-M33), TrustZone-M hardware isolation between safety-critical and application firmware
-- Secure world (small, synchronous, no Embassy): laser GPIO, watchdog, tilt enforcement, person-detection gating — hardware-inaccessible to application code via SAU and ACCESSCTRL
-- Non-Secure world (Embassy async runtime): 200Hz servo interpolation, UART parsing, dispenser control — calls Secure gateway functions to request laser state changes, report sensor data, and feed watchdog
+- Secure world (small, synchronous, no Embassy): laser GPIO, watchdog, beam-dwell monitor — hardware-inaccessible to application code via SAU and ACCESSCTRL. Exposes exactly two NSC gateways (`set_laser_state`, `feed_watchdog`) and accepts no safety observables from Non-Secure; the dwell monitor reads the pan/tilt PWM compare registers directly from the PWM peripheral, so a malicious or buggy NS image cannot fabricate beam motion
+- Class 2 laser source (≤1 mW visible CW) combined with the Secure-world dwell cap bounds retinal exposure per beam-termination point below the blink-reflex MPE, independent of mount orientation, mount height, or aim direction
+- Non-Secure world (Embassy async runtime): 200Hz servo interpolation, UART parsing, dispenser control — calls Secure gateway functions to request laser state changes and feed the watchdog
 - Dispenser control: drives disc/door/deflector servos on command, fixed-duration pulses, jam detection via servo stall timeout
 - Hopper sensor GPIO: MCU reads IR break-beam for status LED, compute module reads same line for session gating
 - Watchdog: no message in 500ms → Secure world forces laser off, pan/tilt servos home, dispenser door closed
@@ -59,7 +60,7 @@
 **Vision Pipeline**
 - YOLOv5/v8-nano quantized INT8 on NPU, ~15 FPS at 640x480, stock COCO weights for v1
 - Detects cats and people in single pass
-- Person detection computes safety ceiling at 75% of lowest detected person's bbox height — laser stays below
+- Person detection computes a behavioural ceiling at 75% of the most restrictive detected person's bbox height — the behaviour engine aims the laser below that line, keeping play visually polite around humans. This is a behavioural hint consumed by Python, not an eye-safety interlock; eye safety is owned by the MCU (Class 2 power + Secure-world dwell cap)
 - SORT tracker (Kalman + Hungarian) for frame-to-frame cat following, runs on CPU, basically free
   - Track states: tentative (new) → confirmed (3+ hits) → coasting (no match, Kalman predicts) → dead (30 frames unmatched)
   - Identity assigned once at confirmation, not per-frame
@@ -92,7 +93,7 @@
   - `DetectionFrame`: timestamp, frame number, list of `TrackedCat` (track_id, cat_id, normalized center/size/velocity, track state), pre-computed safety_ceiling_y, person_in_frame flag, ambient_brightness
   - Each `TrackedCat` has state: TENTATIVE / CONFIRMED / COASTING
   - Normalized coordinates (0-1) so Python never needs camera resolution or FOV
-  - `safety_ceiling_y` pre-computed from all person detections — Python doesn't see individual person bboxes
+  - `safety_ceiling_y` and `person_in_frame` are behavioural hints for the Python behaviour engine (aim politely away from people); they are not eye-safety interlocks. Eye safety is enforced end-to-end on the MCU. Python never sees individual person bboxes — only the single aggregated ceiling
 - Rust → Python, sporadic events:
   - `TrackEvent`: new_track, track_lost (with duration_ms for play stats), identity_request (embedding bytes + confidence)
   - `IdentityRequest`: Rust runs embedding model on NPU, sends 128-dim vector; Python compares against catalog in SQLite
@@ -106,10 +107,10 @@
 **UART: Rust (Compute) → MCU (8-byte packed struct)**
 - `ServoCommand` in catlaser-common, `#[repr(C, packed)]`, little-endian (native to both ARM cores):
   - `pan: i16` — target angle x100 (e.g. 4523 = 45.23deg), 0.01deg resolution
-  - `tilt: i16` — target angle x100, clamped by MCU to HORIZON_LIMIT regardless
+  - `tilt: i16` — target angle x100, clamped by MCU to the physical servo travel range (mechanical protection)
   - `smoothing: u8` — 0-255 maps to 0.0-1.0 interpolation factor
   - `max_slew: u8` — 0-255 maps to max deg/sec (0 = use default)
-  - `flags: u8` — bit 0: laser on, bit 1: person detected (MCU can tighten limits), bit 2: dispense left, bit 3: dispense right, bits 4-5: dispense tier (0-2 index into MCU rotation table, 3 reserved), bits 6-7: reserved
+  - `flags: u8` — bit 0: laser on, bit 1: reserved, bit 2: dispense left, bit 3: dispense right, bits 4-5: dispense tier (0-2 index into MCU rotation table, 3 reserved), bits 6-7: reserved
   - `checksum: u8` — XOR of bytes 0-6, failed check = keep last good command
 - No serialization library — both crates import from catlaser-common, layout is compile-time identical
 

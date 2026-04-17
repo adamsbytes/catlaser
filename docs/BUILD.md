@@ -10,7 +10,7 @@
   - [X] 200Hz servo interpolation loop + PWM output
   - [X] Laser GPIO control
   - [X] Watchdog (500ms timeout → laser off, servos home, dispenser door closed)
-  - [X] Tilt clamp (hardware horizon limit enforcement)
+  - [X] Beam-dwell monitor (Secure-world PWM compare readback, Class 2 dose cap)
   - [X] Power monitoring (VBUS ADC, supercap shutdown sequence)
   - [X] Dispenser servo control (disc/door/deflector, jam detection via stall timeout)
   - [X] Hopper sensor GPIO read + status LED

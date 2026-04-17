@@ -50,8 +50,9 @@ pub const NSC_FLASH_BASE: u32 = 0x1001_0000_u32;
 /// Size of the NSC veneer region (256 bytes).
 ///
 /// Enough for ~16 veneer stubs at 16 bytes each. The project needs
-/// four gateways (`set_laser_state`, `report_tilt`, `feed_watchdog`,
-/// `report_person_detected`).
+/// two gateways (`set_laser_state`, `feed_watchdog`). The reserved
+/// headroom leaves room for future Secure-owned sensor attestations
+/// without relinking.
 pub const NSC_FLASH_SIZE: u32 = 0x0000_0100_u32;
 
 /// Last address of the NSC veneer region (inclusive).
@@ -181,8 +182,12 @@ pub const SAU_REGION_MAX: u8 = 8_u8;
 pub enum GatewayStatus {
     /// Laser state change succeeded.
     Ok,
-    /// Tilt angle exceeds the applicable horizon limit.
-    TiltViolation,
+    /// The beam has been stationary for more than the permitted window
+    /// (see [`DWELL_MAX_STATIONARY_SAMPLES`](crate::constants::DWELL_MAX_STATIONARY_SAMPLES)).
+    /// Class 2 eye safety depends on bounded dwell — the Secure world
+    /// refuses to enable the laser until recent motion on the pan or
+    /// tilt PWM compare registers proves the beam is moving.
+    DwellViolation,
     /// Hardware watchdog has not been started (NS firmware not ready).
     WatchdogInactive,
 }
@@ -192,7 +197,7 @@ impl GatewayStatus {
     pub const fn to_raw(self) -> u32 {
         match self {
             Self::Ok => 0_u32,
-            Self::TiltViolation => 1_u32,
+            Self::DwellViolation => 1_u32,
             Self::WatchdogInactive => 2_u32,
         }
     }
@@ -203,7 +208,7 @@ impl GatewayStatus {
     pub const fn from_raw(raw: u32) -> Option<Self> {
         match raw {
             0_u32 => Some(Self::Ok),
-            1_u32 => Some(Self::TiltViolation),
+            1_u32 => Some(Self::DwellViolation),
             2_u32 => Some(Self::WatchdogInactive),
             _ => None,
         }
@@ -215,42 +220,31 @@ impl GatewayStatus {
     }
 }
 
-/// Returns `true` if the given tilt pitch is within the applicable
-/// horizon limit.
-///
-/// When `person_detected` is `true`, the stricter
-/// [`TILT_HORIZON_LIMIT_PERSON`](crate::constants::TILT_HORIZON_LIMIT_PERSON)
-/// is used. Positive tilt values point downward (safe); values below
-/// the limit point upward toward eye height (unsafe).
-pub const fn is_tilt_safe(tilt_pitch: i16, person_detected: bool) -> bool {
-    let limit = if person_detected {
-        crate::constants::TILT_HORIZON_LIMIT_PERSON
-    } else {
-        crate::constants::TILT_HORIZON_LIMIT
-    };
-    tilt_pitch >= limit
-}
-
-/// Checks whether laser activation is safe given the current tilt,
-/// person-detection state, and watchdog status.
+/// Checks whether laser activation is safe given the current dwell
+/// state and watchdog status.
 ///
 /// Returns [`GatewayStatus::Ok`] if all invariants pass. Invariants
 /// are checked in priority order:
 ///
 /// 1. **Watchdog active** -- the hardware safety net must be running
-///    before the laser can turn on.
-/// 2. **Tilt within bounds** -- the tilt pitch must be at or below the
-///    applicable horizon limit (which tightens when a person is detected).
-pub const fn check_laser_safety(
-    tilt_pitch: i16,
-    person_detected: bool,
-    watchdog_active: bool,
-) -> GatewayStatus {
+///    before the laser can turn on. Without the watchdog, a firmware
+///    hang could leave the laser energised indefinitely.
+/// 2. **Beam moving** -- recent motion must be observable on the pan
+///    or tilt PWM compare registers. Class 2 eye safety relies on
+///    blink-reflex-bounded exposure; a stationary beam at any pointing
+///    direction would violate that bound after
+///    [`DWELL_MAX_STATIONARY_SAMPLES`](crate::constants::DWELL_MAX_STATIONARY_SAMPLES)
+///    cycles.
+///
+/// Neither invariant references the commanded servo angle or any
+/// input carried over the UART: the Secure world decides independently
+/// from hardware observables it controls directly.
+pub const fn check_laser_safety(watchdog_active: bool, beam_moving: bool) -> GatewayStatus {
     if !watchdog_active {
         return GatewayStatus::WatchdogInactive;
     }
-    if !is_tilt_safe(tilt_pitch, person_detected) {
-        return GatewayStatus::TiltViolation;
+    if !beam_moving {
+        return GatewayStatus::DwellViolation;
     }
     GatewayStatus::Ok
 }
@@ -469,9 +463,9 @@ const _: () = assert!(
 
 // Gateway status raw values must be distinct.
 const _: () = assert!(
-    GatewayStatus::Ok.to_raw() != GatewayStatus::TiltViolation.to_raw()
+    GatewayStatus::Ok.to_raw() != GatewayStatus::DwellViolation.to_raw()
         && GatewayStatus::Ok.to_raw() != GatewayStatus::WatchdogInactive.to_raw()
-        && GatewayStatus::TiltViolation.to_raw() != GatewayStatus::WatchdogInactive.to_raw(),
+        && GatewayStatus::DwellViolation.to_raw() != GatewayStatus::WatchdogInactive.to_raw(),
     "GatewayStatus raw values must be unique"
 );
 
@@ -481,26 +475,24 @@ const _: () = assert!(
     "GatewayStatus::Ok must be 0"
 );
 
-// check_laser_safety must deny when watchdog is inactive.
+// check_laser_safety must deny when watchdog is inactive regardless of
+// dwell state — the watchdog is the outermost safety guarantee.
 const _: () = assert!(
-    !check_laser_safety(crate::constants::TILT_HOME, false, false).is_ok(),
+    !check_laser_safety(false, true).is_ok(),
     "laser must be denied when watchdog is inactive"
 );
 
-// check_laser_safety must allow when all invariants pass.
+// check_laser_safety must deny when the beam has been stationary even
+// when the watchdog is active.
 const _: () = assert!(
-    check_laser_safety(crate::constants::TILT_HOME, false, true).is_ok(),
-    "laser must be allowed when all invariants pass"
+    !check_laser_safety(true, false).is_ok(),
+    "laser must be denied when the beam has been stationary"
 );
 
-// is_tilt_safe must accept the tilt home position.
+// check_laser_safety must allow when both invariants pass.
 const _: () = assert!(
-    is_tilt_safe(crate::constants::TILT_HOME, false),
-    "TILT_HOME must be safe without person detected"
-);
-const _: () = assert!(
-    is_tilt_safe(crate::constants::TILT_HOME, true),
-    "TILT_HOME must be safe with person detected"
+    check_laser_safety(true, true).is_ok(),
+    "laser must be allowed when watchdog is active and the beam is moving"
 );
 
 // --- ResetReason ---
@@ -783,7 +775,7 @@ mod tests {
     fn test_gateway_status_round_trip_all_variants() {
         for status in [
             GatewayStatus::Ok,
-            GatewayStatus::TiltViolation,
+            GatewayStatus::DwellViolation,
             GatewayStatus::WatchdogInactive,
         ] {
             assert_eq!(
@@ -809,8 +801,8 @@ mod tests {
     fn test_gateway_status_is_ok() {
         assert!(GatewayStatus::Ok.is_ok(), "Ok.is_ok() must be true");
         assert!(
-            !GatewayStatus::TiltViolation.is_ok(),
-            "TiltViolation.is_ok() must be false"
+            !GatewayStatus::DwellViolation.is_ok(),
+            "DwellViolation.is_ok() must be false"
         );
         assert!(
             !GatewayStatus::WatchdogInactive.is_ok(),
@@ -818,137 +810,44 @@ mod tests {
         );
     }
 
-    // --- is_tilt_safe ---
-
-    #[test]
-    fn test_is_tilt_safe_at_normal_limit() {
-        assert!(
-            is_tilt_safe(crate::constants::TILT_HORIZON_LIMIT, false),
-            "exactly at normal horizon limit must be safe"
-        );
-    }
-
-    #[test]
-    fn test_is_tilt_safe_below_normal_limit() {
-        assert!(
-            !is_tilt_safe(
-                crate::constants::TILT_HORIZON_LIMIT.saturating_sub(1_i16),
-                false,
-            ),
-            "one below normal horizon limit must be unsafe"
-        );
-    }
-
-    #[test]
-    fn test_is_tilt_safe_well_above_normal_limit() {
-        assert!(
-            is_tilt_safe(crate::constants::TILT_HOME, false),
-            "home position must be safe without person"
-        );
-    }
-
-    #[test]
-    fn test_is_tilt_safe_at_person_limit() {
-        assert!(
-            is_tilt_safe(crate::constants::TILT_HORIZON_LIMIT_PERSON, true),
-            "exactly at person horizon limit must be safe"
-        );
-    }
-
-    #[test]
-    fn test_is_tilt_safe_below_person_limit() {
-        assert!(
-            !is_tilt_safe(
-                crate::constants::TILT_HORIZON_LIMIT_PERSON.saturating_sub(1_i16),
-                true,
-            ),
-            "one below person horizon limit must be unsafe"
-        );
-    }
-
-    #[test]
-    fn test_is_tilt_safe_normal_valid_but_person_invalid() {
-        // 0 is >= -1000 (safe without person) but < 500 (unsafe with person).
-        assert!(is_tilt_safe(0_i16, false), "0 must be safe without person");
-        assert!(!is_tilt_safe(0_i16, true), "0 must be unsafe with person");
-    }
-
     // --- check_laser_safety ---
 
     #[test]
     fn test_check_laser_safety_all_good() {
         assert_eq!(
-            check_laser_safety(crate::constants::TILT_HOME, false, true),
+            check_laser_safety(true, true),
             GatewayStatus::Ok,
-            "safe tilt + no person + watchdog active must be Ok"
-        );
-    }
-
-    #[test]
-    fn test_check_laser_safety_safe_with_person_and_safe_tilt() {
-        assert_eq!(
-            check_laser_safety(crate::constants::TILT_HOME, true, true),
-            GatewayStatus::Ok,
-            "safe tilt + person + watchdog active must be Ok"
+            "watchdog active + beam moving must be Ok"
         );
     }
 
     #[test]
     fn test_check_laser_safety_watchdog_inactive_highest_priority() {
         assert_eq!(
-            check_laser_safety(crate::constants::TILT_HOME, false, false),
+            check_laser_safety(false, true),
             GatewayStatus::WatchdogInactive,
-            "watchdog inactive must take priority over safe state"
+            "watchdog inactive must take priority over moving beam"
         );
     }
 
     #[test]
-    fn test_check_laser_safety_watchdog_priority_over_tilt() {
+    fn test_check_laser_safety_watchdog_priority_over_dwell() {
+        // When both invariants would deny, the watchdog check wins —
+        // watchdog failure is the more safety-relevant signal and the
+        // caller should diagnose it first.
         assert_eq!(
-            check_laser_safety(i16::MIN, false, false),
+            check_laser_safety(false, false),
             GatewayStatus::WatchdogInactive,
-            "watchdog inactive must take priority over tilt violation"
+            "watchdog inactive must take priority over dwell violation"
         );
     }
 
     #[test]
-    fn test_check_laser_safety_tilt_violation_no_person() {
+    fn test_check_laser_safety_dwell_violation_when_stationary() {
         assert_eq!(
-            check_laser_safety(
-                crate::constants::TILT_HORIZON_LIMIT.saturating_sub(1_i16),
-                false,
-                true,
-            ),
-            GatewayStatus::TiltViolation,
-            "tilt above normal horizon must be TiltViolation"
-        );
-    }
-
-    #[test]
-    fn test_check_laser_safety_tilt_violation_with_person() {
-        // 0 is safe without person (>= -1000) but unsafe with person (< 500).
-        assert_eq!(
-            check_laser_safety(0_i16, true, true),
-            GatewayStatus::TiltViolation,
-            "tilt above person horizon must be TiltViolation"
-        );
-    }
-
-    #[test]
-    fn test_check_laser_safety_at_exact_normal_limit() {
-        assert_eq!(
-            check_laser_safety(crate::constants::TILT_HORIZON_LIMIT, false, true),
-            GatewayStatus::Ok,
-            "exactly at normal limit must be Ok"
-        );
-    }
-
-    #[test]
-    fn test_check_laser_safety_at_exact_person_limit() {
-        assert_eq!(
-            check_laser_safety(crate::constants::TILT_HORIZON_LIMIT_PERSON, true, true),
-            GatewayStatus::Ok,
-            "exactly at person limit must be Ok"
+            check_laser_safety(true, false),
+            GatewayStatus::DwellViolation,
+            "stationary beam with watchdog active must be DwellViolation"
         );
     }
 
@@ -956,36 +855,26 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_is_tilt_safe_consistent_with_limit_comparison(
-            tilt in any::<i16>(),
-            person_detected in any::<bool>(),
+        fn test_check_laser_safety_ok_iff_all_invariants_pass(
+            watchdog_active in any::<bool>(),
+            beam_moving in any::<bool>(),
         ) {
-            let limit = if person_detected {
-                crate::constants::TILT_HORIZON_LIMIT_PERSON
-            } else {
-                crate::constants::TILT_HORIZON_LIMIT
-            };
+            let status = check_laser_safety(watchdog_active, beam_moving);
+            let expected_ok = watchdog_active && beam_moving;
             prop_assert_eq!(
-                is_tilt_safe(tilt, person_detected),
-                tilt >= limit,
-                "is_tilt_safe({}, {}) must equal tilt >= limit({})",
-                tilt, person_detected, limit,
+                status.is_ok(),
+                expected_ok,
+                "check_laser_safety({}, {}) = {:?}, expected ok = {}",
+                watchdog_active, beam_moving, status, expected_ok,
             );
         }
 
         #[test]
-        fn test_check_laser_safety_ok_iff_all_invariants_pass(
-            tilt in any::<i16>(),
-            person in any::<bool>(),
-            wd_active in any::<bool>(),
-        ) {
-            let status = check_laser_safety(tilt, person, wd_active);
-            let expected_ok = wd_active && is_tilt_safe(tilt, person);
+        fn test_check_laser_safety_watchdog_precedence(beam_moving in any::<bool>()) {
             prop_assert_eq!(
-                status.is_ok(),
-                expected_ok,
-                "check_laser_safety({}, {}, {}) = {:?}, expected ok = {}",
-                tilt, person, wd_active, status, expected_ok,
+                check_laser_safety(false, beam_moving),
+                GatewayStatus::WatchdogInactive,
+                "watchdog-inactive must report WatchdogInactive regardless of dwell state",
             );
         }
 
@@ -1011,18 +900,6 @@ mod tests {
                 "raw {} must return None",
                 raw,
             );
-        }
-
-        #[test]
-        fn test_is_tilt_safe_person_always_stricter(tilt in any::<i16>()) {
-            // If unsafe without person, must also be unsafe with person.
-            if !is_tilt_safe(tilt, false) {
-                prop_assert!(
-                    !is_tilt_safe(tilt, true),
-                    "tilt {} unsafe without person must also be unsafe with person",
-                    tilt,
-                );
-            }
         }
     }
 

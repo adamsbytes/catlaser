@@ -40,6 +40,7 @@
 )]
 
 mod accessctrl;
+mod dwell;
 pub mod gateway;
 mod handlers;
 mod sau;

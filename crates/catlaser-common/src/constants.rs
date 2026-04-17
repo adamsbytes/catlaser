@@ -17,20 +17,44 @@ pub const TILT_LIMIT_MIN: i16 = -4500_i16;
 pub const TILT_LIMIT_MAX: i16 = 9000_i16;
 
 // ---------------------------------------------------------------------------
-// Safety limits
+// Eye safety (laser power class + beam-motion enforcement)
 // ---------------------------------------------------------------------------
 
-/// Hard horizon limit for tilt, enforced by MCU regardless of commands.
+/// Maximum laser optical output power in microwatts.
 ///
-/// -10.00 deg (10 degrees above horizontal). Allows near-floor play at
-/// close range without the laser reaching eye height.
-pub const TILT_HORIZON_LIMIT: i16 = -1000_i16;
+/// 1000 µW (1 mW) is the Class 2 ceiling for visible continuous-wave
+/// sources per IEC 60825-1. Below this power, a 0.25 s exposure at a
+/// 7 mm pupil does not exceed the maximum permissible exposure — blink
+/// reflex is a sufficient safety net by regulatory definition, provided
+/// the beam does not dwell on a single retinal point for longer than
+/// the reflex window. This constant is the BOM specification; the
+/// [`DWELL_MAX_STATIONARY_SAMPLES`] enforcement below guarantees the
+/// dwell half of the class-2 safety argument.
+pub const LASER_MAX_POWER_UW: u16 = 1000_u16;
 
-/// Tightened tilt limit when person detected (flag bit 1 set).
+/// Per-axis PWM-tick threshold below which a control cycle is considered
+/// "no motion" by the Secure-world dwell monitor.
 ///
-/// +5.00 deg (must point below horizontal). MCU applies this stricter
-/// clamp whenever the person-detected flag is set.
-pub const TILT_HORIZON_LIMIT_PERSON: i16 = 500_i16;
+/// The dwell monitor samples `PWM_CH1_CC` (pan + tilt compare registers)
+/// on every audit cycle. If the combined tick delta since the previous
+/// sample is strictly less than this value on every cycle for
+/// [`DWELL_MAX_STATIONARY_SAMPLES`] consecutive cycles, the Secure world
+/// forces the laser off. A delta of 1 — i.e. any observable change in
+/// either PWM compare register — counts as motion. This yields the
+/// finest possible resolution while still discriminating "truly
+/// stationary" from "slowly moving in 1-tick increments."
+pub const DWELL_MOTION_THRESHOLD_TICKS: u16 = 1_u16;
+
+/// Maximum consecutive sample cycles the beam may be stationary before
+/// the Secure world forces the laser off.
+///
+/// At [`WATCHDOG_CHECK_HZ`] = 100 Hz audit rate, 10 samples is 100 ms —
+/// below the blink-reflex ceiling of 250 ms assumed for Class 2 eye
+/// safety. Combined with [`LASER_MAX_POWER_UW`], this bounds the
+/// maximum retinal dose from any pointing configuration, any
+/// orientation, any mount height: the beam cannot dwell long enough
+/// on one retinal spot to exceed the MPE.
+pub const DWELL_MAX_STATIONARY_SAMPLES: u32 = 10_u32;
 
 /// Watchdog timeout in milliseconds.
 ///
@@ -257,13 +281,6 @@ pub const HOPPER_DEBOUNCE_THRESHOLD: u8 = 4_u8;
 // Compile-time safety invariants
 // ---------------------------------------------------------------------------
 
-// Person-detected tilt limit must be more restrictive (more positive / more
-// downward) than the normal horizon limit.
-const _: () = assert!(
-    TILT_HORIZON_LIMIT_PERSON > TILT_HORIZON_LIMIT,
-    "person-detected tilt limit must be stricter than normal horizon limit"
-);
-
 // Home positions must lie within the servo travel range.
 const _: () = assert!(
     PAN_HOME >= PAN_LIMIT_MIN && PAN_HOME <= PAN_LIMIT_MAX,
@@ -274,14 +291,31 @@ const _: () = assert!(
     "TILT_HOME must be within [TILT_LIMIT_MIN, TILT_LIMIT_MAX]"
 );
 
-// Horizon limits must lie within the tilt servo range.
+// Eye safety is bounded by dose-per-exposure: laser power ceiling plus a
+// dwell window strictly shorter than the blink-reflex window.
 const _: () = assert!(
-    TILT_HORIZON_LIMIT >= TILT_LIMIT_MIN && TILT_HORIZON_LIMIT <= TILT_LIMIT_MAX,
-    "TILT_HORIZON_LIMIT must be within tilt servo range"
+    LASER_MAX_POWER_UW <= 1000_u16,
+    "LASER_MAX_POWER_UW must not exceed Class 2 ceiling (1000 µW / 1 mW)"
 );
 const _: () = assert!(
-    TILT_HORIZON_LIMIT_PERSON >= TILT_LIMIT_MIN && TILT_HORIZON_LIMIT_PERSON <= TILT_LIMIT_MAX,
-    "TILT_HORIZON_LIMIT_PERSON must be within tilt servo range"
+    DWELL_MOTION_THRESHOLD_TICKS >= 1_u16,
+    "dwell motion threshold must be at least 1 PWM tick (a zero threshold accepts no motion as motion)"
+);
+const _: () = assert!(
+    DWELL_MAX_STATIONARY_SAMPLES >= 1_u32,
+    "dwell sample window must be at least 1 sample"
+);
+// 250 ms is the blink-reflex bound for Class 2 in IEC 60825-1 §8.3. The
+// stationary window at WATCHDOG_CHECK_HZ must stay strictly shorter so
+// the Secure world forces the laser off before a dwell could exceed MPE.
+// The invariant `samples / rate < 0.25 s` is equivalent to
+// `samples * 4 < rate`. Both operands are u32, the multiply uses
+// `saturating_mul` so overflow saturates to u32::MAX and fails the
+// comparison (which would then report the violation), and everything
+// below is straightforward const arithmetic.
+const _: () = assert!(
+    DWELL_MAX_STATIONARY_SAMPLES.saturating_mul(4_u32) < WATCHDOG_CHECK_HZ,
+    "dwell stationary window must be shorter than the 250 ms blink-reflex bound for Class 2"
 );
 
 // Pulse widths must be ordered.

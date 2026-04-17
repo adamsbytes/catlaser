@@ -7,7 +7,7 @@
 
 use crate::constants::{
     CONTROL_LOOP_HZ, DEFAULT_MAX_SLEW_DEG_PER_SEC, PAN_LIMIT_MAX, PAN_LIMIT_MIN, PWM_TICKS_CENTER,
-    PWM_TICKS_MAX, PWM_TICKS_MIN, TILT_HORIZON_LIMIT, TILT_HORIZON_LIMIT_PERSON, TILT_LIMIT_MAX,
+    PWM_TICKS_MAX, PWM_TICKS_MIN, TILT_LIMIT_MAX, TILT_LIMIT_MIN,
 };
 
 /// Clamps a pan angle to [`PAN_LIMIT_MIN`]..=[`PAN_LIMIT_MAX`].
@@ -21,20 +21,20 @@ pub const fn clamp_pan(angle: i16) -> i16 {
     }
 }
 
-/// Clamps a tilt angle to the safe range, applying the horizon limit.
+/// Clamps a tilt angle to the physical servo travel range
+/// [`TILT_LIMIT_MIN`]..=[`TILT_LIMIT_MAX`].
 ///
-/// The horizon limit prevents the laser from reaching eye height. When
-/// `person_detected` is `true`, the stricter [`TILT_HORIZON_LIMIT_PERSON`]
-/// is used instead of [`TILT_HORIZON_LIMIT`]. Positive tilt values point
-/// downward.
-pub const fn clamp_tilt(angle: i16, person_detected: bool) -> i16 {
-    let min = if person_detected {
-        TILT_HORIZON_LIMIT_PERSON
-    } else {
-        TILT_HORIZON_LIMIT
-    };
-    if angle < min {
-        min
+/// This is a mechanical-protection clamp, not an eye-safety gate. Eye
+/// safety is enforced end-to-end by the Secure world's dwell monitor
+/// plus the Class 2 power ceiling (see
+/// [`DWELL_MAX_STATIONARY_SAMPLES`](crate::constants::DWELL_MAX_STATIONARY_SAMPLES)
+/// and [`LASER_MAX_POWER_UW`](crate::constants::LASER_MAX_POWER_UW)); the
+/// pointing envelope is free to span the full servo range because
+/// dose-per-exposure is bounded regardless of where the beam points.
+/// Positive tilt values point downward.
+pub const fn clamp_tilt(angle: i16) -> i16 {
+    if angle < TILT_LIMIT_MIN {
+        TILT_LIMIT_MIN
     } else if angle > TILT_LIMIT_MAX {
         TILT_LIMIT_MAX
     } else {
@@ -168,8 +168,7 @@ mod tests {
     use super::*;
     use crate::constants::{
         CONTROL_LOOP_HZ, DEFAULT_MAX_SLEW_DEG_PER_SEC, PAN_HOME, PAN_LIMIT_MAX, PAN_LIMIT_MIN,
-        PWM_TICKS_CENTER, PWM_TICKS_MAX, PWM_TICKS_MIN, TILT_HOME, TILT_HORIZON_LIMIT,
-        TILT_HORIZON_LIMIT_PERSON, TILT_LIMIT_MAX,
+        PWM_TICKS_CENTER, PWM_TICKS_MAX, PWM_TICKS_MIN, TILT_HOME, TILT_LIMIT_MAX, TILT_LIMIT_MIN,
     };
     use proptest::prelude::*;
 
@@ -231,91 +230,59 @@ mod tests {
     // ---- clamp_tilt ----
 
     #[test]
-    fn test_clamp_tilt_normal_within_range() {
+    fn test_clamp_tilt_within_range_passes_through() {
+        assert_eq!(clamp_tilt(0_i16), 0_i16, "horizontal must pass through");
         assert_eq!(
-            clamp_tilt(4500_i16, false),
+            clamp_tilt(4500_i16),
             4500_i16,
             "mid-range must pass through"
         );
         assert_eq!(
-            clamp_tilt(0_i16, false),
-            0_i16,
-            "horizontal must pass through"
+            clamp_tilt(-3000_i16),
+            -3000_i16,
+            "above-horizontal in-range must pass through"
         );
     }
 
     #[test]
-    fn test_clamp_tilt_normal_at_limits() {
+    fn test_clamp_tilt_at_limits_passes_through() {
         assert_eq!(
-            clamp_tilt(TILT_HORIZON_LIMIT, false),
-            TILT_HORIZON_LIMIT,
-            "horizon limit must pass through"
+            clamp_tilt(TILT_LIMIT_MIN),
+            TILT_LIMIT_MIN,
+            "min limit must pass through"
         );
         assert_eq!(
-            clamp_tilt(TILT_LIMIT_MAX, false),
+            clamp_tilt(TILT_LIMIT_MAX),
             TILT_LIMIT_MAX,
             "max limit must pass through"
         );
     }
 
     #[test]
-    fn test_clamp_tilt_normal_below_horizon_clamps() {
+    fn test_clamp_tilt_below_min_clamps() {
         assert_eq!(
-            clamp_tilt(-1001_i16, false),
-            TILT_HORIZON_LIMIT,
-            "below horizon must clamp"
+            clamp_tilt(TILT_LIMIT_MIN.saturating_sub(1_i16)),
+            TILT_LIMIT_MIN,
+            "just below min must clamp"
         );
         assert_eq!(
-            clamp_tilt(i16::MIN, false),
-            TILT_HORIZON_LIMIT,
-            "extreme below must clamp to horizon"
+            clamp_tilt(i16::MIN),
+            TILT_LIMIT_MIN,
+            "extreme below must clamp to min"
         );
     }
 
     #[test]
-    fn test_clamp_tilt_normal_above_max_clamps() {
+    fn test_clamp_tilt_above_max_clamps() {
         assert_eq!(
-            clamp_tilt(9001_i16, false),
+            clamp_tilt(TILT_LIMIT_MAX.saturating_add(1_i16)),
             TILT_LIMIT_MAX,
-            "above max must clamp"
+            "just above max must clamp"
         );
         assert_eq!(
-            clamp_tilt(i16::MAX, false),
+            clamp_tilt(i16::MAX),
             TILT_LIMIT_MAX,
             "extreme above must clamp to max"
-        );
-    }
-
-    #[test]
-    fn test_clamp_tilt_person_detected_tightens_limit() {
-        assert_eq!(
-            clamp_tilt(TILT_HORIZON_LIMIT_PERSON, true),
-            TILT_HORIZON_LIMIT_PERSON,
-            "person limit must pass through"
-        );
-        assert_eq!(
-            clamp_tilt(499_i16, true),
-            TILT_HORIZON_LIMIT_PERSON,
-            "just below person limit must clamp"
-        );
-        assert_eq!(
-            clamp_tilt(0_i16, true),
-            TILT_HORIZON_LIMIT_PERSON,
-            "horizontal must clamp with person detected"
-        );
-        assert_eq!(
-            clamp_tilt(TILT_HORIZON_LIMIT, true),
-            TILT_HORIZON_LIMIT_PERSON,
-            "normal horizon must clamp with person detected"
-        );
-    }
-
-    #[test]
-    fn test_clamp_tilt_person_detected_above_max_clamps() {
-        assert_eq!(
-            clamp_tilt(i16::MAX, true),
-            TILT_LIMIT_MAX,
-            "above max must clamp even with person detected"
         );
     }
 
@@ -578,15 +545,11 @@ mod tests {
         }
 
         #[test]
-        fn test_clamp_tilt_always_within_limits(
-            angle in any::<i16>(),
-            person_detected in any::<bool>(),
-        ) {
-            let clamped = clamp_tilt(angle, person_detected);
-            let min = if person_detected { TILT_HORIZON_LIMIT_PERSON } else { TILT_HORIZON_LIMIT };
+        fn test_clamp_tilt_always_within_limits(angle in any::<i16>()) {
+            let clamped = clamp_tilt(angle);
             prop_assert!(
-                clamped >= min,
-                "clamped tilt {} below horizon {}", clamped, min,
+                clamped >= TILT_LIMIT_MIN,
+                "clamped tilt {} below TILT_LIMIT_MIN {}", clamped, TILT_LIMIT_MIN,
             );
             prop_assert!(
                 clamped <= TILT_LIMIT_MAX,
@@ -604,13 +567,10 @@ mod tests {
         }
 
         #[test]
-        fn test_clamp_tilt_is_idempotent(
-            angle in any::<i16>(),
-            person_detected in any::<bool>(),
-        ) {
-            let once = clamp_tilt(angle, person_detected);
+        fn test_clamp_tilt_is_idempotent(angle in any::<i16>()) {
+            let once = clamp_tilt(angle);
             prop_assert_eq!(
-                clamp_tilt(once, person_detected),
+                clamp_tilt(once),
                 once,
                 "clamping must be idempotent",
             );
@@ -700,27 +660,23 @@ mod tests {
         }
     }
 
-    // ---- full control-loop pipeline safety invariant ----
+    // ---- full control-loop pipeline servo-range invariant ----
     //
     // The MCU control loop runs: clamp target -> interpolate -> slew limit
-    // -> clamp output. The final clamp is the hardware horizon enforcement
-    // that makes the output unconditionally safe. These tests prove the
-    // invariant holds for arbitrary inputs, including person_detected
-    // transitions where the current position is in the newly-unsafe zone.
+    // -> clamp output. The final clamp bounds the PWM compare value to the
+    // physical servo's travel range. Eye safety is NOT enforced here — it
+    // is enforced in the Secure world via dwell + Class 2 power. These
+    // tests only prove the mechanical-protection invariant: the output
+    // tilt value always lies within [TILT_LIMIT_MIN, TILT_LIMIT_MAX] for
+    // arbitrary inputs.
 
     /// Simulates the control loop's tilt processing pipeline:
     /// clamp target -> interpolate -> slew limit -> clamp output.
-    fn tilt_pipeline(
-        current: i16,
-        target: i16,
-        person_detected: bool,
-        smoothing: u8,
-        max_slew: u8,
-    ) -> i16 {
-        let clamped_target = clamp_tilt(target, person_detected);
+    fn tilt_pipeline(current: i16, target: i16, smoothing: u8, max_slew: u8) -> i16 {
+        let clamped_target = clamp_tilt(target);
         let interpolated = interpolate(current, clamped_target, smoothing);
         let slew_limited = slew_limit(current, interpolated, max_slew);
-        clamp_tilt(slew_limited, person_detected)
+        clamp_tilt(slew_limited)
     }
 
     /// Simulates the control loop's pan processing pipeline:
@@ -733,99 +689,41 @@ mod tests {
     }
 
     #[test]
-    fn test_tilt_pipeline_person_transition_clamps_immediately() {
-        // -500 is valid without person (>= TILT_HORIZON_LIMIT of -1000)
-        // but invalid with person (< TILT_HORIZON_LIMIT_PERSON of 500).
-        // With alpha=0 the interpolator holds position, but the final
-        // clamp must still snap to the person limit.
-        let result = tilt_pipeline(-500_i16, -500_i16, true, 0_u8, 0_u8);
-        assert_eq!(
-            result, TILT_HORIZON_LIMIT_PERSON,
-            "person transition must immediately clamp to person limit"
-        );
-    }
-
-    #[test]
-    fn test_tilt_pipeline_person_transition_overrides_smoothing() {
-        // Smoothing moves toward the clamped target gradually, but the
-        // final clamp enforces the person limit on the output regardless.
-        let result = tilt_pipeline(-500_i16, -500_i16, true, 128_u8, 0_u8);
-        assert_eq!(
-            result, TILT_HORIZON_LIMIT_PERSON,
-            "final clamp must override smoothing during person transition"
-        );
-    }
-
-    #[test]
-    fn test_tilt_pipeline_person_transition_overrides_slew_limit() {
-        // Slew limiting restricts per-tick movement, but the final clamp
-        // still enforces the person limit regardless of slew budget.
-        let result = tilt_pipeline(-500_i16, 4500_i16, true, 255_u8, 1_u8);
-        assert!(
-            result >= TILT_HORIZON_LIMIT_PERSON,
-            "final clamp must override slew limiting: got {result}, need >= {TILT_HORIZON_LIMIT_PERSON}",
-        );
-    }
-
-    #[test]
-    fn test_tilt_pipeline_intermediate_unsafe_without_final_clamp() {
-        // Proves the safety gap: without the post-processing clamp,
-        // interpolation + slew limiting produces an output in the unsafe
-        // zone during person_detected transitions.
-        let current = -500_i16;
-        let person_detected = true;
-
-        let clamped_target = clamp_tilt(current, person_detected);
-        let interpolated = interpolate(current, clamped_target, 128_u8);
-        let before_final_clamp = slew_limit(current, interpolated, 0_u8);
-
-        assert!(
-            before_final_clamp < TILT_HORIZON_LIMIT_PERSON,
-            "intermediate result must be in the unsafe zone (got {before_final_clamp})",
-        );
-
-        let after_final_clamp = clamp_tilt(before_final_clamp, person_detected);
-        assert_eq!(
-            after_final_clamp, TILT_HORIZON_LIMIT_PERSON,
-            "final clamp must enforce person limit"
-        );
-    }
-
-    #[test]
     fn test_tilt_pipeline_safe_values_unchanged() {
-        // When current and target are both within the safe range,
+        // When current and target are both within the servo range,
         // the final clamp does not alter the output.
         let current = 4500_i16;
         let target = 6000_i16;
 
-        let result = tilt_pipeline(current, target, false, 128_u8, 0_u8);
-        let clamped_target = clamp_tilt(target, false);
+        let result = tilt_pipeline(current, target, 128_u8, 0_u8);
+        let clamped_target = clamp_tilt(target);
         let interpolated = interpolate(current, clamped_target, 128_u8);
         let without_final_clamp = slew_limit(current, interpolated, 0_u8);
 
         assert_eq!(
             result, without_final_clamp,
-            "final clamp must be a no-op when values are already safe"
+            "final clamp must be a no-op when values are already within range"
         );
     }
 
     #[test]
-    fn test_tilt_pipeline_at_horizon_limit_holds() {
-        let result = tilt_pipeline(TILT_HORIZON_LIMIT, TILT_HORIZON_LIMIT, false, 255_u8, 0_u8);
+    fn test_tilt_pipeline_below_min_clamps() {
+        // Current far below the servo's mechanical minimum (e.g. a
+        // corrupted state). The final clamp must pull the output into
+        // the valid range.
+        let result = tilt_pipeline(i16::MIN, i16::MIN, 0_u8, 0_u8);
         assert_eq!(
-            result, TILT_HORIZON_LIMIT,
-            "position at horizon limit must stay at horizon limit"
+            result, TILT_LIMIT_MIN,
+            "current below TILT_LIMIT_MIN must clamp to TILT_LIMIT_MIN"
         );
     }
 
     #[test]
-    fn test_tilt_pipeline_below_normal_horizon_clamps() {
-        // Current below the normal horizon limit (e.g. boot state before
-        // first valid command). Final clamp enforces even without person.
-        let result = tilt_pipeline(-5000_i16, -5000_i16, false, 0_u8, 0_u8);
+    fn test_tilt_pipeline_above_max_clamps() {
+        let result = tilt_pipeline(i16::MAX, i16::MAX, 0_u8, 0_u8);
         assert_eq!(
-            result, TILT_HORIZON_LIMIT,
-            "current below horizon must clamp to horizon limit"
+            result, TILT_LIMIT_MAX,
+            "current above TILT_LIMIT_MAX must clamp to TILT_LIMIT_MAX"
         );
     }
 
@@ -840,29 +738,25 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_tilt_pipeline_output_always_safe(
+        fn test_tilt_pipeline_output_always_within_servo_range(
             current in any::<i16>(),
             target in any::<i16>(),
-            person_detected in any::<bool>(),
             smoothing in any::<u8>(),
             max_slew in any::<u8>(),
         ) {
-            let result = tilt_pipeline(current, target, person_detected, smoothing, max_slew);
-            let min = if person_detected { TILT_HORIZON_LIMIT_PERSON } else { TILT_HORIZON_LIMIT };
+            let result = tilt_pipeline(current, target, smoothing, max_slew);
             prop_assert!(
-                result >= min,
-                "tilt output {} below horizon {} (person={})",
-                result, min, person_detected,
+                result >= TILT_LIMIT_MIN,
+                "tilt output {} below TILT_LIMIT_MIN {}", result, TILT_LIMIT_MIN,
             );
             prop_assert!(
                 result <= TILT_LIMIT_MAX,
-                "tilt output {} above TILT_LIMIT_MAX {}",
-                result, TILT_LIMIT_MAX,
+                "tilt output {} above TILT_LIMIT_MAX {}", result, TILT_LIMIT_MAX,
             );
         }
 
         #[test]
-        fn test_pan_pipeline_output_always_safe(
+        fn test_pan_pipeline_output_always_within_servo_range(
             current in any::<i16>(),
             target in any::<i16>(),
             smoothing in any::<u8>(),
@@ -871,31 +765,11 @@ mod tests {
             let result = pan_pipeline(current, target, smoothing, max_slew);
             prop_assert!(
                 result >= PAN_LIMIT_MIN,
-                "pan output {} below PAN_LIMIT_MIN {}",
-                result, PAN_LIMIT_MIN,
+                "pan output {} below PAN_LIMIT_MIN {}", result, PAN_LIMIT_MIN,
             );
             prop_assert!(
                 result <= PAN_LIMIT_MAX,
-                "pan output {} above PAN_LIMIT_MAX {}",
-                result, PAN_LIMIT_MAX,
-            );
-        }
-
-        #[test]
-        fn test_tilt_pipeline_person_transition_zone_always_safe(
-            current in (TILT_HORIZON_LIMIT..TILT_HORIZON_LIMIT_PERSON),
-            target in any::<i16>(),
-            smoothing in any::<u8>(),
-            max_slew in any::<u8>(),
-        ) {
-            // Current in the danger zone: valid without person, invalid with.
-            // The final clamp must enforce the person limit for every input
-            // combination in this range.
-            let result = tilt_pipeline(current, target, true, smoothing, max_slew);
-            prop_assert!(
-                result >= TILT_HORIZON_LIMIT_PERSON,
-                "person transition: output {} below person limit {} for current {}",
-                result, TILT_HORIZON_LIMIT_PERSON, current,
+                "pan output {} above PAN_LIMIT_MAX {}", result, PAN_LIMIT_MAX,
             );
         }
     }

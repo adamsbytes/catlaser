@@ -22,10 +22,10 @@ Review the `rust` skill which has critical information that will allow your work
 
 These are hard constraints. Violating any of them breaks the project.
 
-- **MCU is the safety layer.** The RP2350's TrustZone-M Secure world owns laser GPIO, watchdog, and tilt enforcement — hardware-inaccessible to application firmware. No software bug, compute module update, or Non-Secure firmware defect can bypass these protections.
+- **MCU is the safety layer.** The RP2350's TrustZone-M Secure world owns laser GPIO, watchdog, and the beam-dwell monitor — hardware-inaccessible to application firmware. The Secure world reads the pan/tilt PWM compare registers directly to enforce a bounded stationary-dwell cap; combined with a Class 2 (≤1 mW) laser source, this caps per-exposure retinal dose below the blink-reflex MPE regardless of mount orientation. The two NSC gateways are `set_laser_state` and `feed_watchdog`; no safety observables flow from Non-Secure into Secure. No software bug, compute module update, or Non-Secure firmware defect can bypass these protections.
 - **Strict layer hierarchy.** App → Python → Rust (compute) → Rust (MCU). Each layer only talks to its neighbors. Python never touches hardware. The MCU never touches the network.
-- **Python never sees raw hardware.** Python receives normalized coordinates (0.0-1.0) and pre-computed safety ceilings. It never knows camera resolution, FOV, servo angles, or that the MCU exists.
-- **Safety ceiling is pre-computed.** Rust computes `safety_ceiling_y` from all person detections and sends a single float. Python never sees individual person bounding boxes.
+- **Python never sees raw hardware.** Python receives normalized coordinates (0.0-1.0) and a pre-computed behavioural ceiling. It never knows camera resolution, FOV, servo angles, or that the MCU exists.
+- **Behavioural ceiling is pre-computed, not a safety interlock.** Rust computes `safety_ceiling_y` from all person detections and sends a single float; Python uses it to aim the laser politely below people. Eye safety is owned by the MCU (Class 2 + Secure-world dwell cap), not by this ceiling. Python never sees individual person bounding boxes.
 - **Fail-safe on every layer.** Watchdog (MCU, 500ms) → laser off + servos home. Power loss (MCU, VBUS) → laser off within 100ms. Compute crash → watchdog fires. Any single layer failing keeps the product safe.
 - **Deterministic wire formats.** `ServoCommand` is `#[repr(C, packed)]` imported from `catlaser-common`. IPC is length-prefixed protobuf. No serialization library on the UART path.
 
@@ -93,7 +93,7 @@ catlaser/
 │   │       ├── main.rs               # Embassy entry, task spawning
 │   │       ├── control.rs            # 200Hz servo interpolation loop
 │   │       ├── uart.rs               # UART RX, command parsing + checksum
-│   │       ├── safety.rs             # Watchdog feed, tilt reporting (via Secure gateways)
+│   │       ├── safety.rs             # Watchdog feed (via Secure gateway)
 │   │       └── pwm.rs               # Servo PWM drivers
 │   │
 │   └── catlaser-mcu-secure/          # RP2350 Secure firmware (no_std, no Embassy).
@@ -101,10 +101,11 @@ catlaser/
 │       └── src/
 │           ├── main.rs               # SAU + ACCESSCTRL init, NS boot
 │           ├── gateway.rs            # NSC entry points (set_laser_state,
-│           │                         # report_tilt, feed_watchdog,
-│           │                         # report_person_detected)
+│           │                         # feed_watchdog)
+│           ├── dwell.rs              # Beam-dwell monitor — direct PWM
+│           │                         # compare reads via PAC
 │           └── handlers.rs           # Secure interrupts (watchdog timeout,
-│                                     # tilt fault, power brownout → laser off)
+│                                     # power brownout → laser off)
 │
 ├── python/
 │   ├── pyproject.toml                # uv-managed, ruff + pyright config

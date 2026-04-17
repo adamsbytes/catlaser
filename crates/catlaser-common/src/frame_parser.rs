@@ -170,7 +170,7 @@ mod tests {
             500_i16,
             200_u8,
             50_u8,
-            Flags::new().with_person_detected(true),
+            Flags::new().with_dispense_left(true),
         );
 
         let result_a = push_command(&mut parser, cmd_a);

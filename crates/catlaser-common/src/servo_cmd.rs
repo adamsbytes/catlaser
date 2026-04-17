@@ -40,18 +40,21 @@ pub struct ChecksumError {
 /// | Bit | Name             | Effect                                       |
 /// |-----|------------------|----------------------------------------------|
 /// | 0   | laser on         | Laser diode enable                           |
-/// | 1   | person detected  | MCU tightens tilt limits                     |
+/// | 1   | reserved         | Must be 0 — no safety input is carried here  |
 /// | 2   | dispense left    | Deflector routes treats left                 |
 /// | 3   | dispense right   | Deflector routes treats right                |
 /// | 4-5 | dispense tier    | 0-2 index into MCU rotation table            |
 /// | 6-7 | reserved         | Must be 0                                    |
+///
+/// The MCU's Secure world never reads a safety input from the wire. Bit 1
+/// is reserved so the byte layout stays stable for future behavior-only
+/// extensions; populating it has no effect on laser gating.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 #[must_use]
 pub struct Flags(u8);
 
 impl Flags {
     const LASER_ON: u8 = 0x01_u8;
-    const PERSON_DETECTED: u8 = 0x02_u8;
     const DISPENSE_LEFT: u8 = 0x04_u8;
     const DISPENSE_RIGHT: u8 = 0x08_u8;
     const TIER_MASK: u8 = 0x30_u8;
@@ -76,11 +79,6 @@ impl Flags {
         self.0 & Self::LASER_ON != 0_u8
     }
 
-    /// Returns `true` if the person-detected bit is set.
-    pub const fn person_detected(self) -> bool {
-        self.0 & Self::PERSON_DETECTED != 0_u8
-    }
-
     /// Returns `true` if the dispense-left bit is set.
     pub const fn dispense_left(self) -> bool {
         self.0 & Self::DISPENSE_LEFT != 0_u8
@@ -102,15 +100,6 @@ impl Flags {
             Self(self.0 | Self::LASER_ON)
         } else {
             Self(self.0 & !Self::LASER_ON)
-        }
-    }
-
-    /// Sets or clears the person-detected bit.
-    pub const fn with_person_detected(self, detected: bool) -> Self {
-        if detected {
-            Self(self.0 | Self::PERSON_DETECTED)
-        } else {
-            Self(self.0 & !Self::PERSON_DETECTED)
         }
     }
 
@@ -155,7 +144,6 @@ impl fmt::Debug for Flags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Flags")
             .field("laser_on", &self.laser_on())
-            .field("person_detected", &self.person_detected())
             .field("dispense_left", &self.dispense_left())
             .field("dispense_right", &self.dispense_right())
             .field("dispense_tier", &self.dispense_tier())
@@ -372,7 +360,7 @@ mod tests {
     fn test_to_bytes_from_bytes_round_trip() {
         let flags = Flags::new()
             .with_laser(true)
-            .with_person_detected(true)
+            .with_dispense_left(true)
             .with_dispense_tier(1_u8);
         let original = ServoCommand::new(-4500_i16, 3000_i16, 64_u8, 150_u8, flags);
         let bytes = original.to_bytes();
@@ -474,33 +462,39 @@ mod tests {
     fn test_flags_laser_on_isolation() {
         let flags = Flags::new().with_laser(true);
         assert!(flags.laser_on(), "laser_on bit not set");
-        assert!(
-            !flags.person_detected(),
-            "person_detected should not be set"
-        );
         assert!(!flags.dispense_left(), "dispense_left should not be set");
         assert!(!flags.dispense_right(), "dispense_right should not be set");
         assert_eq!(flags.dispense_tier(), 0_u8, "dispense_tier should be 0");
     }
 
     #[test]
-    fn test_flags_person_detected_isolation() {
-        let flags = Flags::new().with_person_detected(true);
-        assert!(!flags.laser_on(), "laser_on should not be set");
-        assert!(flags.person_detected(), "person_detected bit not set");
-        assert!(!flags.dispense_left(), "dispense_left should not be set");
-        assert!(!flags.dispense_right(), "dispense_right should not be set");
-        assert_eq!(flags.dispense_tier(), 0_u8, "dispense_tier should be 0");
+    fn test_flags_reserved_bit_one_never_touched() {
+        // Bit 1 is reserved (no safety input on the wire). Every builder
+        // must leave it clear, and `from_raw` must preserve an externally
+        // set bit verbatim so a malformed sender cannot be silently
+        // "fixed" into a valid-looking frame.
+        let built = Flags::new()
+            .with_laser(true)
+            .with_dispense_left(true)
+            .with_dispense_right(true)
+            .with_dispense_tier(3_u8);
+        assert_eq!(
+            built.raw() & 0x02_u8,
+            0_u8,
+            "no builder must ever set the reserved bit 1",
+        );
+        let forced = Flags::from_raw(0xFF_u8);
+        assert_eq!(
+            forced.raw() & 0x02_u8,
+            0x02_u8,
+            "from_raw must preserve the reserved bit verbatim for round-trip fidelity",
+        );
     }
 
     #[test]
     fn test_flags_dispense_left_isolation() {
         let flags = Flags::new().with_dispense_left(true);
         assert!(!flags.laser_on(), "laser_on should not be set");
-        assert!(
-            !flags.person_detected(),
-            "person_detected should not be set"
-        );
         assert!(flags.dispense_left(), "dispense_left bit not set");
         assert!(!flags.dispense_right(), "dispense_right should not be set");
         assert_eq!(flags.dispense_tier(), 0_u8, "dispense_tier should be 0");
@@ -510,10 +504,6 @@ mod tests {
     fn test_flags_dispense_right_isolation() {
         let flags = Flags::new().with_dispense_right(true);
         assert!(!flags.laser_on(), "laser_on should not be set");
-        assert!(
-            !flags.person_detected(),
-            "person_detected should not be set"
-        );
         assert!(!flags.dispense_left(), "dispense_left should not be set");
         assert!(flags.dispense_right(), "dispense_right bit not set");
         assert_eq!(flags.dispense_tier(), 0_u8, "dispense_tier should be 0");
@@ -545,13 +535,11 @@ mod tests {
     fn test_flags_combined_all_set() {
         let flags = Flags::new()
             .with_laser(true)
-            .with_person_detected(true)
             .with_dispense_left(true)
             .with_dispense_right(true)
             .with_dispense_tier(2_u8);
 
         assert!(flags.laser_on(), "laser_on should be set");
-        assert!(flags.person_detected(), "person_detected should be set");
         assert!(flags.dispense_left(), "dispense_left should be set");
         assert!(flags.dispense_right(), "dispense_right should be set");
         assert_eq!(flags.dispense_tier(), 2_u8, "dispense_tier should be 2");
@@ -614,7 +602,6 @@ mod tests {
     fn test_dispense_direction_independent_of_other_flags() {
         let flags = Flags::new()
             .with_laser(true)
-            .with_person_detected(true)
             .with_dispense_left(true)
             .with_dispense_tier(2_u8);
         assert_eq!(

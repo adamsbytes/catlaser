@@ -4,7 +4,7 @@
 
 The RP2350's dual Cortex-M33 cores implement Arm's TrustZone-M security extension (ARMv8-M). This partitions the processor into two hardware-enforced worlds — Secure (S) and Non-Secure (NS) — where isolation is enforced at the bus fabric level, not by software permission checks. A Non-Secure bus transaction targeting Secure memory is rejected by hardware before it reaches the target; no amount of NS-side code — buggy or malicious — can circumvent this.
 
-For the catlaser project, TrustZone-M lets the Secure world own all safety-critical invariants (laser kill, tilt clamp, watchdog, person-detected enforcement) while the Non-Secure world runs the application logic (servo interpolation, UART parsing, dispenser control) under Embassy.
+For the catlaser project, TrustZone-M lets the Secure world own all safety-critical invariants (laser kill, watchdog, beam-dwell cap derived from direct PWM compare register reads) while the Non-Secure world runs the application logic (servo interpolation, UART parsing, dispenser control) under Embassy. The Secure world takes no safety observables from Non-Secure — it samples the pan/tilt PWM compare registers itself, so NS cannot lie about beam position.
 
 ## RP2350-Specific TrustZone Resources
 
@@ -94,14 +94,12 @@ The Secure image and NS image are separate binaries compiled independently. The 
 The Secure image is small, synchronous, and does not need Embassy's async runtime. It consists of:
 
 - **SAU/ACCESSCTRL initialization** — partitions memory and peripherals at boot.
-- **Gateway functions** (NSC veneers):
-  - `set_laser_state(on: bool) -> Result<(), SafetyViolation>` — checks all safety invariants (tilt within bounds, person-not-detected flag clear, watchdog fed) before toggling the laser GPIO. The GPIO itself is Secure; NS code physically cannot write it directly.
-  - `report_tilt(pitch: i16, roll: i16)` — receives tilt data and updates the Secure-side tilt clamp. If tilt exceeds limits, the Secure side kills the laser immediately.
-  - `feed_watchdog()` — only resets the watchdog if the Secure side's own invariants are satisfied.
-  - `report_person_detected(detected: bool)` — sets an internal flag that `set_laser_state` checks.
+- **Gateway functions** (NSC veneers, exactly two):
+  - `set_laser_state(on: bool) -> GatewayStatus` — checks all safety invariants (watchdog active, beam currently moving per the dwell monitor) before toggling the laser GPIO. The GPIO itself is Secure; NS code physically cannot write it directly. The dwell monitor is fed by Secure-only reads of `PWM_CH1_CC` (pan + tilt compare), so NS cannot fabricate motion to unlock the laser.
+  - `feed_watchdog()` — only resets the watchdog if the Secure side's own invariants are satisfied, and advances the dwell monitor by sampling the pan/tilt PWM compare registers on each call. This is the one recurring NS→S transition; everything the Secure world learns about the hardware flows through this call.
+  - No other gateways exist. The Secure world accepts no safety observables from Non-Secure — NS may request laser state and watchdog refresh, never assert sensor data. A malicious or buggy NS image that claims the beam is moving while holding PWM compare constant simply has its lies ignored: the Secure world reads the registers itself.
 - **Secure interrupt handlers:**
   - Watchdog timeout → forces laser off, enters safe state.
-  - Tilt fault → forces laser off.
   - Power brownout (via POWMAN) → forces laser off.
 
 ### Non-Secure World Responsibilities
@@ -115,7 +113,7 @@ The NS image runs Embassy and handles everything that is not safety-critical:
 
 ### Why This Matters
 
-A buffer overflow in the UART parser, a logic bug in servo interpolation, or even deliberately malicious NS code cannot: write the laser GPIO, disable the watchdog, alter tilt limits, or suppress person-detection enforcement. These invariants are enforced by silicon, not by the correctness of the application firmware.
+A buffer overflow in the UART parser, a logic bug in servo interpolation, or even deliberately malicious NS code cannot: write the laser GPIO, disable the watchdog, or spoof beam position to defeat the dwell cap — the Secure world reads the pan/tilt PWM compare registers directly, so NS-claimed motion is never consulted. Combined with a Class 2 (≤1 mW) laser source, this caps per-exposure retinal dose below the blink-reflex MPE regardless of mount orientation. These invariants are enforced by silicon, not by the correctness of the application firmware.
 
 ## Key References
 
