@@ -76,6 +76,10 @@ export default defineConfig(
       'unicorn/better-regex': 'error',
       'unicorn/consistent-destructuring': 'error',
 
+      // Prettier lowercases hex digits; align the lint rule so the two
+      // don't fight each other on every autofix pass.
+      'unicorn/number-literal-case': ['error', { hexadecimalValue: 'lowercase' }],
+
       'unicorn/catch-error-name': ['error', { name: 'error' }],
       'unicorn/prefer-export-from': ['error', { ignoreUsedVariables: true }],
       'unicorn/prefer-switch': ['error', { minimumCases: 3 }],
