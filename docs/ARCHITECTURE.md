@@ -125,5 +125,6 @@
 - Live view via WebRTC (LiveKit), H.264/265 from hardware encoder
 - Native apps: SwiftUI (iOS, primary) + Jetpack Compose (Android)
 - Thin clients — proto contract defines the app, minimal business logic
-- Firebase Auth for sign-in with Apple/Google
+- better-auth on the coordination server for sign-in with Apple, Google, and email magic links; native apps exchange provider ID tokens (or completed magic links) for a bearer token kept in platform secure storage (Keychain / EncryptedSharedPreferences)
+- Magic-link delivery into the app via Universal Links (iOS) / App Links (Android); request-time device fingerprint (model, OS version, locale, app build, Keychain-bound install ID) validated at link completion to gate phishing — fingerprint plugin vendored from `better-auth-device-fingerprint` (unpublished internal library, copy and adapt at implementation time), mobile clients only
 - Push notifications via APNs (iOS) / FCM (Android) for play summaries and session alerts

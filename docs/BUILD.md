@@ -64,7 +64,8 @@
 
 [ ] App — iOS (SwiftUI, primary)
   - [X] Proto codegen (swift-protobuf from app.proto)
-  - [ ] Firebase Auth (sign-in with Apple/Google)
+  - [ ] Sign in with Apple + Google (AuthenticationServices + GoogleSignIn SDK, ID token exchanged for better-auth bearer)
+  - [ ] Sign in with email magic link (Universal Links target, device fingerprint payload sent at request time)
   - [ ] Sign in screen
   - [ ] Live view (LiveKit iOS SDK, WebRTC)
   - [ ] History + cat profiles (stats, naming, management)
@@ -73,6 +74,7 @@
 
 [ ] App — Android (Jetpack Compose, port)
   - [ ] Proto codegen (protobuf-kotlin from app.proto)
-  - [ ] Firebase Auth (sign-in with Google)
+  - [ ] Sign in with Google (Credential Manager, ID token exchanged for better-auth bearer)
+  - [ ] Sign in with email magic link (App Links target, device fingerprint payload sent at request time)
   - [ ] Port all screens from iOS (same flows, Compose equivalents)
   - [ ] Push notifications (FCM)
