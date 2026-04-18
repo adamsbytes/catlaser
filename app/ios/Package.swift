@@ -26,6 +26,10 @@ let package = Package(
             targets: ["CatLaserLive"],
         ),
         .library(
+            name: "CatLaserPairing",
+            targets: ["CatLaserPairing"],
+        ),
+        .library(
             name: "CatLaserApp",
             targets: ["CatLaserApp"],
         ),
@@ -160,12 +164,58 @@ let package = Package(
             ],
             path: "Tests/CatLaserLiveTests",
         ),
+        // Device pairing + persistent endpoint management. Owns the
+        // QR-scan → coordination-server-pair → Keychain-persist flow,
+        // the auto-reconnect + heartbeat supervisor over the already-
+        // paired endpoint, and the sign-out wipe hook. `AVFoundation`
+        // and `UIKit` are gated with `canImport`, matching the same
+        // pattern `CatLaserLive` uses for LiveKit; pure logic
+        // (URL parsing, HTTP exchange, reconnect supervisor) builds
+        // and tests on Linux SPM runners.
+        .target(
+            name: "CatLaserPairing",
+            dependencies: [
+                "CatLaserAuth",
+                "CatLaserDevice",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserPairing",
+        ),
+        // Test-only. In-memory endpoint store + a fake
+        // `NetworkPathMonitor` so `ConnectionManagerTests` can simulate
+        // Wi-Fi drops and restores deterministically. Excluded from
+        // `products:` so shipping code cannot wire a mock into a
+        // release build.
+        .target(
+            name: "CatLaserPairingTestSupport",
+            dependencies: [
+                "CatLaserPairing",
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserPairingTestSupport",
+        ),
+        .testTarget(
+            name: "CatLaserPairingTests",
+            dependencies: [
+                "CatLaserPairing",
+                "CatLaserPairingTestSupport",
+                "CatLaserAuth",
+                "CatLaserAuthTestSupport",
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Tests/CatLaserPairingTests",
+        ),
         .target(
             name: "CatLaserApp",
             dependencies: [
                 "CatLaserAuth",
                 "CatLaserDevice",
                 "CatLaserLive",
+                "CatLaserPairing",
             ],
             path: "Sources/CatLaserApp",
         ),

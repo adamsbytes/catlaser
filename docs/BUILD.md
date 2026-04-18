@@ -72,6 +72,7 @@
   - [X] Protected-route attestation middleware (api: binding on every authenticated call, per-session SE pubkey stored at sign-in, signature verify gates the request)
   - [X] Idempotency keys on mutating routes (server dedupes within skew window to block write-replay on captured attestations)
   - [X] Rate limiting (per-email + per-IP cooldown, enumeration-resistant identical 200 responses)
+  - [ ] Device pairing endpoint/flow
   - [ ] Cloudflare Tunnel deployment (cloudflared on VM, no inbound ports) + client pins 3–4 public roots CF chains through
 
 [ ] App — iOS (SwiftUI, primary)
@@ -81,7 +82,7 @@
   - [X] Sign in screen
   - [X] Signed HTTP client wrapper (SE-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
   - [X] Live view (LiveKit iOS SDK, WebRTC)
-  - [ ] Device pairing + endpoint persistence (QR pair flow, coordination-server-brokered Tailscale endpoint lookup, Keychain-persisted endpoint, auto-reconnect on network change, connection heartbeat, signed-out → endpoint wipe)
+  - [X] Device pairing + endpoint persistence (QR pair flow, coordination-server-brokered Tailscale endpoint lookup, Keychain-persisted endpoint, auto-reconnect on network change, connection heartbeat, signed-out → endpoint wipe)
   - [ ] History + cat profiles (stats, naming, management)
   - [ ] Schedule setup (auto-play times, quiet hours)
   - [ ] Push notifications (APNs: play summaries, session alerts, hopper empty)

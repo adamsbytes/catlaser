@@ -820,4 +820,116 @@ struct AuthCoordinatorTests {
         #expect(await http.sendCount() == 0)
         #expect(try await store.load() == nil)
     }
+
+    // MARK: - SessionLifecycleObserver
+
+    @Test
+    func signOutNotifiesLifecycleObservers() async throws {
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 200, headers: [:], body: Data())),
+        ])
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        let session = AuthSession(
+            bearerToken: "to-kill",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .google,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let recorder1 = RecordingLifecycleObserver()
+        let recorder2 = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: attestation,
+            lifecycleObservers: [recorder1, recorder2],
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        try await coord.signOut()
+        #expect(await recorder1.callCount == 1)
+        #expect(await recorder2.callCount == 1)
+    }
+
+    @Test
+    func signOutNotifiesLifecycleObserversEvenWhenServerCallFails() async throws {
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 500, headers: [:], body: Data())),
+        ])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .google,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let recorder = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: attestation,
+            lifecycleObservers: [recorder],
+        )
+        await #expect(throws: AuthError.serverError(status: 500, message: nil)) {
+            try await coord.signOut()
+        }
+        #expect(await recorder.callCount == 1,
+                "observers must fire even when the server revocation fails")
+    }
+
+    @Test
+    func signOutNotifiesObserversWhenNoSessionCached() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let store = InMemoryBearerTokenStore()
+        let recorder = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            lifecycleObservers: [recorder],
+        )
+        try await coord.signOut()
+        #expect(await recorder.callCount == 1)
+    }
+
+    @Test
+    func runtimeRegisteredObserverIsAlsoNotified() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+        )
+        let recorder = RecordingLifecycleObserver()
+        await coord.addLifecycleObserver(recorder)
+        try await coord.signOut()
+        #expect(await recorder.callCount == 1)
+    }
+}
+
+// MARK: - Recording observer
+
+private actor RecordingLifecycleObserver: SessionLifecycleObserver {
+    private(set) var callCount: Int = 0
+
+    func sessionDidSignOut() async {
+        callCount += 1
+    }
 }

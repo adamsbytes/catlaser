@@ -24,6 +24,7 @@ public actor AuthCoordinator {
     private let googleProvider: (any GoogleIDTokenProviding)?
     private let attestationProvider: (any DeviceAttestationProviding)?
     private let clock: @Sendable () -> Date
+    private var lifecycleObservers: [any SessionLifecycleObserver]
 
     public init(
         client: AuthClient,
@@ -32,6 +33,7 @@ public actor AuthCoordinator {
         appleProvider: (any AppleIDTokenProviding)? = nil,
         googleProvider: (any GoogleIDTokenProviding)? = nil,
         attestationProvider: (any DeviceAttestationProviding)? = nil,
+        lifecycleObservers: [any SessionLifecycleObserver] = [],
     ) {
         self.init(
             client: client,
@@ -40,6 +42,7 @@ public actor AuthCoordinator {
             appleProvider: appleProvider,
             googleProvider: googleProvider,
             attestationProvider: attestationProvider,
+            lifecycleObservers: lifecycleObservers,
             clock: { Date() },
         )
     }
@@ -51,6 +54,7 @@ public actor AuthCoordinator {
         appleProvider: (any AppleIDTokenProviding)? = nil,
         googleProvider: (any GoogleIDTokenProviding)? = nil,
         attestationProvider: (any DeviceAttestationProviding)? = nil,
+        lifecycleObservers: [any SessionLifecycleObserver] = [],
         clock: @escaping @Sendable () -> Date,
     ) {
         self.client = client
@@ -60,6 +64,16 @@ public actor AuthCoordinator {
         self.googleProvider = googleProvider
         self.attestationProvider = attestationProvider
         self.clock = clock
+        self.lifecycleObservers = lifecycleObservers
+    }
+
+    /// Register a `SessionLifecycleObserver` at runtime. Observers
+    /// added this way are notified on the next `signOut()` call in
+    /// registration order, after any observers passed at init time.
+    /// Registration is idempotent only at the identity level —
+    /// registering the same instance twice causes two notifications.
+    public func addLifecycleObserver(_ observer: any SessionLifecycleObserver) {
+        lifecycleObservers.append(observer)
     }
 
     public func currentSession() async throws -> AuthSession? {
@@ -212,6 +226,7 @@ public actor AuthCoordinator {
         let cachedSession = await store.cachedSession()
         guard let cachedSession else {
             try await store.delete()
+            await notifyLifecycleObservers()
             return
         }
         guard let attestationProvider else {
@@ -220,8 +235,11 @@ public actor AuthCoordinator {
             // operation explicitly, but still wipe local state —
             // otherwise the device is stuck holding a bearer with no
             // working path to revoke it. The orphaned server-side
-            // bearer will expire naturally.
+            // bearer will expire naturally. Observers still fire so
+            // dependent modules (endpoint store, push registration)
+            // clean up even on a half-broken sign-out.
             try await store.delete()
+            await notifyLifecycleObservers()
             throw AuthError.providerUnavailable("Sign-out provider not configured")
         }
         let header: String
@@ -232,15 +250,27 @@ public actor AuthCoordinator {
             )
         } catch {
             try await store.delete()
+            await notifyLifecycleObservers()
             throw error
         }
         do {
             try await client.signOut(session: cachedSession, attestationHeader: header)
         } catch {
             try await store.delete()
+            await notifyLifecycleObservers()
             throw error
         }
         try await store.delete()
+        await notifyLifecycleObservers()
+    }
+
+    /// Fire every registered observer in registration order. Observers
+    /// cannot throw; any storage failure they encounter is their own
+    /// problem to log. Sign-out itself is complete either way.
+    private func notifyLifecycleObservers() async {
+        for observer in lifecycleObservers {
+            await observer.sessionDidSignOut()
+        }
     }
 
     private func plausibleRequestTimestamp() throws(AuthError) -> Int64 {
