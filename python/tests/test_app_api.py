@@ -1303,3 +1303,204 @@ class TestServerAclRevocation:
         assert first_diff == frozenset()  # priming: nothing revoked
         second_diff = store.apply(second)
         assert second_diff == frozenset({"spki-bob"})
+
+
+class TestServerHandshakeReplay:
+    """End-to-end replay detection at the AppServer handshake boundary.
+
+    The unit-level behaviour of the cache itself lives in
+    ``test_replay_cache.py``. These tests assert that resending the
+    exact bytes of a legitimate first-frame ``AuthRequest`` is
+    rejected with ``DEVICE_AUTH_REPLAY_DETECTED``, and that a
+    subsequent legitimate connection with a fresh signature (even at
+    the same wall-clock second) still succeeds — ECDSA's randomised
+    ``k`` means an honest client never collides with itself even on
+    a sub-second reconnect.
+    """
+
+    def test_bit_identical_replay_is_rejected(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ) -> None:
+        # Capture the bytes of a legitimate AuthRequest, complete the
+        # handshake on one socket, then resend the same bytes on a
+        # second socket. The second handshake must be rejected with
+        # the REPLAY_DETECTED reason.
+        timestamp = int(time.time())
+        header = _build_attestation_header(client=client_auth, timestamp=timestamp)
+        auth_request = pb.AppRequest()
+        auth_request.auth.attestation_header = header
+        frame_bytes = encode_frame(auth_request.SerializeToString())
+
+        # First connection succeeds.
+        sock_a = _connect(server)
+        server.poll()
+        sock_a.sendall(frame_bytes)
+        server.poll()
+        response_a = _recv_event(sock_a).auth_response
+        assert response_a.ok is True
+
+        # Second connection replays the EXACT same bytes.
+        sock_b = _connect(server)
+        server.poll()
+        sock_b.sendall(frame_bytes)
+        server.poll()
+        response_b = _recv_event(sock_b).auth_response
+        assert response_b.ok is False
+        assert response_b.reason == "DEVICE_AUTH_REPLAY_DETECTED"
+
+        # Socket closes after the rejection.
+        sock_b.settimeout(1.0)
+        assert sock_b.recv(4) == b""
+
+        sock_a.close()
+        sock_b.close()
+
+    def test_fresh_signature_same_second_is_accepted(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ) -> None:
+        # An honest client retries within the same wall-clock second
+        # (e.g., sub-second reconnect backoff). Each sign yields a
+        # distinct ECDSA signature even though ``fph`` and ``bnd``
+        # bytes are identical; the replay cache keys on the sig too,
+        # so both handshakes succeed.
+        timestamp = int(time.time())
+        first = _perform_handshake(
+            sock=_connect(server),
+            server=server,
+            client=client_auth,
+            timestamp=timestamp,
+        )
+        assert first.ok is True
+
+        # A fresh connection at the same timestamp produces a fresh
+        # signature under the same SE key (the helper rebuilds the
+        # header, and ECDSA uses a fresh k).
+        sock_b = _connect(server)
+        server.poll()
+        second = _perform_handshake(
+            sock=sock_b,
+            server=server,
+            client=client_auth,
+            timestamp=timestamp,
+        )
+        assert second.ok is True
+
+    def test_different_users_same_second_independent(
+        self,
+        handler: RequestHandler,
+    ) -> None:
+        # Two distinct users presenting valid signatures at the same
+        # wall-clock second must both be accepted. Replay keying is
+        # per-tuple, not per-second, so cross-user independence is
+        # preserved.
+        alice = _make_client_auth()
+        bob = _make_client_auth()
+        acl = _primed_acl(grants=(alice.spki_b64, bob.spki_b64))
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            timestamp = int(time.time())
+            alice_sock = _connect(srv)
+            srv.poll()
+            alice_resp = _perform_handshake(
+                sock=alice_sock,
+                server=srv,
+                client=alice,
+                timestamp=timestamp,
+            )
+            assert alice_resp.ok is True
+
+            bob_sock = _connect(srv)
+            srv.poll()
+            bob_resp = _perform_handshake(
+                sock=bob_sock,
+                server=srv,
+                client=bob,
+                timestamp=timestamp,
+            )
+            assert bob_resp.ok is True
+
+            alice_sock.close()
+            bob_sock.close()
+        finally:
+            srv.close()
+
+    def test_replay_outside_cache_ttl_uses_skew_check(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ) -> None:
+        # An attacker replaying bytes whose timestamp has already
+        # fallen outside the ±60 s skew window is rejected by skew,
+        # not by replay detection — skew is cheaper and runs first.
+        # This is a correctness assertion about layering, not about
+        # the cache itself.
+        acl = _primed_acl(grants=(client_auth.spki_b64,))
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            sock = _connect(srv)
+            srv.poll()
+            stale_ts = int(time.time()) - 120
+            response = _perform_handshake(
+                sock=sock,
+                server=srv,
+                client=client_auth,
+                timestamp=stale_ts,
+            )
+            assert response.ok is False
+            assert response.reason == "DEVICE_AUTH_SKEW_EXCEEDED"
+            sock.close()
+        finally:
+            srv.close()
+
+    def test_replay_cache_injection_exposes_custom_ttl(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ) -> None:
+        # The AppServer accepts an injected ReplayCache so deployments
+        # that want a shorter or longer TTL can tune it. Exercised here
+        # by injecting a cache with a 1 s TTL and verifying the
+        # REPLAY_DETECTED path still fires on a same-moment replay.
+        from catlaser_brain.auth.replay_cache import ReplayCache  # noqa: PLC0415
+
+        cache = ReplayCache(ttl_seconds=1)
+        acl = _primed_acl(grants=(client_auth.spki_b64,))
+        srv = AppServer(
+            handler,
+            acl=acl,
+            bind_addr="127.0.0.1",
+            port=0,
+            replay_cache=cache,
+        )
+        srv.start()
+        try:
+            timestamp = int(time.time())
+            header = _build_attestation_header(client=client_auth, timestamp=timestamp)
+            auth_request = pb.AppRequest()
+            auth_request.auth.attestation_header = header
+            frame_bytes = encode_frame(auth_request.SerializeToString())
+
+            sock_a = _connect(srv)
+            srv.poll()
+            sock_a.sendall(frame_bytes)
+            srv.poll()
+            assert _recv_event(sock_a).auth_response.ok is True
+
+            sock_b = _connect(srv)
+            srv.poll()
+            sock_b.sendall(frame_bytes)
+            srv.poll()
+            replay_resp = _recv_event(sock_b).auth_response
+            assert replay_resp.ok is False
+            assert replay_resp.reason == "DEVICE_AUTH_REPLAY_DETECTED"
+
+            sock_a.close()
+            sock_b.close()
+        finally:
+            srv.close()

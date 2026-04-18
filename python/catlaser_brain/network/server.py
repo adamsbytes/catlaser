@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Final, Self
 from google.protobuf.message import DecodeError
 
 from catlaser_brain.auth.handshake import HandshakeError, verify_auth_request
+from catlaser_brain.auth.replay_cache import ReplayCache
 from catlaser_brain.network.wire import FrameReader, encode_frame
 from catlaser_brain.proto.catlaser.app.v1 import app_pb2 as pb
 
@@ -150,6 +151,7 @@ class AppServer:
         "_pending_revocations",
         "_pending_revocations_lock",
         "_port",
+        "_replay_cache",
     )
 
     def __init__(
@@ -160,6 +162,7 @@ class AppServer:
         bind_addr: str,
         port: int = 9820,
         bind_interface: str | None = None,
+        replay_cache: ReplayCache | None = None,
     ) -> None:
         self._handler = handler
         self._acl = acl
@@ -168,6 +171,12 @@ class AppServer:
         self._port = port
         self._listen_sock: socket.socket | None = None
         self._clients: dict[int, _Client] = {}
+        # Default to a fresh :class:`ReplayCache` so the server-level
+        # default posture is replay-protected. Tests that need to
+        # inspect or manipulate the cache (force time forward, assert
+        # size, reject on the second handshake) inject one; production
+        # callers rely on the default.
+        self._replay_cache = replay_cache if replay_cache is not None else ReplayCache()
         # Set of SPKIs the ACL poller has flagged as revoked since the
         # last :meth:`poll` tick. The poller runs on its own thread;
         # the queue + lock pair lets it notify us asynchronously while
@@ -479,7 +488,11 @@ class AppServer:
             return
         attestation_header = request.auth.attestation_header
         try:
-            authorized = verify_auth_request(attestation_header, self._acl)
+            authorized = verify_auth_request(
+                attestation_header,
+                self._acl,
+                self._replay_cache,
+            )
         except HandshakeError as error:
             _logger.info(
                 "app client handshake failed: %s from %s",

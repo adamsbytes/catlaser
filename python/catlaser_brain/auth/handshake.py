@@ -74,6 +74,14 @@ class HandshakeReason(StrEnum):
     SIGNATURE_INVALID = "DEVICE_AUTH_SIGNATURE_INVALID"
     NOT_AUTHORIZED = "DEVICE_AUTH_NOT_AUTHORIZED"
     ACL_NOT_READY = "DEVICE_AUTH_ACL_NOT_READY"
+    # A previously-accepted ``(spki, timestamp)`` tuple is being
+    # presented again within the replay-cache TTL. A legitimate client
+    # would never re-sign with the same wall-clock second; the cause
+    # is an on-path attacker resending the captured bytes. The iOS
+    # :class:`DeviceClientError` treats this as non-terminal: the
+    # connection manager's next reconnect signs a fresh attestation
+    # with a new timestamp and proceeds.
+    REPLAY_DETECTED = "DEVICE_AUTH_REPLAY_DETECTED"
 
 
 class HandshakeError(Exception):
@@ -125,18 +133,56 @@ class _AuthorizationSource(Protocol):
     def is_authorized(self, user_spki_b64: str) -> bool: ...
 
 
+class _ReplayTracker(Protocol):
+    """Narrow protocol for the replay cache.
+
+    Same shape as :class:`~catlaser_brain.auth.replay_cache.ReplayCache`
+    but typed as a protocol so the handshake module does not depend on
+    the concrete class — tests pass a trivial stub when they want to
+    assert interaction order without materialising a real cache.
+    """
+
+    def check_and_consume(
+        self,
+        spki_b64: str,
+        timestamp: int,
+        signature: bytes,
+        *,
+        now_seconds: int | None = None,
+    ) -> bool: ...
+
+
 def verify_auth_request(
     attestation_header: str,
     acl: _AuthorizationSource,
+    replay_cache: _ReplayTracker,
     *,
     now_seconds: int | None = None,
 ) -> AuthorizedIdentity:
     """Verify the AuthRequest's attestation header against the ACL.
 
     Runs in order of increasing cost: structural checks first,
-    signature verify last. A malformed header never touches the
-    crypto primitives; a well-formed-but-unauthorized-spki never
-    touches the signature verifier.
+    signature verify next, ACL lookup, and finally replay detection.
+    A malformed header never touches the crypto primitives; a
+    well-formed-but-unauthorized-spki never touches the signature
+    verifier; and only tuples that passed both signature verify and
+    the ACL lookup ever land in the replay cache — an attacker cannot
+    pollute the cache by flooding fake headers, because their fake
+    sig + unknown spki would never clear the earlier checks.
+
+    Args:
+        attestation_header: Base64-of-JSON v4 payload with the
+            ``dev:<unix_seconds>`` binding, exactly as emitted by the
+            iOS :class:`DeviceAttestationEncoder`.
+        acl: Authorization source consulted after signature verify.
+        replay_cache: Consumed-once store keyed on
+            ``(spki_b64, timestamp)``. A successful verify consumes
+            one entry; a resent header whose tuple is still within
+            the cache's TTL window raises with
+            :attr:`HandshakeReason.REPLAY_DETECTED`.
+        now_seconds: Override for tests. Production callers omit; the
+            override is threaded into both the skew check and the
+            replay cache so they share a single clock reading.
 
     Raises:
         HandshakeError: every rejection path wraps its specific
@@ -167,6 +213,23 @@ def verify_auth_request(
         raise HandshakeError(
             HandshakeReason.NOT_AUTHORIZED,
             "signer's SPKI is not in the device ACL",
+        )
+    # Replay detection runs LAST so only cryptographically-verified,
+    # ACL-authorized tuples ever enter the cache. The check is
+    # atomic: a concurrent handshake thread attempting the same
+    # replay must not observe an intermediate state where both pass.
+    # The signature is part of the key because ECDSA-P256's random k
+    # makes it unique per legitimate signing op; an attacker replaying
+    # captured bytes cannot refresh it without the SE private key.
+    if not replay_cache.check_and_consume(
+        user_spki_b64,
+        timestamp,
+        signature,
+        now_seconds=now_seconds,
+    ):
+        raise HandshakeError(
+            HandshakeReason.REPLAY_DETECTED,
+            f"(spki, ts={timestamp}) already consumed within replay TTL",
         )
     return AuthorizedIdentity(user_spki_b64=user_spki_b64, timestamp=timestamp)
 
