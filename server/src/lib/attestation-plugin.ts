@@ -5,16 +5,27 @@ import type { AttestationBindingTag } from '~/lib/attestation-binding.ts';
 import { AttestationParseError } from '~/lib/attestation-binding.ts';
 import type { ParsedAttestation } from '~/lib/attestation-header.ts';
 import { AttestationHeaderParseError, decodeAttestationHeader } from '~/lib/attestation-header.ts';
+import type { NowSecondsFn } from '~/lib/attestation-skew.ts';
+import {
+  AttestationSkewError,
+  defaultNowSeconds,
+  enforceTimestampSkew,
+} from '~/lib/attestation-skew.ts';
 import { AttestationVerifyError, verifyAttestationSignature } from '~/lib/attestation-verify.ts';
+import { deriveTokenIdentifier, lookupMagicLinkAttestation } from '~/lib/magic-link-attestation.ts';
 
 /**
- * Device-attestation plugin — BUILD.md Part 9 step 5.
+ * Device-attestation plugin — BUILD.md Part 9 steps 5 and 6.
  *
  * Gates every attestation-carrying auth endpoint with the v3 wire
  * contract described in ADR-006:
  *
- * - `POST /sign-in/magic-link`   — binding tag `req:<unix_seconds>`.
- * - `GET  /magic-link/verify`    — binding tag `ver:<magic_link_token>`.
+ * - `POST /sign-in/magic-link`   — binding tag `req:<unix_seconds>`,
+ *                                  ±60s skew enforced.
+ * - `GET  /magic-link/verify`    — binding tag `ver:<magic_link_token>`,
+ *                                  stored-fph + stored-pk byte-equal
+ *                                  against the row captured at request
+ *                                  time (DEVICE_MISMATCH on miss).
  * - `POST /sign-in/social`       — binding tag `sis:<raw_nonce>`, plus
  *                                  a three-way match between the
  *                                  binding, the request body's
@@ -22,7 +33,8 @@ import { AttestationVerifyError, verifyAttestationSignature } from '~/lib/attest
  *                                  own ID-token `nonce` claim (the
  *                                  third leg is enforced by the Apple /
  *                                  Google verifier configuration).
- * - `POST /sign-out`             — binding tag `out:<unix_seconds>`.
+ * - `POST /sign-out`             — binding tag `out:<unix_seconds>`,
+ *                                  ±60s skew enforced.
  *
  * Request pipeline, in order of increasing cost and decreasing trust
  * distance:
@@ -38,14 +50,21 @@ import { AttestationVerifyError, verifyAttestationSignature } from '~/lib/attest
  * 5. For `/sign-in/social` only: the `sis:` nonce must byte-equal
  *    `body.idToken.nonce` (`ATTESTATION_NONCE_MISMATCH` /
  *    `ID_TOKEN_NONCE_REQUIRED`).
+ * 6. For timestamped bindings (`req:`, `out:`, and `api:` when step 7
+ *    mounts it on protected routes): enforce ±60s skew against the
+ *    server clock (`ATTESTATION_SKEW_EXCEEDED`).
+ * 7. For `ver:` only: look up the `(fph, pk)` captured at
+ *    `/sign-in/magic-link` time under the same token identifier, and
+ *    byte-compare against the verify-time attestation (`DEVICE_MISMATCH`
+ *    on missing / stale row or on either of the two byte-compares).
  *
- * Step 5 deliberately stops here. The binding-enforcement layer
- * (step 6) adds: `req:` / `out:` ±60s skew, `ver:` stored-fph and
- * stored-pk byte-equal lookup, and per-session public-key
- * persistence. Step 7 adds the `api:` tag on protected routes.
- * Step 8 adds `Idempotency-Key` replay protection. None of those
- * steps need to rewrite anything this plugin does — they layer on
- * top of the crypto and structural floor this file establishes.
+ * Step 6 establishes the semantic layer on top of step 5's crypto
+ * floor. Step 7 mounts the `api:` binding on every authenticated
+ * protected route using the same skew enforcement this file installs
+ * for `req:` and `out:`. Step 8 adds `Idempotency-Key` replay
+ * protection on mutating routes. None of those steps need to rewrite
+ * anything this plugin does — they layer on top of the enforcement
+ * matrix established here.
  */
 
 /**
@@ -62,25 +81,62 @@ export type AttestationGateCode =
   | 'ATTESTATION_BINDING_MISMATCH'
   | 'ATTESTATION_SIGNATURE_INVALID'
   | 'ATTESTATION_NONCE_MISMATCH'
-  | 'ID_TOKEN_NONCE_REQUIRED';
+  | 'ID_TOKEN_NONCE_REQUIRED'
+  | 'ATTESTATION_SKEW_EXCEEDED'
+  | 'DEVICE_MISMATCH';
 
 /**
- * Per-path invariants: which binding tag is expected, and whether the
- * path also requires the social-provider three-way nonce match. Kept as
- * a `Map` with exact string keys so a typo in an endpoint path triggers
- * a compile error at the call site rather than silently skipping the
- * attestation gate.
+ * Per-path invariants: which binding tag is expected, whether the path
+ * also requires the social-provider three-way nonce match, whether the
+ * timestamp skew window applies, and whether the stored-fph/pk match
+ * applies. Kept as a `Map` with exact string keys so a typo in an
+ * endpoint path triggers a compile error at the call site rather than
+ * silently skipping the attestation gate.
  */
 interface PathSpec {
   readonly expectedTag: AttestationBindingTag;
   readonly requiresBodyNonceMatch: boolean;
+  readonly enforcesSkew: boolean;
+  readonly enforcesStoredDeviceMatch: boolean;
 }
 
 const PATH_SPECS: ReadonlyMap<string, PathSpec> = new Map<string, PathSpec>([
-  ['/sign-in/magic-link', { expectedTag: 'request', requiresBodyNonceMatch: false }],
-  ['/magic-link/verify', { expectedTag: 'verify', requiresBodyNonceMatch: false }],
-  ['/sign-in/social', { expectedTag: 'social', requiresBodyNonceMatch: true }],
-  ['/sign-out', { expectedTag: 'signOut', requiresBodyNonceMatch: false }],
+  [
+    '/sign-in/magic-link',
+    {
+      expectedTag: 'request',
+      requiresBodyNonceMatch: false,
+      enforcesSkew: true,
+      enforcesStoredDeviceMatch: false,
+    },
+  ],
+  [
+    '/magic-link/verify',
+    {
+      expectedTag: 'verify',
+      requiresBodyNonceMatch: false,
+      enforcesSkew: false,
+      enforcesStoredDeviceMatch: true,
+    },
+  ],
+  [
+    '/sign-in/social',
+    {
+      expectedTag: 'social',
+      requiresBodyNonceMatch: true,
+      enforcesSkew: false,
+      enforcesStoredDeviceMatch: false,
+    },
+  ],
+  [
+    '/sign-out',
+    {
+      expectedTag: 'signOut',
+      requiresBodyNonceMatch: false,
+      enforcesSkew: true,
+      enforcesStoredDeviceMatch: false,
+    },
+  ],
 ]);
 
 const attestationError = (
@@ -194,56 +250,185 @@ const assertBodyNonceMatches = (parsed: ParsedAttestation, body: unknown): void 
   }
 };
 
+/**
+ * Resolve the signed timestamp carried by a timestamped binding. Only
+ * `req:`, `out:`, and `api:` bindings carry timestamps; `ver:` and `sis:`
+ * do not. Returns `undefined` for the non-timestamped arms so callers
+ * can treat "this binding cannot be skew-checked" as a no-op without a
+ * type cast.
+ */
+const bindingTimestamp = (parsed: ParsedAttestation): bigint | undefined => {
+  const { binding } = parsed;
+  switch (binding.tag) {
+    case 'request':
+    case 'signOut':
+    case 'api':
+      return binding.timestamp;
+    case 'verify':
+    case 'social':
+      return undefined;
+    default: {
+      const exhaustive: never = binding;
+      throw new Error(`unreachable AttestationBinding tag: ${JSON.stringify(exhaustive)}`);
+    }
+  }
+};
+
+const enforceSkewOrThrow = (parsed: ParsedAttestation, nowSeconds: NowSecondsFn): void => {
+  const timestamp = bindingTimestamp(parsed);
+  if (timestamp === undefined) {
+    // A non-timestamped binding reaching a path that asks for skew
+    // enforcement would be a compile-time wiring error; the
+    // binding-tag check above rejects the request before this branch
+    // can run, so this is a defensive no-op.
+    return;
+  }
+  try {
+    enforceTimestampSkew(timestamp, nowSeconds());
+  } catch (error) {
+    if (error instanceof AttestationSkewError) {
+      throw attestationError('UNAUTHORIZED', 'ATTESTATION_SKEW_EXCEEDED', error.message);
+    }
+    throw error;
+  }
+};
+
+const deviceMismatch = (message: string): APIError =>
+  attestationError('UNAUTHORIZED', 'DEVICE_MISMATCH', message);
+
+const utf8 = new TextEncoder();
+
+/**
+ * Byte-equal comparison of two base64(-url) strings in constant time. The
+ * shared helper over UTF-8 bytes keeps the comparison constant-time under
+ * the same contract `timingSafeEqual` provides for the sibling magic-link
+ * callback-URL check.
+ */
+const timingSafeStringEquals = (a: string, b: string): boolean => {
+  const aBytes = utf8.encode(a);
+  const bBytes = utf8.encode(b);
+  if (aBytes.length !== bBytes.length) {
+    return false;
+  }
+  return timingSafeEqual(aBytes, bBytes);
+};
+
+const encodeStandardBase64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
+
+const encodeBase64UrlNoPad = (bytes: Uint8Array): string =>
+  encodeStandardBase64(bytes).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+
+/**
+ * For `ver:` bindings: load the stored attestation captured at request
+ * time and byte-compare both the 32-byte fingerprint hash and the 91-byte
+ * SPKI against the verify-time attestation. `DEVICE_MISMATCH` on any
+ * miss — the row not existing, the fph differing, or the pk differing.
+ *
+ * The pk comparison is the load-bearing check against an attacker who
+ * captured the emailed magic-link URL (email relay, shared mailbox, a
+ * laptop that held the browser session). Such an attacker could forge a
+ * `ver:<token>` attestation under their own Secure Enclave key and
+ * satisfy step 5's ECDSA verify — because step 5 accepts whatever pk
+ * arrives on the wire. Pinning the verify-time pk to the stored
+ * request-time pk collapses that replay into a rejection before the
+ * magic-link plugin consumes its verification row.
+ */
+const enforceStoredDeviceMatchOrThrow = async (parsed: ParsedAttestation): Promise<void> => {
+  if (parsed.binding.tag !== 'verify') {
+    // Unreachable when PATH_SPECS is configured correctly; the binding
+    // tag check above rejects everything else.
+    throw deviceMismatch('stored device match requires a verify binding');
+  }
+  const tokenIdentifier = deriveTokenIdentifier(parsed.binding.token);
+  const stored = await lookupMagicLinkAttestation(tokenIdentifier);
+  if (stored === null) {
+    throw deviceMismatch(
+      'no stored attestation for this magic-link token (expired, already consumed, or never issued on this device)',
+    );
+  }
+  const wireFphB64Url = encodeBase64UrlNoPad(parsed.fingerprintHash);
+  const wirePkB64 = encodeStandardBase64(parsed.publicKeySPKI);
+  if (!timingSafeStringEquals(stored.fingerprintHashB64Url, wireFphB64Url)) {
+    throw deviceMismatch(
+      'verify-time fingerprint hash does not match the hash captured at request time',
+    );
+  }
+  if (!timingSafeStringEquals(stored.publicKeySpkiB64, wirePkB64)) {
+    throw deviceMismatch(
+      'verify-time public key does not match the public key captured at request time',
+    );
+  }
+};
+
 const runAttestationGate = async (
   spec: PathSpec,
   ctx: { readonly headers: Headers | undefined; readonly body: unknown },
+  nowSeconds: NowSecondsFn,
 ): Promise<void> => {
-  // The `await Promise.resolve()` keeps the function shape honest under
-  // ESLint `require-await`: step 6 introduces a real database lookup in
-  // this pipeline (per-session public-key persistence) and the call
-  // sites should not need to change their `await` shape then.
-  await Promise.resolve();
   const parsed = parseHeaderOrThrow(ctx.headers);
   assertBindingTag(parsed, spec.expectedTag);
   enforceSpkiAndSignature(parsed);
   if (spec.requiresBodyNonceMatch) {
     assertBodyNonceMatches(parsed, ctx.body);
   }
+  if (spec.enforcesSkew) {
+    enforceSkewOrThrow(parsed, nowSeconds);
+  }
+  if (spec.enforcesStoredDeviceMatch) {
+    await enforceStoredDeviceMatchOrThrow(parsed);
+  }
 };
 
 /**
- * Construct the device-attestation plugin. No runtime configuration is
- * required at this step: every invariant is pinned to the wire contract
- * and to the SPKI structure, and the per-session key persistence that
- * step 6 needs is deferred to that step. Exposed as a factory so the
+ * Factory options. A tests-only `nowSeconds` injection seam lets
+ * integration tests drive the clock deterministically against fixed
+ * attestation timestamps without monkey-patching `Date.now`. Production
+ * callers omit the field and get `defaultNowSeconds` via the wall clock.
+ */
+export interface DeviceAttestationPluginOptions {
+  readonly nowSeconds?: NowSecondsFn;
+}
+
+/**
+ * Construct the device-attestation plugin. Exposed as a factory so the
  * id-stable plugin instance is created fresh per `createAuth()` call —
  * tests that spin up multiple auth instances must not share hook
  * closures.
+ *
+ * The only runtime configuration is the `nowSeconds` seam described on
+ * `DeviceAttestationPluginOptions`. Every other invariant is pinned to
+ * the wire contract, the SPKI structure, and the stored magic-link
+ * attestation table.
  */
-export const deviceAttestationPlugin = (): BetterAuthPlugin => ({
-  id: 'device-attestation',
-  hooks: {
-    before: [
-      {
-        matcher: (context) => {
-          const { path } = context;
-          return typeof path === 'string' && PATH_SPECS.has(path);
+export const deviceAttestationPlugin = (
+  options: DeviceAttestationPluginOptions = {},
+): BetterAuthPlugin => {
+  const nowSeconds = options.nowSeconds ?? defaultNowSeconds;
+  return {
+    id: 'device-attestation',
+    hooks: {
+      before: [
+        {
+          matcher: (context) => {
+            const { path } = context;
+            return typeof path === 'string' && PATH_SPECS.has(path);
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            const { path, headers } = ctx;
+            if (typeof path !== 'string') {
+              return;
+            }
+            const spec = PATH_SPECS.get(path);
+            if (spec === undefined) {
+              return;
+            }
+            // `ctx.body` is typed `any` by better-auth; narrow to `unknown` at
+            // the boundary so downstream helpers get a type-safe view.
+            const body: unknown = ctx.body;
+            await runAttestationGate(spec, { headers, body }, nowSeconds);
+          }),
         },
-        handler: createAuthMiddleware(async (ctx) => {
-          const { path, headers } = ctx;
-          if (typeof path !== 'string') {
-            return;
-          }
-          const spec = PATH_SPECS.get(path);
-          if (spec === undefined) {
-            return;
-          }
-          // `ctx.body` is typed `any` by better-auth; narrow to `unknown` at
-          // the boundary so downstream helpers get a type-safe view.
-          const body: unknown = ctx.body;
-          await runAttestationGate(spec, { headers, body });
-        }),
-      },
-    ],
-  },
-});
+      ],
+    },
+  };
+};

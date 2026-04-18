@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/bun-sql';
 import {
   account,
   accountRelations,
+  magicLinkAttestation,
   session,
   sessionRelations,
   user,
@@ -16,6 +17,7 @@ const schema = {
   session,
   account,
   verification,
+  magicLinkAttestation,
   userRelations,
   sessionRelations,
   accountRelations,

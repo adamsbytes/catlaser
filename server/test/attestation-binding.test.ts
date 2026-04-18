@@ -54,6 +54,15 @@ describe('attestation binding: tag routing', () => {
     expect(binding.timestamp).toBe(1n);
   });
 
+  test('api: decodes to an api binding with a positive Int64 timestamp', () => {
+    const binding = decodeAttestationBinding('api:1734489600');
+    expect(binding.tag).toBe('api');
+    if (binding.tag !== 'api') {
+      throw new Error('narrowing guard');
+    }
+    expect(binding.timestamp).toBe(1_734_489_600n);
+  });
+
   test('Int64 max (19 digits) is accepted', () => {
     const maxInt64 = '9223372036854775807';
     const binding = decodeAttestationBinding(`req:${maxInt64}`);
@@ -83,12 +92,12 @@ describe('attestation binding: tag routing', () => {
     expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
   });
 
-  test('api: is not yet a recognised tag (step 7 adds it)', () => {
-    // The iOS client does not yet emit api:<ts> bindings; the server parser
-    // must stay aligned with what the clients ship. If this test starts
-    // failing after the Swift-side api: case lands, the parser should grow
-    // a fifth tag as part of that same BUILD.md step.
-    const err = captureError(() => decodeAttestationBinding('api:1734489600'));
+  test('unrecognised four-character prefix still rejects (api: is the only reserved fifth tag)', () => {
+    // Step 6 added `api:` as the fifth reserved prefix. No other four-
+    // character prefix ending in `:` is accepted; the parser MUST reject
+    // anything outside the known five so a forward-compatible binding
+    // rollout is purely additive.
+    const err = captureError(() => decodeAttestationBinding('xyz:1734489600'));
     expect(err.code).toBe('ATTESTATION_BND_UNKNOWN_TAG');
   });
 });
@@ -162,6 +171,24 @@ describe('attestation binding: timestamp correctness', () => {
       'ATTESTATION_BND_BAD_TIMESTAMP',
     );
     expect(captureError(() => decodeAttestationBinding('out:01')).code).toBe(
+      'ATTESTATION_BND_BAD_TIMESTAMP',
+    );
+  });
+
+  test('api: timestamp obeys the same rules as req: and out:', () => {
+    expect(captureError(() => decodeAttestationBinding('api:0')).code).toBe(
+      'ATTESTATION_BND_BAD_TIMESTAMP',
+    );
+    expect(captureError(() => decodeAttestationBinding('api:-1')).code).toBe(
+      'ATTESTATION_BND_BAD_TIMESTAMP',
+    );
+    expect(captureError(() => decodeAttestationBinding('api:01')).code).toBe(
+      'ATTESTATION_BND_BAD_TIMESTAMP',
+    );
+    expect(captureError(() => decodeAttestationBinding('api:')).code).toBe(
+      'ATTESTATION_BND_BAD_TIMESTAMP',
+    );
+    expect(captureError(() => decodeAttestationBinding('api:9999999999999999999')).code).toBe(
       'ATTESTATION_BND_BAD_TIMESTAMP',
     );
   });

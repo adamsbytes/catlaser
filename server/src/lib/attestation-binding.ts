@@ -14,6 +14,12 @@
  * - `out:<unix_seconds>` — sign-out. Same timestamp/skew contract as `req:`,
  *   distinct tag prevents a captured `req:` header from being replayed against
  *   sign-out (and vice versa).
+ * - `api:<unix_seconds>` — every authenticated API call after sign-in. Same
+ *   timestamp/skew contract as `req:` and `out:`; distinct tag prevents a
+ *   captured sign-in-time attestation from being replayed against a protected
+ *   route, and vice versa. Step 7 mounts this binding on the protected-route
+ *   middleware; step 6 establishes the parser, encoder, and skew semantics so
+ *   the crypto floor is consistent across all five bindings.
  *
  * The tagged prefix also prevents cross-context confusion: a caller that
  * stripped the prefix before signing/verifying would still see the raw signed
@@ -32,7 +38,8 @@ export type AttestationBinding =
   | { readonly tag: 'request'; readonly timestamp: bigint }
   | { readonly tag: 'verify'; readonly token: string }
   | { readonly tag: 'social'; readonly rawNonce: string }
-  | { readonly tag: 'signOut'; readonly timestamp: bigint };
+  | { readonly tag: 'signOut'; readonly timestamp: bigint }
+  | { readonly tag: 'api'; readonly timestamp: bigint };
 
 export type AttestationBindingTag = AttestationBinding['tag'];
 
@@ -57,6 +64,7 @@ const TAG_REQUEST = 'req:';
 const TAG_VERIFY = 'ver:';
 const TAG_SOCIAL = 'sis:';
 const TAG_SIGN_OUT = 'out:';
+const TAG_API = 'api:';
 
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)$/v;
 const INT64_MAX = 9_223_372_036_854_775_807n;
@@ -155,8 +163,11 @@ export const decodeAttestationBinding = (wireValue: string): AttestationBinding 
   if (wireValue.startsWith(TAG_SIGN_OUT)) {
     return { tag: 'signOut', timestamp: parseTimestamp(wireValue.slice(TAG_SIGN_OUT.length)) };
   }
+  if (wireValue.startsWith(TAG_API)) {
+    return { tag: 'api', timestamp: parseTimestamp(wireValue.slice(TAG_API.length)) };
+  }
   throw new AttestationParseError(
     'ATTESTATION_BND_UNKNOWN_TAG',
-    `bnd has no recognised tag (expected '${TAG_REQUEST}', '${TAG_VERIFY}', '${TAG_SOCIAL}', or '${TAG_SIGN_OUT}')`,
+    `bnd has no recognised tag (expected '${TAG_REQUEST}', '${TAG_VERIFY}', '${TAG_SOCIAL}', '${TAG_SIGN_OUT}', or '${TAG_API}')`,
   );
 };

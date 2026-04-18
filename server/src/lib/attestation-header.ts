@@ -196,6 +196,8 @@ const bindingWireValue = (binding: AttestationBinding): string => {
       return `sis:${binding.rawNonce}`;
     case 'signOut':
       return `out:${binding.timestamp.toString()}`;
+    case 'api':
+      return `api:${binding.timestamp.toString()}`;
     default: {
       // switch-exhaustiveness-check ensures every union arm is handled; an
       // unreachable default covers future-arm typos inside the factory.

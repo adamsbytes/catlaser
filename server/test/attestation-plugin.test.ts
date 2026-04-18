@@ -82,9 +82,19 @@ const signedPostHeaders = (
   ...extra,
 });
 
+/**
+ * All timestamped bindings use the real wall clock so the attestation
+ * plugin's skew enforcement (introduced in Part 9 step 6) accepts them
+ * by default. Tests that specifically exercise skew failure drive the
+ * clock through `createAuth({ attestationNowSeconds: ... })` in the
+ * dedicated `binding-enforcement.test.ts` suite; this file's job is to
+ * assert the step-5 crypto floor, so it keeps timestamps fresh.
+ */
+const currentUnixSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
+
 const magicLinkReqBinding = (): AttestationBinding => ({
   tag: 'request',
-  timestamp: 1_734_489_600n,
+  timestamp: currentUnixSeconds(),
 });
 
 const magicLinkVerBinding = (token: string): AttestationBinding => ({
@@ -99,7 +109,7 @@ const socialBinding = (rawNonce: string): AttestationBinding => ({
 
 const signOutBinding = (): AttestationBinding => ({
   tag: 'signOut',
-  timestamp: 1n,
+  timestamp: currentUnixSeconds(),
 });
 
 describe('attestation plugin: header required on every attestation-carrying endpoint', () => {
@@ -442,7 +452,14 @@ describe('attestation plugin: happy-path pass-through', () => {
     expect(code ?? '').not.toBe('ID_TOKEN_NONCE_REQUIRED');
   });
 
-  test('valid ver: attestation on /magic-link/verify passes the plugin (plugin yields INVALID_TOKEN)', async () => {
+  test('valid-signature ver: attestation against an unknown token is blocked by step-6 DEVICE_MISMATCH', async () => {
+    // Step 5 alone would accept this attestation (the ECDSA signature
+    // verifies under the pk on the wire) and hand control to the
+    // magic-link plugin, which would then INVALID_TOKEN-redirect. Step 6
+    // adds the stored-fph+pk byte-equal lookup — an unknown token has no
+    // stored row, so enforcement refuses the request before the plugin
+    // runs. This is the correct step-6 behaviour: a captured ver:
+    // attestation for a fabricated token cannot probe the verify path.
     const header = buildSignedAttestationHeader({
       deviceKey: sharedDevice,
       binding: magicLinkVerBinding('does-not-exist'),
@@ -453,10 +470,8 @@ describe('attestation plugin: happy-path pass-through', () => {
       method: 'GET',
       headers: { [ATTESTATION_HEADER_NAME]: header },
     });
-    // Plugin yields a redirect carrying ?error=INVALID_TOKEN — status is 3xx,
-    // not an attestation 401.
-    expect([301, 302, 303, 307, 308]).toContain(response.status);
-    expect(code ?? '').not.toContain('ATTESTATION_');
+    expect(response.status).toBe(401);
+    expect(code).toBe('DEVICE_MISMATCH');
   });
 
   test('valid out: attestation on /sign-out passes the plugin', async () => {

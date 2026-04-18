@@ -4,6 +4,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { bearer } from 'better-auth/plugins';
 import { buildBeforeHook } from '~/lib/auth-hooks.ts';
 import { deviceAttestationPlugin } from '~/lib/attestation-plugin.ts';
+import type { NowSecondsFn } from '~/lib/attestation-skew.ts';
 import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery } from '~/lib/magic-link.ts';
@@ -15,6 +16,14 @@ export const AUTH_BASE_PATH: string = '/api/v1/auth';
 
 export interface CreateAuthOverrides extends SocialProviderOverrides {
   readonly magicLinkDelivery?: MagicLinkDelivery;
+  /**
+   * Test-only injection seam for the attestation plugin's skew clock.
+   * Integration tests drive `req:` / `out:` / `api:` skew behaviour
+   * deterministically against fixed attestation timestamps by handing
+   * in a frozen-clock closure; production omits the field and the
+   * plugin reads the real wall clock via `defaultNowSeconds`.
+   */
+  readonly attestationNowSeconds?: NowSecondsFn;
 }
 
 /**
@@ -25,6 +34,10 @@ export interface CreateAuthOverrides extends SocialProviderOverrides {
  */
 export const createAuth = (overrides: CreateAuthOverrides = {}): Auth => {
   const delivery = overrides.magicLinkDelivery ?? pinoMagicLinkDelivery(env);
+  const attestationOptions =
+    overrides.attestationNowSeconds === undefined
+      ? {}
+      : { nowSeconds: overrides.attestationNowSeconds };
   const options: BetterAuthOptions = {
     appName: 'catlaser',
     baseURL: env.BETTER_AUTH_URL,
@@ -35,7 +48,7 @@ export const createAuth = (overrides: CreateAuthOverrides = {}): Auth => {
     plugins: [
       bearer({ requireSignature: true }),
       buildMagicLinkPlugin(env, delivery),
-      deviceAttestationPlugin(),
+      deviceAttestationPlugin(attestationOptions),
     ],
     socialProviders: buildSocialProviders(env, overrides),
     hooks: {

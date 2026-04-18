@@ -51,6 +51,8 @@ const bindingWireValue = (binding: AttestationBinding): string => {
       return `sis:${binding.rawNonce}`;
     case 'signOut':
       return `out:${binding.timestamp.toString()}`;
+    case 'api':
+      return `api:${binding.timestamp.toString()}`;
     default: {
       const exhaustive: never = binding;
       throw new Error(`unreachable: ${JSON.stringify(exhaustive)}`);

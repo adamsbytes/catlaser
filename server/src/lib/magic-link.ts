@@ -1,13 +1,16 @@
 import { magicLink } from 'better-auth/plugins';
 import type { Logger } from 'pino';
 import pino from 'pino';
+import { AttestationParseError } from '~/lib/attestation-binding.ts';
+import { AttestationHeaderParseError, decodeAttestationHeader } from '~/lib/attestation-header.ts';
+import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import type { Env } from '~/lib/env.ts';
+import { deriveTokenIdentifier, storeMagicLinkAttestation } from '~/lib/magic-link-attestation.ts';
 
 /**
  * Magic-link plugin wiring for better-auth.
  *
- * This module owns two invariants that together close the phishing-relay
- * takeover vector:
+ * This module owns three invariants:
  *
  * 1. The URL embedded in outgoing emails is constructed deterministically
  *    from `MAGIC_LINK_UNIVERSAL_LINK_HOST` + `MAGIC_LINK_UNIVERSAL_LINK_PATH`
@@ -22,14 +25,22 @@ import type { Env } from '~/lib/env.ts';
  *    browser fallback) and guarantees the request's declared callback
  *    agrees with what will be emailed.
  *
+ * 3. The `(fph, pk)` attestation pair captured at request time is
+ *    persisted against the magic-link token's identifier before the email
+ *    goes out, so `GET /magic-link/verify` can byte-match the verify-time
+ *    attestation against it (BUILD.md Part 9 step 6). This closes the
+ *    email-interception takeover vector: an attacker who grabs the
+ *    emailed URL but does not own the original Secure Enclave key cannot
+ *    produce a verify attestation that matches the stored pk.
+ *
  * The verify-side `callbackURL` query parameter is already allowlisted by
  * the plugin's built-in `originCheck` middleware against `trustedOrigins`
  * — see `/magic-link/verify` in the upstream plugin source.
  *
- * Attestation binding enforcement (the `ver:` / `req:` tags on the
- * attestation header) is explicitly deferred to Part 9 step 6; the social
- * `sis:` enforcement in `auth-hooks.ts` is unrelated to this plugin and
- * stays on its own path-matched hook.
+ * The social `sis:` enforcement in `auth-hooks.ts` is unrelated to this
+ * plugin and stays on its own path-matched hook. The ±60s skew contract
+ * for `req:` / `out:` / `api:` lives in `attestation-plugin.ts` alongside
+ * the rest of the attestation gate.
  */
 
 /** Default magic-link token lifetime. Mirrors the plugin's own default. */
@@ -139,6 +150,54 @@ export const resolveAllowedCallbackUrl = (env: Env): string =>
   buildUniversalLinkURL(env).toString();
 
 /**
+ * Extract the `x-device-attestation` header from a plugin-supplied context
+ * and persist the `(fph, pk)` pair against the magic-link token's
+ * identifier so `/magic-link/verify` can DEVICE_MISMATCH an attacker who
+ * owns the emailed URL but not the original Secure Enclave key.
+ *
+ * The attestation plugin's `before` hook already validated this exact
+ * header (structural parse, SPKI, binding tag, ECDSA) before the
+ * magic-link plugin was allowed to run; re-parsing here is idempotent and
+ * cheap. The re-parse is required because the plugin API does not pass
+ * the `ParsedAttestation` object down from the hook to `sendMagicLink` —
+ * the header is the shared artefact between the two layers.
+ *
+ * A missing or malformed header at this stage would mean the plugin
+ * ordering silently changed or the attestation plugin regressed. Throwing
+ * here keeps that regression loud instead of allowing sign-in to proceed
+ * with no stored binding.
+ */
+const persistMagicLinkAttestation = async (
+  token: string,
+  headers: Headers | undefined,
+): Promise<void> => {
+  const headerValue = headers?.get(ATTESTATION_HEADER_NAME) ?? undefined;
+  if (headerValue === undefined) {
+    throw new Error(
+      `sendMagicLink reached without an '${ATTESTATION_HEADER_NAME}' header — the attestation plugin should have rejected this request`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = decodeAttestationHeader(headerValue);
+  } catch (error) {
+    if (error instanceof AttestationHeaderParseError || error instanceof AttestationParseError) {
+      throw new Error(
+        `sendMagicLink re-parse of '${ATTESTATION_HEADER_NAME}' failed (${error.code}: ${error.message}) — the attestation plugin should have rejected this request upstream`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  await storeMagicLinkAttestation({
+    tokenIdentifier: deriveTokenIdentifier(token),
+    fingerprintHash: parsed.fingerprintHash,
+    publicKeySPKI: parsed.publicKeySPKI,
+    expiresAt: new Date(Date.now() + MAGIC_LINK_EXPIRES_IN_SECONDS * 1000),
+  });
+};
+
+/**
  * Returns the configured better-auth magic-link plugin. The caller owns
  * delivery wiring: a production deployment injects an SMTP/Resend/SES
  * adapter; tests inject a recorder so assertions can inspect exactly what
@@ -167,7 +226,16 @@ export const buildMagicLinkPlugin = (
     // tap on the email opens the app (via AASA / assetlinks) rather than
     // Safari — and so that a client's `body.callbackURL` cannot influence
     // what the server emails.
-    sendMagicLink: async ({ email, token }) => {
+    //
+    // Before the email goes out, the `(fph, pk)` from the request-time
+    // attestation is persisted against the token's identifier so the
+    // `ver:` binding at verify time can byte-compare against exactly the
+    // device that requested the link (BUILD.md Part 9 step 6). A write
+    // failure propagates and refuses the email — a sent email with no
+    // stored attestation would always DEVICE_MISMATCH at verify, stranding
+    // the user.
+    sendMagicLink: async ({ email, token }, ctx) => {
+      await persistMagicLinkAttestation(token, ctx?.request?.headers);
       const magicLinkURL = buildUniversalLinkURL(env, token).toString();
       await delivery.send({ email, token, magicLink: magicLinkURL });
     },
