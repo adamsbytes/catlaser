@@ -14,6 +14,29 @@ CREATE TABLE "account" (
 	"updated_at" timestamp NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "idempotency_record" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"idempotency_key" text NOT NULL,
+	"request_hash" text NOT NULL,
+	"status_code" integer,
+	"response_body" text,
+	"response_content_type" text,
+	"created_at" timestamp NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	CONSTRAINT "idempotency_record_session_key_unique" UNIQUE("session_id","idempotency_key")
+);
+--> statement-breakpoint
+CREATE TABLE "magic_link_attestation" (
+	"id" text PRIMARY KEY NOT NULL,
+	"token_identifier" text NOT NULL,
+	"fingerprint_hash" text NOT NULL,
+	"public_key_spki" text NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"created_at" timestamp NOT NULL,
+	CONSTRAINT "magic_link_attestation_token_identifier_unique" UNIQUE("token_identifier")
+);
+--> statement-breakpoint
 CREATE TABLE "session" (
 	"id" text PRIMARY KEY NOT NULL,
 	"expires_at" timestamp NOT NULL,
@@ -24,6 +47,15 @@ CREATE TABLE "session" (
 	"user_agent" text,
 	"user_id" text NOT NULL,
 	CONSTRAINT "session_token_unique" UNIQUE("token")
+);
+--> statement-breakpoint
+CREATE TABLE "session_attestation" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"fingerprint_hash" text NOT NULL,
+	"public_key_spki" text NOT NULL,
+	"created_at" timestamp NOT NULL,
+	CONSTRAINT "session_attestation_session_id_unique" UNIQUE("session_id")
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -46,30 +78,14 @@ CREATE TABLE "verification" (
 	"updated_at" timestamp NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "magic_link_attestation" (
-	"id" text PRIMARY KEY NOT NULL,
-	"token_identifier" text NOT NULL,
-	"fingerprint_hash" text NOT NULL,
-	"public_key_spki" text NOT NULL,
-	"expires_at" timestamp NOT NULL,
-	"created_at" timestamp NOT NULL,
-	CONSTRAINT "magic_link_attestation_token_identifier_unique" UNIQUE("token_identifier")
-);
---> statement-breakpoint
-CREATE TABLE "session_attestation" (
-	"id" text PRIMARY KEY NOT NULL,
-	"session_id" text NOT NULL,
-	"fingerprint_hash" text NOT NULL,
-	"public_key_spki" text NOT NULL,
-	"created_at" timestamp NOT NULL,
-	CONSTRAINT "session_attestation_session_id_unique" UNIQUE("session_id")
-);
---> statement-breakpoint
 ALTER TABLE "account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "idempotency_record" ADD CONSTRAINT "idempotency_record_session_id_session_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."session"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "session" ADD CONSTRAINT "session_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "session_attestation" ADD CONSTRAINT "session_attestation_session_id_session_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."session"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "account_userId_idx" ON "account" USING btree ("user_id");--> statement-breakpoint
-CREATE INDEX "session_userId_idx" ON "session" USING btree ("user_id");--> statement-breakpoint
-CREATE INDEX "verification_identifier_idx" ON "verification" USING btree ("identifier");--> statement-breakpoint
+CREATE INDEX "idempotency_record_session_id_idx" ON "idempotency_record" USING btree ("session_id");--> statement-breakpoint
+CREATE INDEX "idempotency_record_expires_at_idx" ON "idempotency_record" USING btree ("expires_at");--> statement-breakpoint
 CREATE INDEX "magic_link_attestation_expires_at_idx" ON "magic_link_attestation" USING btree ("expires_at");--> statement-breakpoint
-CREATE INDEX "session_attestation_session_id_idx" ON "session_attestation" USING btree ("session_id");
+CREATE INDEX "session_userId_idx" ON "session" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "session_attestation_session_id_idx" ON "session_attestation" USING btree ("session_id");--> statement-breakpoint
+CREATE INDEX "verification_identifier_idx" ON "verification" USING btree ("identifier");

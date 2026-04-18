@@ -26,8 +26,8 @@ const socialResponseShape = z.object({
 });
 
 /**
- * End-to-end coverage for BUILD.md Part 9 step 7 — the per-session SE
- * pubkey capture half of the protected-route contract.
+ * End-to-end coverage for the per-session SE pubkey capture half of the
+ * protected-route contract.
  *
  * Every successful sign-in ceremony must leave a `session_attestation`
  * row whose `(fph, pk)` is byte-identical to what the sign-in request

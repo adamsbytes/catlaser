@@ -1,10 +1,10 @@
 /**
  * Timestamp-skew enforcement for the `req:` / `out:` / `api:` attestation
- * bindings — BUILD.md Part 9 step 6.
+ * bindings.
  *
- * Step 5 established the crypto floor (header parse, SPKI validation, per-tag
- * binding match, ECDSA verify). It deliberately did not enforce freshness on
- * the timestamped bindings; this module owns that contract and nothing else.
+ * The crypto floor (header parse, SPKI validation, per-tag binding match,
+ * ECDSA verify) deliberately does not enforce freshness on the timestamped
+ * bindings; this module owns that contract and nothing else.
  *
  * The skew contract mirrors the iOS client's signing clock one-to-one: a
  * header is valid when `|now - bnd.timestamp| <= ATTESTATION_SKEW_SECONDS`.
@@ -12,7 +12,7 @@
  * stale ones, because either direction is a signal that something is wrong
  * (a clock-skewed device in the future direction, a captured replay in the
  * past direction). The exact ±60s boundary matches the value advertised in
- * ADR-006 and the wording in Part 9 step 6 of BUILD.md.
+ * ADR-006.
  *
  * The now-source is a dependency so tests can drive the clock deterministically
  * against fixed attestation timestamps. In production `defaultNowSeconds`

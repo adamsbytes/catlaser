@@ -22,9 +22,9 @@ import type { Env } from '~/lib/env.ts';
  *    complete sign-in. The page is a static document: no JavaScript, no
  *    meta-refresh, no auto-submit form, no reflection of the `?token=` query
  *    parameter into the DOM. Only an app holding the Secure-Enclave binding
- *    key can complete the magic-link verify round-trip (enforced in Part 9
- *    steps 5-7); this page's job is simply to refuse to be weaponised by a
- *    captured URL.
+ *    key can complete the magic-link verify round-trip (enforced by the
+ *    attestation plugin's `ver:` binding + stored-device match); this
+ *    page's job is simply to refuse to be weaponised by a captured URL.
  *
  * Both assets are built from `Env` values validated at process-start in
  * `env.ts`. No per-request mutation, no user-controlled input in either body.

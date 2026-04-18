@@ -96,10 +96,9 @@ let auth: ReturnType<typeof createAuth>;
 let device: TestDeviceKey;
 
 /**
- * Default to the real wall clock so the Part 9 step 6 skew window
- * (±60s) accepts; tests that want to drive skew failure pass an
- * explicit timestamp or use the dedicated suite in
- * `binding-enforcement.test.ts`.
+ * Default to the real wall clock so the ±60s attestation skew window
+ * accepts; tests that want to drive skew failure pass an explicit
+ * timestamp or use the dedicated suite in `binding-enforcement.test.ts`.
  */
 const currentUnixSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
@@ -442,13 +441,14 @@ describe('magic-link: verify round-trip', () => {
     await clearEmail(email);
   });
 
-  test('unknown token → 401 DEVICE_MISMATCH (step 6 stored-device-match rejects before plugin runs)', async () => {
-    // Step 5 alone would accept the signature and hand the request to
-    // the magic-link plugin, which would then redirect with
-    // `?error=INVALID_TOKEN`. Step 6 short-circuits with
-    // `DEVICE_MISMATCH` because the magic-link attestation table has no
-    // row under this token's identifier — the plugin's INVALID_TOKEN
-    // redirect is unreachable without a valid stored attestation.
+  test('unknown token → 401 DEVICE_MISMATCH (stored-device-match rejects before plugin runs)', async () => {
+    // The crypto floor alone would accept the signature and hand the
+    // request to the magic-link plugin, which would then redirect with
+    // `?error=INVALID_TOKEN`. The stored-device match short-circuits
+    // with `DEVICE_MISMATCH` because the magic-link attestation table
+    // has no row under this token's identifier — the plugin's
+    // INVALID_TOKEN redirect is unreachable without a valid stored
+    // attestation.
     const response = await verifyViaToken('never-issued-token');
     expect(response.status).toBe(401);
     const parsed = errorBodyShape.parse(await response.json());
@@ -491,13 +491,13 @@ describe('magic-link: verify round-trip', () => {
     await clearEmail(email);
   });
 
-  test('verify with untrusted callbackURL query → 403 (plugin originCheck, post step-6 pass)', async () => {
-    // After step 6 the ver: binding must byte-match a stored
-    // attestation before the plugin's originCheck middleware even runs.
-    // Issue a real magic link first so the stored row exists; then
-    // attempt the verify with a bad callbackURL. That way the
-    // originCheck rejection (403) is what this test is actually
-    // observing, not a trivial DEVICE_MISMATCH from a fabricated token.
+  test('verify with untrusted callbackURL query → 403 (plugin originCheck, after stored-device match)', async () => {
+    // The ver: binding must byte-match a stored attestation before the
+    // plugin's originCheck middleware even runs. Issue a real magic link
+    // first so the stored row exists; then attempt the verify with a bad
+    // callbackURL. That way the originCheck rejection (403) is what this
+    // test is actually observing, not a trivial DEVICE_MISMATCH from a
+    // fabricated token.
     const email = 'untrusted-cb@example.com';
     await clearEmail(email);
     await post({ email });

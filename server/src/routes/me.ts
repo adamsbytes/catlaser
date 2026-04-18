@@ -11,13 +11,12 @@ import { withAttestedSession } from '~/lib/protected-route.ts';
  * surfaces on this endpoint long before it can be shadowed by a route
  * that also does interesting work.
  *
- * The iOS `SignedHTTPClient` (BUILD.md Part 9 step 7, app-side) targets
- * this endpoint as its integration smoke test: a fresh SE-signed `api:`
- * attestation plus a valid bearer returns 200 with the user row; any
- * failure mode — expired bearer, missing attestation, wrong binding
- * tag, signature under the wrong key, skew out of window — surfaces as
- * one of the machine-readable codes documented in
- * `protected-route.ts`.
+ * The iOS `SignedHTTPClient` targets this endpoint as its integration
+ * smoke test: a fresh SE-signed `api:` attestation plus a valid bearer
+ * returns 200 with the user row; any failure mode — expired bearer,
+ * missing attestation, wrong binding tag, signature under the wrong
+ * key, skew out of window — surfaces as one of the machine-readable
+ * codes documented in `protected-route.ts`.
  *
  * POST/other methods are not supported on this resource; we return 405
  * with an `Allow: GET` header so monitoring probes get a deterministic

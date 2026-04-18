@@ -1,5 +1,5 @@
 import { relations } from 'drizzle-orm';
-import { pgTable, text, timestamp, boolean, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, boolean, index, integer, unique } from 'drizzle-orm/pg-core';
 
 export const user = pgTable('user', {
   id: text('id').primaryKey(),
@@ -72,8 +72,8 @@ export const verification = pgTable(
 );
 
 /**
- * Device-attestation binding captured at `POST /sign-in/magic-link` time. Step
- * 6 of Part 9 uses this table to enforce `ver:` binding:
+ * Device-attestation binding captured at `POST /sign-in/magic-link` time. Used
+ * by the attestation plugin to enforce the `ver:` binding:
  *
  * - On `/sign-in/magic-link`, the magic-link plugin's `sendMagicLink` callback
  *   writes `(token_identifier, fingerprint_hash, public_key_spki, expires_at)`
@@ -114,9 +114,8 @@ export const magicLinkAttestation = pgTable(
 );
 
 /**
- * Device-attestation binding captured at sign-in. Step 7 of Part 9 uses this
- * table to bind every authenticated API call to the Secure Enclave key the
- * session was minted under:
+ * Device-attestation binding captured at sign-in. Binds every authenticated
+ * API call to the Secure Enclave key the session was minted under:
  *
  * - On `/magic-link/verify` and `/sign-in/social`, the attestation plugin's
  *   after-hook writes `(session_id, fingerprint_hash, public_key_spki)` here
@@ -161,12 +160,79 @@ export const sessionAttestation = pgTable(
   (table) => [index('session_attestation_session_id_idx').on(table.sessionId)],
 );
 
+/**
+ * Idempotency ledger — the write-replay defence that closes the 60s residual
+ * window left open by per-request attestation.
+ *
+ * The protected-route middleware pins every authenticated API call to the
+ * per-session Secure-Enclave key, so a captured bearer alone is inert. But a captured
+ * `(bearer, fresh api: attestation)` pair is briefly replayable within the
+ * ±60s attestation skew window. Read replays inside that window are
+ * harmless — they surface state the attacker already observed — but a write
+ * replay could re-execute a mutation the user didn't authorise a second
+ * time. This table dedupes those replays on `(session_id, idempotency_key)`:
+ *
+ * - The mutating-route middleware (`idempotency.ts`) acquires a pending
+ *   lease on the first request under a given `(session, key)`, runs the
+ *   handler, and captures the completed response (status, body,
+ *   content-type). A subsequent request with the same `(session, key)` and
+ *   an identical `request_hash` returns the cached response without
+ *   re-executing the handler.
+ * - `request_hash` is SHA-256 over `METHOD || '\n' || path || '\n' || body`,
+ *   base64url-no-pad encoded. A replay with the same key but a different
+ *   method / path / body is rejected as `IDEMPOTENCY_KEY_MISMATCH` — this
+ *   is how a client bug surfaces instead of accidentally overwriting a
+ *   prior mutation's cache entry.
+ * - Pending leases (`response_body IS NULL`) that another caller observes
+ *   produce `IDEMPOTENCY_REQUEST_IN_PROGRESS`, so a concurrent duplicate
+ *   cannot double-execute while the original is still running.
+ * - `expires_at` is set to `now + IDEMPOTENCY_TTL_SECONDS` (10 minutes).
+ *   The TTL is deliberately an order of magnitude larger than the 60s skew
+ *   window so legitimate client retries over flaky networks still hit the
+ *   cache, while expired rows are replaced atomically by the acquire path's
+ *   `ON CONFLICT DO UPDATE … WHERE expires_at <= now` predicate.
+ *
+ * `ON DELETE CASCADE` on `session_id` keeps the row lifetime bounded by the
+ * owning session: sign-out, session revoke, or user delete drop every
+ * idempotency record atomically. A session that no longer exists cannot
+ * authenticate a fresh mutating request in the first place, so the residual
+ * rows would be dead weight.
+ *
+ * Response body is persisted as text because every mutating route on this
+ * server returns JSON (see `successResponse`/`errorResponse` in
+ * `lib/http.ts`); storing bytes would require driver glue that `bun-sql`
+ * does not round-trip cleanly, and the idempotency gate rebuilds the
+ * response with `Content-Type` intact from `response_content_type` so the
+ * wire contract the client observes on a replay is byte-identical.
+ */
+export const idempotencyRecord = pgTable(
+  'idempotency_record',
+  {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => session.id, { onDelete: 'cascade' }),
+    idempotencyKey: text('idempotency_key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    statusCode: integer('status_code'),
+    responseBody: text('response_body'),
+    responseContentType: text('response_content_type'),
+    createdAt: timestamp('created_at').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+  },
+  (table) => [
+    index('idempotency_record_session_id_idx').on(table.sessionId),
+    index('idempotency_record_expires_at_idx').on(table.expiresAt),
+    unique('idempotency_record_session_key_unique').on(table.sessionId, table.idempotencyKey),
+  ],
+);
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
 }));
 
-export const sessionRelations = relations(session, ({ one }) => ({
+export const sessionRelations = relations(session, ({ one, many }) => ({
   user: one(user, {
     fields: [session.userId],
     references: [user.id],
@@ -175,11 +241,19 @@ export const sessionRelations = relations(session, ({ one }) => ({
     fields: [session.id],
     references: [sessionAttestation.sessionId],
   }),
+  idempotencyRecords: many(idempotencyRecord),
 }));
 
 export const sessionAttestationRelations = relations(sessionAttestation, ({ one }) => ({
   session: one(session, {
     fields: [sessionAttestation.sessionId],
+    references: [session.id],
+  }),
+}));
+
+export const idempotencyRecordRelations = relations(idempotencyRecord, ({ one }) => ({
+  session: one(session, {
+    fields: [idempotencyRecord.sessionId],
     references: [session.id],
   }),
 }));

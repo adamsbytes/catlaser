@@ -218,7 +218,7 @@ describe('attestation verify: signature over fph || bnd', () => {
   });
 });
 
-describe('attestation verify: stored-key verification path (BUILD.md Part 9 step 7)', () => {
+describe('attestation verify: stored-key verification path', () => {
   test('stored-key verify accepts a signature made under the same SE key on the wire', () => {
     // The happy path for protected routes: the wire carries a matching
     // pk and a valid signature, the stored SPKI is identical, and verify

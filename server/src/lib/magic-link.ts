@@ -28,10 +28,10 @@ import { deriveTokenIdentifier, storeMagicLinkAttestation } from '~/lib/magic-li
  * 3. The `(fph, pk)` attestation pair captured at request time is
  *    persisted against the magic-link token's identifier before the email
  *    goes out, so `GET /magic-link/verify` can byte-match the verify-time
- *    attestation against it (BUILD.md Part 9 step 6). This closes the
- *    email-interception takeover vector: an attacker who grabs the
- *    emailed URL but does not own the original Secure Enclave key cannot
- *    produce a verify attestation that matches the stored pk.
+ *    attestation against it. This closes the email-interception takeover
+ *    vector: an attacker who grabs the emailed URL but does not own the
+ *    original Secure Enclave key cannot produce a verify attestation that
+ *    matches the stored pk.
  *
  * The verify-side `callbackURL` query parameter is already allowlisted by
  * the plugin's built-in `originCheck` middleware against `trustedOrigins`
@@ -230,10 +230,9 @@ export const buildMagicLinkPlugin = (
     // Before the email goes out, the `(fph, pk)` from the request-time
     // attestation is persisted against the token's identifier so the
     // `ver:` binding at verify time can byte-compare against exactly the
-    // device that requested the link (BUILD.md Part 9 step 6). A write
-    // failure propagates and refuses the email — a sent email with no
-    // stored attestation would always DEVICE_MISMATCH at verify, stranding
-    // the user.
+    // device that requested the link. A write failure propagates and
+    // refuses the email — a sent email with no stored attestation would
+    // always DEVICE_MISMATCH at verify, stranding the user.
     sendMagicLink: async ({ email, token }, ctx) => {
       await persistMagicLinkAttestation(token, ctx?.request?.headers);
       const magicLinkURL = buildUniversalLinkURL(env, token).toString();

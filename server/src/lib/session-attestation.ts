@@ -5,9 +5,9 @@ import { db } from '~/lib/db.ts';
 
 /**
  * Store and retrieve the per-session Secure-Enclave public key captured at
- * sign-in. This is the load-bearing half of BUILD.md Part 9 step 7 — the
- * "per-session SE pubkey stored at sign-in" artefact named in the ADR-006
- * decision record.
+ * sign-in. This is the "per-session SE pubkey stored at sign-in" artefact
+ * named in the ADR-006 decision record, and the load-bearing half of the
+ * protected-route middleware's stored-key verification.
  *
  * On `/magic-link/verify` and `/sign-in/social`, the attestation plugin's
  * after-hook writes `(session_id, fph, pk)` here once better-auth has

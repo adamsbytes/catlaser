@@ -89,13 +89,13 @@ const runMagicLinkRequestCallbackGuard = async (env: Env, body: unknown): Promis
  *   consumes the client-supplied value; this check is defence-in-
  *   depth against a future change that might.
  *
- * Every other step boundary — attestation parse / SPKI / binding /
+ * Every other gate boundary — attestation parse / SPKI / binding /
  * ECDSA verify / nonce three-way / `req:` / `out:` skew / `ver:`
  * stored-fph + pk byte-equal / `api:` per-request / idempotency —
- * lives in the attestation plugin or in step 6+ additions to it, not
- * here. Adding a fifth concern to this file means adding a fifth
- * subsystem; adding attestation code here instead of in the plugin
- * would cross the trust boundary this split is designed to preserve.
+ * lives in the attestation plugin or its sibling modules, not here.
+ * Adding a fifth concern to this file means adding a fifth subsystem;
+ * adding attestation code here instead of in the plugin would cross
+ * the trust boundary this split is designed to preserve.
  */
 export const buildBeforeHook = (env: Env): AuthMiddleware =>
   createAuthMiddleware(async (ctx) => {

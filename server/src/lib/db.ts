@@ -3,6 +3,8 @@ import { drizzle } from 'drizzle-orm/bun-sql';
 import {
   account,
   accountRelations,
+  idempotencyRecord,
+  idempotencyRecordRelations,
   magicLinkAttestation,
   session,
   sessionAttestation,
@@ -21,10 +23,12 @@ const schema = {
   verification,
   magicLinkAttestation,
   sessionAttestation,
+  idempotencyRecord,
   userRelations,
   sessionRelations,
   accountRelations,
   sessionAttestationRelations,
+  idempotencyRecordRelations,
 };
 
 const client: SQL = new SQL(env.DATABASE_URL);

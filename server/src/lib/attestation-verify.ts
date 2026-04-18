@@ -4,7 +4,7 @@ import type { ParsedAttestation } from '~/lib/attestation-header.ts';
 
 /**
  * Crypto primitives for v3 device attestation. Owns the two concerns that
- * BUILD.md Part 9 step 5 names alongside the header parser:
+ * sit alongside the header parser:
  *
  * 1. Byte-for-byte P-256 SubjectPublicKeyInfo validation. The 26-byte
  *    `EC_P256_SPKI_PREFIX` encodes `AlgorithmIdentifier { id-ecPublicKey,
@@ -24,11 +24,11 @@ import type { ParsedAttestation } from '~/lib/attestation-header.ts';
  *    than converting to IEEE P1363.
  *
  * What this module deliberately does NOT do, kept here as a load-bearing
- * step-boundary note: no `req:` / `out:` skew enforcement (step 6), no
- * stored `fph` / `pk` byte-equal on `ver:` (step 6), no `api:` per-
- * request attestation (step 7), no idempotency-key replay defence
- * (step 8). The crypto floor is separable from those semantic checks so
- * later steps can layer on top without rewriting anything here.
+ * layering note: no `req:` / `out:` skew enforcement, no stored `fph` /
+ * `pk` byte-equal on `ver:`, no `api:` per-request attestation, no
+ * idempotency-key replay defence. The crypto floor is separable from
+ * those semantic checks so callers can layer on top without rewriting
+ * anything here.
  */
 
 /**
@@ -147,8 +147,8 @@ const bindingWireBytes = (parsed: ParsedAttestation): Uint8Array => {
  * `identity.sign(_:)` — the 32-byte fingerprint hash followed by the
  * canonical UTF-8 encoding of the binding (`req:<ts>`, `ver:<token>`,
  * `sis:<nonce>`, or `out:<ts>`). Exposed as its own function so
- * signature-verify tests and step-6 enforcement can share the same
- * byte-level view of the signed message.
+ * signature-verify tests and skew-enforcement code paths can share the
+ * same byte-level view of the signed message.
  */
 export const buildSignedMessage = (parsed: ParsedAttestation): Uint8Array => {
   const fph = parsed.fingerprintHash;
@@ -226,8 +226,8 @@ export const verifyAttestationSignature = (parsed: ParsedAttestation): void => {
 
 /**
  * Verify the attestation's ECDSA signature against a public key the
- * server has already persisted — for step 7, the per-session SPKI
- * captured at sign-in. This is the load-bearing primitive that makes a
+ * server has already persisted — the per-session SPKI captured at
+ * sign-in. This is the load-bearing primitive that makes a
  * captured bearer alone insufficient to act: the signed message is
  * reconstructed from the wire (`parsed.fingerprintHash || bnd_utf8`) but
  * the verifying key comes from storage, so an attacker who cannot

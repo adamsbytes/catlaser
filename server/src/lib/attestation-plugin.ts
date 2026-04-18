@@ -16,7 +16,7 @@ import { deriveTokenIdentifier, lookupMagicLinkAttestation } from '~/lib/magic-l
 import { storeSessionAttestation } from '~/lib/session-attestation.ts';
 
 /**
- * Device-attestation plugin — BUILD.md Part 9 steps 5, 6, and 7.
+ * Device-attestation plugin.
  *
  * Gates every attestation-carrying auth endpoint with the v3 wire
  * contract described in ADR-006:
@@ -72,12 +72,13 @@ import { storeSessionAttestation } from '~/lib/session-attestation.ts';
  * `/sign-in/social`) completes successfully, an after-hook copies the
  * incoming attestation's `(fingerprintHash, publicKeySPKI)` into
  * `session_attestation` keyed on `ctx.context.newSession.session.id`.
- * This pins the session to a specific Secure-Enclave key; protected
- * routes (step 7, `protected-route.ts`) verify every `api:` binding
- * under that stored pk, collapsing "captured bearer" into "captured
- * bearer AND the non-extractable SE key" — the latter is not a real
- * threat. Step 8 adds `Idempotency-Key` replay protection on mutating
- * routes and does not rewrite anything this plugin does.
+ * This pins the session to a specific Secure-Enclave key; the
+ * protected-route middleware in `protected-route.ts` verifies every
+ * `api:` binding under that stored pk, collapsing "captured bearer"
+ * into "captured bearer AND the non-extractable SE key" — the latter
+ * is not a real threat. `Idempotency-Key` replay protection on
+ * mutating routes lives on its own gate in `idempotency.ts` and does
+ * not rewrite anything this plugin does.
  */
 
 /**
@@ -341,10 +342,10 @@ const encodeBase64UrlNoPad = (bytes: Uint8Array): string =>
  * captured the emailed magic-link URL (email relay, shared mailbox, a
  * laptop that held the browser session). Such an attacker could forge a
  * `ver:<token>` attestation under their own Secure Enclave key and
- * satisfy step 5's ECDSA verify — because step 5 accepts whatever pk
- * arrives on the wire. Pinning the verify-time pk to the stored
- * request-time pk collapses that replay into a rejection before the
- * magic-link plugin consumes its verification row.
+ * satisfy the earlier ECDSA verify — which accepts whatever pk arrives
+ * on the wire. Pinning the verify-time pk to the stored request-time pk
+ * collapses that replay into a rejection before the magic-link plugin
+ * consumes its verification row.
  */
 const enforceStoredDeviceMatchOrThrow = async (parsed: ParsedAttestation): Promise<void> => {
   if (parsed.binding.tag !== 'verify') {

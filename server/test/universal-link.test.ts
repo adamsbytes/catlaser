@@ -18,7 +18,7 @@ import { handle } from '~/server.ts';
 const JS_SCHEME = ['java', 'script:'].join('');
 
 /**
- * End-to-end coverage for Part 9 step 4 — Universal Link handler.
+ * End-to-end coverage for the Universal Link handler.
  *
  * These tests drive the production `handle` function and the production
  * `env` — no stubs, no mocks. The three invariants under test:

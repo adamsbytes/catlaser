@@ -8,15 +8,16 @@ import { db } from '~/lib/db.ts';
  * time so the `ver:` binding at `GET /magic-link/verify` can byte-compare
  * against what the original requesting device signed.
  *
- * This is the load-bearing half of BUILD.md Part 9 step 6 for the `ver:`
- * binding. Step 5 already validates the signature under the public key
- * present in the header — what this module adds is the invariant that the
- * verify-time public key and fingerprint hash are the EXACT ones the
+ * This is the load-bearing stored-device match for the `ver:` binding.
+ * The attestation plugin already validates the signature under the public
+ * key present in the header — what this module adds is the invariant that
+ * the verify-time public key and fingerprint hash are the EXACT ones the
  * request-time device used. Without it, an attacker who observed the
  * magic-link URL (email interception, shared email account, a device that
  * landed outside AASA routing) could sign a verify attestation under their
- * own Secure Enclave key and satisfy step 5 alone — step 5's crypto only
- * proves "some device signed this", not "the same device that requested".
+ * own Secure Enclave key and satisfy the signature verify alone — the
+ * crypto gate only proves "some device signed this", not "the same device
+ * that requested".
  *
  * The stored identifier is `base64url-no-pad(sha256(magic_link_token))`,
  * byte-for-byte what better-auth's magic-link plugin stores in

@@ -139,9 +139,9 @@ const parseEnv = (source: Record<string, string | undefined>): Env => {
         message: 'must be a host-only ASCII DNS name (no scheme, port, path, or whitespace)',
       }),
     // Path segment served by the Universal Link handler (distinct from the
-    // API verify endpoint). A browser that falls back here must receive
-    // inert HTML — see Part 9 step 4. Validated at process-start so a
-    // misconfiguration fails loudly instead of shipping emails with a
+    // API verify endpoint). A browser that falls back here receives the
+    // inert HTML handler in `universal-link.ts`. Validated at process-start
+    // so a misconfiguration fails loudly instead of shipping emails with a
     // broken destination.
     MAGIC_LINK_UNIVERSAL_LINK_PATH: z.string().refine(isPlausibleUniversalLinkPath, {
       message: `must start with '/', contain no '?'/'#'/whitespace, and must not equal '${API_MAGIC_LINK_VERIFY_PATH}'`,

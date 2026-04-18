@@ -17,8 +17,8 @@ import { errorResponse } from '~/lib/http.ts';
 import { lookupSessionAttestation } from '~/lib/session-attestation.ts';
 
 /**
- * Protected-route attestation middleware — BUILD.md Part 9 step 7, the
- * enforcement half of the "per-request attestation" decision in ADR-006.
+ * Protected-route attestation middleware — the enforcement half of the
+ * "per-request attestation" decision in ADR-006.
  *
  * Sign-in binds the Secure-Enclave public key to the session row (the
  * attestation plugin's after-hook writes `session_attestation`). This
@@ -54,10 +54,10 @@ import { lookupSessionAttestation } from '~/lib/session-attestation.ts';
  *    The stored SPKI is still structurally validated for defence-in-depth
  *    by `verifyAttestationSignatureWithStoredKey`.
  * 7. Enforce the ±60s skew window against the server clock. Failure →
- *    `401 ATTESTATION_SKEW_EXCEEDED`. Step 8 adds `Idempotency-Key`
- *    replay protection for mutating routes; within the skew window, a
- *    read replay is non-harmful because it tells the attacker nothing
- *    new, and write replay is blocked by that sibling layer.
+ *    `401 ATTESTATION_SKEW_EXCEEDED`. `Idempotency-Key` replay protection
+ *    (in `idempotency.ts`) covers mutating routes; within the skew
+ *    window, a read replay is non-harmful because it tells the attacker
+ *    nothing new, and write replay is blocked by that sibling layer.
  *
  * Why not implement this as a better-auth plugin hook? Because
  * protected routes are not better-auth endpoints — they live outside
@@ -234,9 +234,9 @@ const loadStoredAttestationOrThrow = async (
  * resolved session on success, throws `ProtectedRouteError` on any
  * gate failure.
  *
- * Callers that need to compose additional checks (e.g. an upcoming
- * `Idempotency-Key` guard in step 8) can wrap this function; callers
- * that just want "reject unless fully attested" should use
+ * Callers that need to compose additional checks (e.g. the
+ * `Idempotency-Key` guard in `idempotency.ts`) can wrap this function;
+ * callers that just want "reject unless fully attested" should use
  * `withAttestedSession` instead.
  */
 export const requireAttestedSession = async (
@@ -276,9 +276,9 @@ export const protectedRouteErrorResponse = (error: ProtectedRouteError): Respons
  *
  * Handlers see only well-formed requests from attested devices; every
  * rejection path produces a 401 with a machine-readable code. Callers
- * that need custom composition (step 8 idempotency keys, step 9 rate
- * limiting) should still start with `requireAttestedSession` so the gate
- * ordering stays consistent across the server.
+ * that need custom composition (idempotency-key dedupe, rate limiting)
+ * should still start with `requireAttestedSession` so the gate ordering
+ * stays consistent across the server.
  */
 export const withAttestedSession = (
   handler: AttestedRouteHandler,

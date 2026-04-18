@@ -17,9 +17,9 @@
  * - `api:<unix_seconds>` — every authenticated API call after sign-in. Same
  *   timestamp/skew contract as `req:` and `out:`; distinct tag prevents a
  *   captured sign-in-time attestation from being replayed against a protected
- *   route, and vice versa. Step 7 mounts this binding on the protected-route
- *   middleware; step 6 establishes the parser, encoder, and skew semantics so
- *   the crypto floor is consistent across all five bindings.
+ *   route, and vice versa. The protected-route middleware consumes this
+ *   binding; the parser, encoder, and skew semantics stay shared across all
+ *   five bindings so the crypto floor is consistent.
  *
  * The tagged prefix also prevents cross-context confusion: a caller that
  * stripped the prefix before signing/verifying would still see the raw signed

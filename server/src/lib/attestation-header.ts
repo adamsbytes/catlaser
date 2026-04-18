@@ -20,8 +20,8 @@ import { decodeAttestationBinding } from '~/lib/attestation-binding.ts';
  *
  * This parser does NOT verify the ECDSA signature, nor does it verify that
  * `pk` carries the exact 26-byte P-256 SPKI prefix. Those checks belong to
- * the attestation-binding-enforcement stage (ADR-006; BUILD.md Part 9 step 5).
- * What this parser does guarantee:
+ * the attestation-binding-enforcement stage in `attestation-verify.ts`
+ * (see ADR-006). What this parser does guarantee:
  *
  * - Header value ≤ `MAX_HEADER_VALUE_BYTES` (matches iOS cap — catches
  *   runaway encoding bugs before they hit the database).

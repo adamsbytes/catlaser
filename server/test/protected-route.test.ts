@@ -16,8 +16,7 @@ import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
 /**
- * End-to-end coverage for BUILD.md Part 9 step 7 — the protected-route
- * attestation middleware.
+ * End-to-end coverage for the protected-route attestation middleware.
  *
  * These tests compose the full pipeline: magic-link sign-in under a
  * frozen clock, bearer extraction, then protected-route calls. Every

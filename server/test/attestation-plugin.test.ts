@@ -15,12 +15,12 @@ import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
 /**
- * End-to-end tests for the device-attestation plugin (BUILD.md Part 9
- * step 5). Every test drives the full better-auth handler via
- * `createAuth().handler(...)` so the plugin's hook order relative to
- * origin-check middleware, the bearer plugin, and the magic-link
- * plugin is exercised verbatim — a refactor that accidentally moves
- * the plugin out of the pipeline will fail these immediately.
+ * End-to-end tests for the device-attestation plugin. Every test drives
+ * the full better-auth handler via `createAuth().handler(...)` so the
+ * plugin's hook order relative to origin-check middleware, the bearer
+ * plugin, and the magic-link plugin is exercised verbatim — a refactor
+ * that accidentally moves the plugin out of the pipeline will fail
+ * these immediately.
  */
 
 const MAGIC_LINK_URL = `http://localhost${AUTH_BASE_PATH}/sign-in/magic-link`;
@@ -84,11 +84,11 @@ const signedPostHeaders = (
 
 /**
  * All timestamped bindings use the real wall clock so the attestation
- * plugin's skew enforcement (introduced in Part 9 step 6) accepts them
- * by default. Tests that specifically exercise skew failure drive the
- * clock through `createAuth({ attestationNowSeconds: ... })` in the
- * dedicated `binding-enforcement.test.ts` suite; this file's job is to
- * assert the step-5 crypto floor, so it keeps timestamps fresh.
+ * plugin's skew enforcement accepts them by default. Tests that
+ * specifically exercise skew failure drive the clock through
+ * `createAuth({ attestationNowSeconds: ... })` in the dedicated
+ * `binding-enforcement.test.ts` suite; this file's job is to assert the
+ * structural / crypto floor, so it keeps timestamps fresh.
  */
 const currentUnixSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
@@ -304,7 +304,7 @@ describe('attestation plugin: per-tag binding match', () => {
   });
 });
 
-describe('attestation plugin: SPKI structural rejection (step 5 crypto floor)', () => {
+describe('attestation plugin: SPKI structural rejection (crypto floor)', () => {
   test('pk shorter than the 91-byte P-256 SPKI → ATTESTATION_SPKI_INVALID', async () => {
     const device = createTestDeviceKey();
     const short = new Uint8Array(EC_P256_SPKI_TOTAL_BYTES - 1);

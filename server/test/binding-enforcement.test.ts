@@ -15,11 +15,12 @@ import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
 /**
- * End-to-end coverage for BUILD.md Part 9 step 6 — binding enforcement.
+ * End-to-end coverage for binding enforcement (skew window + stored-device
+ * match on `ver:`).
  *
  * The unit-level skew and binding-parser tests cover the individual
  * primitives; this file drives the full better-auth handler so skew +
- * stored-device-match + existing step-5 checks are exercised in the
+ * stored-device-match + the structural crypto floor are exercised in the
  * order a real request visits them.
  *
  * Invariants asserted:
@@ -360,8 +361,8 @@ describe('binding enforcement: ver: stored (fph, pk) byte-equal on /magic-link/v
 
   test('unknown token (no stored row) rejects with DEVICE_MISMATCH', async () => {
     // Build a ver: attestation for a token the server never issued. The
-    // signature verifies (step 5 passes), but the stored-row lookup
-    // returns null, so step 6 rejects.
+    // signature verifies (crypto floor passes), but the stored-row
+    // lookup returns null, so the binding enforcement stage rejects.
     const device = createTestDeviceKey();
     const verHeader = buildSignedAttestationHeader({
       deviceKey: device,
@@ -381,9 +382,10 @@ describe('binding enforcement: ver: stored (fph, pk) byte-equal on /magic-link/v
     // Forcibly age the stored attestation row past the real wall clock.
     // The magic-link plugin's own verification row still lives (its own
     // 5-min expiry is independent of ours), so a correct device could
-    // otherwise satisfy step 5. Step 6 must still DEVICE_MISMATCH because
-    // the stored attestation row has expired — the lookup's expiry check
-    // runs against real time, so aging the row to 1 minute ago suffices.
+    // otherwise satisfy the crypto floor. The stored-device match must
+    // still DEVICE_MISMATCH because the stored attestation row has
+    // expired — the lookup's expiry check runs against real time, so
+    // aging the row to 1 minute ago suffices.
     const staleExpiry = new Date(Date.now() - 60_000);
     await db
       .update(magicLinkAttestation)
