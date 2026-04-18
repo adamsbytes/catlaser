@@ -13,6 +13,7 @@ export interface Env {
   GOOGLE_CLIENT_ID: string;
   MAGIC_LINK_UNIVERSAL_LINK_HOST: string;
   MAGIC_LINK_UNIVERSAL_LINK_PATH: string;
+  PROVISIONING_TOKEN: string;
 }
 
 /**
@@ -146,6 +147,19 @@ const parseEnv = (source: Record<string, string | undefined>): Env => {
     MAGIC_LINK_UNIVERSAL_LINK_PATH: z.string().refine(isPlausibleUniversalLinkPath, {
       message: `must start with '/', contain no '?'/'#'/whitespace, and must not equal '${API_MAGIC_LINK_VERIFY_PATH}'`,
     }),
+    // Shared secret presented by the device during the one-shot
+    // provisioning call (`POST /api/v1/devices/provision`). The
+    // factory image embeds this value in the device's first-boot
+    // configuration; every subsequent device-to-server call is
+    // authenticated by the device's own Ed25519 key, not by this
+    // token. 32 bytes of entropy (as hex or base64) is the floor —
+    // the value is essentially a production secret that, if leaked,
+    // would let any caller register arbitrary devices under the
+    // operator's tailnet. Validated at process-start so a blank or
+    // weak token fails loudly.
+    PROVISIONING_TOKEN: z
+      .string()
+      .min(32, 'PROVISIONING_TOKEN must be at least 32 characters of high-entropy secret'),
   });
 
   const result = schema.safeParse(source);

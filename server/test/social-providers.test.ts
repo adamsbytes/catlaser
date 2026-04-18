@@ -27,7 +27,10 @@ import { buildSignedAttestationHeader, createTestDeviceKey } from './support/sig
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const AUTH_BASE = '/api/v1/auth';
 const socialURL = `http://localhost${AUTH_BASE}/sign-in/social`;
-const trustedOrigin = env.TRUSTED_ORIGINS[0] ?? 'http://localhost:3000';
+const [trustedOrigin] = env.TRUSTED_ORIGINS;
+if (trustedOrigin === undefined) {
+  throw new Error('env.TRUSTED_ORIGINS must contain at least one entry');
+}
 
 interface AppleFixture {
   readonly privateKey: CryptoKey;

@@ -41,7 +41,10 @@ import { buildSignedAttestationHeader, createTestDeviceKey } from './support/sig
  */
 
 const SIGN_IN_URL = `http://localhost${AUTH_BASE_PATH}/sign-in/magic-link`;
-const trustedOrigin = env.TRUSTED_ORIGINS[0] ?? 'http://localhost:3000';
+const [trustedOrigin] = env.TRUSTED_ORIGINS;
+if (trustedOrigin === undefined) {
+  throw new Error('env.TRUSTED_ORIGINS must contain at least one entry');
+}
 
 const errorBodyShape = z.object({
   code: z.string().optional(),

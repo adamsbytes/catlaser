@@ -416,12 +416,40 @@ export const devicePairingCode = pgTable(
     claimedByUserId: text('claimed_by_user_id').references(() => user.id, {
       onDelete: 'set null',
     }),
+    /**
+     * Set when a claim is superseded. Two situations trigger a revoke:
+     *
+     * 1. The same `device_id` is re-claimed (fresh QR, same device,
+     *    possibly by a different user). Any prior `claimed_at IS NOT
+     *    NULL AND revoked_at IS NULL` rows for that device_id are
+     *    atomically updated to `revoked_at = now` in the same
+     *    transaction as the new claim. The historical row survives for
+     *    fleet audit.
+     * 2. The owning user signs out (app-side wipe) or the user row is
+     *    deleted (cascade). Future: either cascades to `revoked_at` or
+     *    the session-lifecycle hook writes it; neither is wired yet —
+     *    today a cascade null-s `claimed_by_user_id` and the row stops
+     *    showing up in `listPairedDevicesForUser` by virtue of missing
+     *    the user-id filter.
+     *
+     * `GET /api/v1/devices/paired` filters to `revoked_at IS NULL`, so
+     * this column is the single source of truth the iOS app reads when
+     * deciding whether its locally-cached endpoint is still current.
+     */
+    revokedAt: timestamp('revoked_at'),
     createdAt: timestamp('created_at').notNull(),
   },
   (table) => [
     index('device_pairing_code_expires_at_idx').on(table.expiresAt),
     index('device_pairing_code_device_id_idx').on(table.deviceId),
     index('device_pairing_code_claimed_by_user_id_idx').on(table.claimedByUserId),
+    // Composite index supporting the list-paired-devices-for-user
+    // query: filter by user id, exclude revoked, order by claimed_at.
+    index('device_pairing_code_user_active_idx').on(
+      table.claimedByUserId,
+      table.revokedAt,
+      table.claimedAt,
+    ),
   ],
 );
 
@@ -431,3 +459,117 @@ export const devicePairingCodeRelations = relations(devicePairingCode, ({ one })
     references: [user.id],
   }),
 }));
+
+/**
+ * Fleet-registered device identity. One row per physical Catlaser.
+ *
+ * Populated at factory provisioning via
+ * `POST /api/v1/devices/provision`, authenticated by a pre-shared
+ * `PROVISIONING_TOKEN`. The row owns:
+ *
+ * - `slug` — the user-visible device identifier. Matches
+ *   `device_pairing_code.device_id` for every row tied to this
+ *   device. `[A-Za-z0-9_-]`, 1..64 chars.
+ * - `public_key_ed25519` — 32-byte Ed25519 public key, base64url
+ *   no-pad. Generated once on the device at first boot and never
+ *   rotated in place (a rotation is a full re-provision). Used to
+ *   verify every device-originating call to the coordination server:
+ *   pairing-code issuance, ACL polls, and any future device-side
+ *   endpoint. ADR-007 (device identity) is the full spec.
+ * - `tailscale_host` / `tailscale_port` — the endpoint the iOS app
+ *   dials after pair-claim. Re-published on every provision call so
+ *   a device that changed its tailnet identity can update without a
+ *   separate endpoint.
+ *
+ * The unique constraint on `slug` is load-bearing: it's what
+ * `device_access_grant.device_slug` and
+ * `device_pairing_code.device_id` join against. The FK direction is
+ * deliberately informal (the other two tables carry a plain `text`
+ * rather than an FK) because those rows exist with a `device_id`
+ * before any provisioning row is written in test fixtures; a hard FK
+ * would flip the seeding order from "seed a pairing code" to "seed a
+ * device, then a pairing code," which adds boilerplate without
+ * buying safety the slug uniqueness doesn't already provide.
+ */
+export const device = pgTable(
+  'device',
+  {
+    id: text('id').primaryKey(),
+    slug: text('slug').notNull().unique(),
+    publicKeyEd25519: text('public_key_ed25519').notNull(),
+    tailscaleHost: text('tailscale_host').notNull(),
+    tailscalePort: integer('tailscale_port').notNull(),
+    deviceName: text('device_name'),
+    registeredAt: timestamp('registered_at').notNull(),
+    updatedAt: timestamp('updated_at')
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [index('device_slug_idx').on(table.slug)],
+);
+
+/**
+ * Per-device ACL entry: "user `user_spki_b64` may drive device
+ * `device_slug`." One row per (device, user) pair; a row is either
+ * active (`revoked_at IS NULL`) or revoked (`revoked_at = <Date>`).
+ *
+ * Written by `exchangePairingCode` inside the same transaction as
+ * the claim: on a successful claim the session's stored
+ * `session_attestation.public_key_spki` is upserted under
+ * `(device_slug, user_spki_b64)` with `revoked_at = null`. Prior
+ * grants for the same `device_slug` owned by OTHER users are
+ * revoked in the same transaction — the pair-claim semantics of
+ * `device_pairing_code` already say "this device now belongs to the
+ * claimant," and the ACL must not drift from that stance.
+ *
+ * Read by `GET /api/v1/devices/:slug/acl` — the endpoint the Python
+ * brain polls to keep its in-memory authorization set current. The
+ * endpoint is gated by Ed25519 device-attestation (the calling
+ * device proves it owns the `public_key_ed25519` in `device.slug`).
+ *
+ * `revoked_at` exists rather than a hard delete because an active
+ * TCP session on the device uses the cached ACL until its next
+ * poll; keeping the row around with a revocation timestamp makes
+ * audit trivial and lets a future feature "re-authorize within N
+ * seconds of a revoke" operate in-place. `revision` ticks monotonic
+ * per (device_slug) so a poller can ask "what's changed since
+ * revision K" rather than diffing the whole set.
+ *
+ * Indexes: lookup by device_slug with revoked_at filter is the hot
+ * path (ACL poll); we also want a composite unique to ensure we
+ * never duplicate `(device, user)`.
+ */
+export const deviceAccessGrant = pgTable(
+  'device_access_grant',
+  {
+    id: text('id').primaryKey(),
+    deviceSlug: text('device_slug').notNull(),
+    userSpkiB64: text('user_spki_b64').notNull(),
+    userId: text('user_id').references(() => user.id, { onDelete: 'set null' }),
+    grantedAt: timestamp('granted_at').notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+  },
+  (table) => [
+    index('device_access_grant_device_slug_active_idx').on(table.deviceSlug, table.revokedAt),
+    index('device_access_grant_device_slug_revision_idx').on(table.deviceSlug, table.revision),
+    unique('device_access_grant_device_user_unique').on(table.deviceSlug, table.userSpkiB64),
+  ],
+);
+
+/**
+ * Monotonic revision counter per `device_slug`. The ACL poll
+ * response carries the current revision; a poller that has seen
+ * revision K can skip a body re-download if the response's
+ * revision is still K (future optimization; not wired yet but the
+ * column exists so the contract is stable from day one).
+ *
+ * A single row per device; initialized on first grant insert.
+ */
+export const deviceAclRevision = pgTable('device_acl_revision', {
+  deviceSlug: text('device_slug').primaryKey(),
+  revision: bigint('revision', { mode: 'number' }).notNull(),
+  updatedAt: timestamp('updated_at')
+    .$onUpdate(() => new Date())
+    .notNull(),
+});

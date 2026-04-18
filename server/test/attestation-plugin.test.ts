@@ -28,7 +28,10 @@ const MAGIC_LINK_URL = `http://localhost${AUTH_BASE_PATH}/sign-in/magic-link`;
 const VERIFY_URL_BASE = `http://localhost${AUTH_BASE_PATH}/magic-link/verify`;
 const SOCIAL_URL = `http://localhost${AUTH_BASE_PATH}/sign-in/social`;
 const SIGN_OUT_URL = `http://localhost${AUTH_BASE_PATH}/sign-out`;
-const trustedOrigin = env.TRUSTED_ORIGINS[0] ?? 'http://localhost:3000';
+const [trustedOrigin] = env.TRUSTED_ORIGINS;
+if (trustedOrigin === undefined) {
+  throw new Error('env.TRUSTED_ORIGINS must contain at least one entry');
+}
 
 const errorBodyShape = z.object({
   code: z.string().optional(),

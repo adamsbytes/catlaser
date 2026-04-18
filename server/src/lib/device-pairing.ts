@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { and, eq, isNull, lt, ne, sql } from 'drizzle-orm';
 import { devicePairingCode } from '~/db/schema.ts';
 import { db } from '~/lib/db.ts';
+import { loadSessionSpki, publishPairGrant } from '~/lib/device-acl.ts';
 
 /**
  * Device-pairing domain — the bridge between a QR the app scanned and
@@ -64,12 +66,35 @@ export const MAX_PAIRING_CODE_LENGTH = 128;
 export const MAX_DEVICE_ID_LENGTH = 64;
 
 /**
- * DNS/IP host validator for `tailscale_host`. Accepts RFC 1035 DNS
- * names, IPv4 dotted-quad, and IPv6 literals — the same surface the iOS
- * `DeviceEndpoint.isPlausibleHost` accepts, so a host that survived
- * issuance can always be constructed by the client on the other side of
- * the round-trip. Rejects URL syntax (scheme/path/port/userinfo
- * smuggling), whitespace, and non-ASCII bytes.
+ * Tailscale-only host validator for `tailscale_host`.
+ *
+ * The app opens a plaintext TCP channel to this address. Without this
+ * constraint a compromised issuance pipeline (or an attacker who landed
+ * write access to the provisioning surface) could direct every paired
+ * app to an arbitrary public host; the app-to-device TCP wire carries
+ * control commands and receives `StreamOffer` payloads whose LiveKit
+ * URL is dialed unconditionally, so redirection compounds into
+ * credential exfiltration (see `LiveStreamCredentials` wss-only gate).
+ * Pinning the endpoint to tailnet-only addresses collapses that
+ * attack surface: the attacker would need to be a tailnet peer of the
+ * victim, a dramatically higher bar than "controls any DNS name."
+ *
+ * Accepted shapes:
+ *
+ * - **IPv4** inside the Tailscale CGNAT range `100.64.0.0/10`. Tailscale
+ *   assigns every node an address in this block; no other global IPv4
+ *   range is reachable via WireGuard-only transport.
+ * - **IPv6** inside `fd7a:115c:a1e0::/48`, the Tailscale ULA allocation.
+ *   Zone identifiers (`%eth0`) are rejected — tailnet addresses are
+ *   globally routable within the tailnet and never require a scope id.
+ * - **MagicDNS hostnames** under `.ts.net` (current Tailscale MagicDNS
+ *   suffix) or `.tailscale.net` (legacy, still emitted by some
+ *   tailnets). Must carry at least one non-empty label to the left of
+ *   the suffix and otherwise satisfy RFC 1035 label rules.
+ *
+ * Rejected: every other DNS name, every other IP literal, URL syntax
+ * (scheme, path, port, userinfo), whitespace, non-ASCII, bare suffixes
+ * (`.ts.net` alone), and IPv6 addresses outside the Tailscale block.
  *
  * Implemented as character-by-character scans rather than regex to
  * avoid ReDoS surface and to keep the charset allowlist greppable. The
@@ -85,11 +110,17 @@ export const MAX_DEVICE_ID_LENGTH = 64;
  */
 export const MAX_TAILSCALE_HOST_LENGTH = 253;
 
+/**
+ * Public DNS suffixes Tailscale emits for MagicDNS names. `.ts.net` is
+ * the current production suffix; `.tailscale.net` is retained for older
+ * tailnets that still resolve under the legacy zone. Anything else is
+ * not a tailnet hostname and must be rejected.
+ */
+export const TAILSCALE_MAGIC_DNS_SUFFIXES: readonly string[] = ['.ts.net', '.tailscale.net'];
+
 const isAsciiDigit = (code: number): boolean => code >= 0x30 && code <= 0x39;
 const isAsciiAlpha = (code: number): boolean =>
   (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
-const isAsciiHex = (code: number): boolean =>
-  isAsciiDigit(code) || (code >= 0x41 && code <= 0x46) || (code >= 0x61 && code <= 0x66);
 
 const everyCodePoint = (value: string, predicate: (code: number) => boolean): boolean => {
   for (const char of value) {
@@ -114,28 +145,6 @@ const isDnsLabel = (label: string): boolean => {
   return everyCodePoint(label, isDnsLabelChar);
 };
 
-const isIpv6AddressChar = (code: number): boolean =>
-  isAsciiHex(code) || code === 0x3a || code === 0x2e;
-
-const isIpv6ZoneChar = (code: number): boolean =>
-  isAsciiDigit(code) || isAsciiAlpha(code) || code === 0x2d || code === 0x2e || code === 0x5f;
-
-const isIpv6Literal = (candidate: string): boolean => {
-  // Only the charset is asserted here, not a full RFC 4291 parse: the
-  // address is stored verbatim and handed to the client, which
-  // re-validates via `DeviceEndpoint` before opening a socket.
-  const zoneIndex = candidate.indexOf('%');
-  const address = zoneIndex === -1 ? candidate : candidate.slice(0, zoneIndex);
-  if (address.length === 0 || !everyCodePoint(address, isIpv6AddressChar)) {
-    return false;
-  }
-  if (zoneIndex === -1) {
-    return true;
-  }
-  const zone = candidate.slice(zoneIndex + 1);
-  return zone.length > 0 && everyCodePoint(zone, isIpv6ZoneChar);
-};
-
 const stripIpv6Brackets = (candidate: string): string =>
   candidate.startsWith('[') && candidate.endsWith(']') ? candidate.slice(1, -1) : candidate;
 
@@ -147,7 +156,131 @@ const isDnsName = (candidate: string): boolean => {
   return labels.every((label) => isDnsLabel(label));
 };
 
-const isPlausibleTailscaleHost = (candidate: string): boolean => {
+/**
+ * True iff `candidate` is a valid IPv4 dotted quad inside
+ * `100.64.0.0/10` — the Tailscale CGNAT allocation. `isIP` vets the
+ * byte-level parse (rejecting leading zeros, out-of-range octets, and
+ * non-decimal shapes); the range check is the only Tailscale-specific
+ * gate.
+ */
+const isTailscaleCGNAT4 = (candidate: string): boolean => {
+  if (isIP(candidate) !== 4) {
+    return false;
+  }
+  const parts = candidate.split('.');
+  if (parts.length !== 4) {
+    return false;
+  }
+  const [first, second] = parts;
+  if (first === undefined || second === undefined) {
+    return false;
+  }
+  const a = Number(first);
+  const b = Number(second);
+  if (!Number.isInteger(a) || !Number.isInteger(b)) {
+    return false;
+  }
+  // 100.64.0.0/10: first octet must be 100, second octet must be in
+  // [64, 127] (the /10 puts the next 2 bits under the mask).
+  return a === 100 && b >= 64 && b <= 127;
+};
+
+/**
+ * Return the first three fully-expanded 16-bit groups of a well-formed
+ * IPv6 literal (already vetted by `isIP`), e.g. `"fd7a:115c:a1e0"` for
+ * `fd7a:115c:a1e0:ab12::1`. Handles RFC 5952 `::` compression.
+ * Returns `null` on any parse failure so callers can fail closed.
+ */
+/**
+ * Parse an IPv6 literal into an 8-group normalized array. Returns
+ * null if the literal is malformed (uses more than one `::`, has
+ * too many explicit groups, etc.). Split out of `ipv6Prefix48` so
+ * each helper stays below the complexity ceiling.
+ */
+const splitIpv6Half = (half: string | undefined): string[] =>
+  half === undefined || half === '' ? [] : half.split(':');
+
+const parseIpv6Groups = (lower: string): readonly string[] | null => {
+  const halves = lower.split('::');
+  if (halves.length > 2) {
+    return null;
+  }
+  const hasCompression = halves.length === 2;
+  const head = splitIpv6Half(halves[0]);
+  const tail = hasCompression ? splitIpv6Half(halves[1]) : [];
+  if (!hasCompression) {
+    return head.length === 8 ? head : null;
+  }
+  const zerosNeeded = 8 - head.length - tail.length;
+  if (zerosNeeded < 0) {
+    return null;
+  }
+  return [...head, ...Array.from({ length: zerosNeeded }, () => '0'), ...tail];
+};
+
+const ipv6Prefix48 = (v6: string): string | null => {
+  const groups = parseIpv6Groups(v6.toLowerCase());
+  if (groups === null) {
+    return null;
+  }
+  const prefix = groups.slice(0, 3);
+  for (const g of prefix) {
+    if (g.length === 0 || g.length > 4) {
+      return null;
+    }
+  }
+  return prefix.map((g) => g.padStart(4, '0')).join(':');
+};
+
+/**
+ * True iff `candidate` is an IPv6 literal inside `fd7a:115c:a1e0::/48`
+ * — the Tailscale ULA block. Rejects zone identifiers (`fe80::1%eth0`
+ * style): tailnet addresses do not need a scope id, and accepting one
+ * would open a link-local smuggling path. `isIP` handles the byte-level
+ * parse; the prefix check is the only Tailscale-specific gate.
+ */
+const isTailscaleCGNAT6 = (candidate: string): boolean => {
+  if (candidate.includes('%')) {
+    return false;
+  }
+  if (isIP(candidate) !== 6) {
+    return false;
+  }
+  const prefix = ipv6Prefix48(candidate);
+  if (prefix === null) {
+    return false;
+  }
+  return prefix === 'fd7a:115c:a1e0';
+};
+
+/**
+ * True iff `candidate` is a DNS name ending in a Tailscale MagicDNS
+ * suffix with at least one non-empty label to the left.
+ *
+ * A bare suffix (`".ts.net"`, `"ts.net"`) is not a hostname and the
+ * app would be unable to dial it, so the validator refuses it at
+ * issuance rather than letting a malformed row survive.
+ */
+const isTailscaleMagicDNS = (candidate: string): boolean => {
+  const lower = candidate.toLowerCase();
+  for (const suffix of TAILSCALE_MAGIC_DNS_SUFFIXES) {
+    if (!lower.endsWith(suffix)) {
+      continue;
+    }
+    const head = lower.slice(0, -suffix.length);
+    if (head.length === 0) {
+      return false;
+    }
+    // `head` must itself be a valid DNS name (one or more labels, each
+    // RFC 1035 conformant). A leading dot (`.host.ts.net` → head
+    // `"."`) is caught here because `isDnsName` requires no empty
+    // labels.
+    return isDnsName(head);
+  }
+  return false;
+};
+
+export const isPlausibleTailscaleHost = (candidate: string): boolean => {
   if (candidate.length === 0 || candidate.length > MAX_TAILSCALE_HOST_LENGTH) {
     return false;
   }
@@ -155,7 +288,18 @@ const isPlausibleTailscaleHost = (candidate: string): boolean => {
   if (inner.length === 0) {
     return false;
   }
-  return inner.includes(':') ? isIpv6Literal(inner) : isDnsName(inner);
+  // IPv6 parse first (colons are disjoint from IPv4 / DNS names). Then
+  // IPv4 CGNAT. Then MagicDNS by suffix. The order does not matter for
+  // correctness because the three predicates are mutually exclusive on
+  // well-formed inputs, but fast-path the IP cases since CGNAT is the
+  // common shape.
+  if (inner.includes(':')) {
+    return isTailscaleCGNAT6(inner);
+  }
+  if (isIP(inner) === 4) {
+    return isTailscaleCGNAT4(inner);
+  }
+  return isTailscaleMagicDNS(inner);
 };
 
 /**
@@ -267,7 +411,10 @@ const assertValidIssuance = (input: IssuePairingCodeInput): void => {
     throw new PairingCodeIssueError('deviceId', deviceError);
   }
   if (!isPlausibleTailscaleHost(input.tailscaleHost)) {
-    throw new PairingCodeIssueError('tailscaleHost', 'not a plausible DNS name or IP literal');
+    throw new PairingCodeIssueError(
+      'tailscaleHost',
+      'must be a Tailscale address: CGNAT IPv4 (100.64.0.0/10), Tailscale IPv6 (fd7a:115c:a1e0::/48), or a MagicDNS hostname under .ts.net / .tailscale.net',
+    );
   }
   if (
     !Number.isInteger(input.tailscalePort) ||
@@ -361,6 +508,15 @@ export interface ExchangePairingCodeInput {
   readonly code: string;
   readonly deviceId: string;
   readonly userId: string;
+  /**
+   * Claiming session's id. The device ACL write writes a grant
+   * under the SPKI stored on `session_attestation` for this
+   * session, which means a caller can only publish an ACL for a
+   * device they themselves authenticate to — bearer + SE key, both
+   * already proven by the protected-route gate wrapping this
+   * exchange.
+   */
+  readonly sessionId: string;
   readonly now?: Date;
 }
 
@@ -389,6 +545,89 @@ export interface ExchangePairingCodeInput {
  * exactly `now` is stale. Keeps the boundary on the conservative side,
  * same convention as `magic-link-attestation.ts`.
  */
+interface ClaimTransactionInput {
+  readonly codeHash: string;
+  readonly deviceId: string;
+  readonly userId: string;
+  readonly sessionSpki: string;
+  readonly now: Date;
+}
+
+interface ClaimedRow {
+  readonly id: string;
+  readonly deviceId: string;
+  readonly deviceName: string | null;
+  readonly tailscaleHost: string;
+  readonly tailscalePort: number;
+}
+
+/**
+ * Transaction body for the atomic pair-claim. Isolated in its own
+ * function so `exchangePairingCode` stays simple and this function
+ * has a single, unambiguous pair of return paths (the matched-claim
+ * row, or null when the update matched nothing).
+ */
+const runClaimTransaction = async (
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  input: ClaimTransactionInput,
+): Promise<ClaimedRow | null> => {
+  // Atomic claim: flip `claimed_at` + `claimed_by_user_id` on a
+  // row whose code/device/non-claimed/non-expired predicate
+  // matches. Zero rows → fall through to the classifying SELECT in
+  // the caller.
+  const claimedRows = await tx
+    .update(devicePairingCode)
+    .set({ claimedAt: input.now, claimedByUserId: input.userId })
+    .where(
+      and(
+        eq(devicePairingCode.codeHash, input.codeHash),
+        eq(devicePairingCode.deviceId, input.deviceId),
+        isNull(devicePairingCode.claimedAt),
+        sql`${devicePairingCode.expiresAt} > ${input.now}`,
+      ),
+    )
+    .returning({
+      id: devicePairingCode.id,
+      deviceId: devicePairingCode.deviceId,
+      deviceName: devicePairingCode.deviceName,
+      tailscaleHost: devicePairingCode.tailscaleHost,
+      tailscalePort: devicePairingCode.tailscalePort,
+    });
+  const row = claimedRows[0];
+  if (row === undefined) {
+    return null;
+  }
+  // Revoke every prior active claim for the same device_id. This is
+  // the invariant that makes `GET /api/v1/devices/paired` honest:
+  // at any moment there is at most one non-revoked active claim per
+  // device_id. A re-pair (same device, any user) supersedes the
+  // previous owner cleanly. `row.id` is excluded so the freshly-
+  // claimed row stays active.
+  await tx
+    .update(devicePairingCode)
+    .set({ revokedAt: input.now })
+    .where(
+      and(
+        eq(devicePairingCode.deviceId, input.deviceId),
+        sql`${devicePairingCode.claimedAt} IS NOT NULL`,
+        isNull(devicePairingCode.revokedAt),
+        ne(devicePairingCode.id, row.id),
+      ),
+    );
+  // Publish the ACL grant under this session's SPKI. The helper
+  // revokes any competing active grants for the same device slug
+  // and bumps the per-slug revision counter — all in the same
+  // transaction so the pair claim and the ACL change succeed or
+  // fail together.
+  await publishPairGrant(tx, {
+    deviceSlug: input.deviceId,
+    userSpkiB64: input.sessionSpki,
+    userId: input.userId,
+    now: input.now,
+  });
+  return row;
+};
+
 export const exchangePairingCode = async (
   input: ExchangePairingCodeInput,
 ): Promise<ExchangeOutcome> => {
@@ -403,33 +642,42 @@ export const exchangePairingCode = async (
   const now = input.now ?? new Date();
   const codeHash = hashPairingCode(input.code);
 
-  const claimed = await db
-    .update(devicePairingCode)
-    .set({ claimedAt: now, claimedByUserId: input.userId })
-    .where(
-      and(
-        eq(devicePairingCode.codeHash, codeHash),
-        eq(devicePairingCode.deviceId, input.deviceId),
-        isNull(devicePairingCode.claimedAt),
-        sql`${devicePairingCode.expiresAt} > ${now}`,
-      ),
-    )
-    .returning({
-      deviceId: devicePairingCode.deviceId,
-      deviceName: devicePairingCode.deviceName,
-      tailscaleHost: devicePairingCode.tailscaleHost,
-      tailscalePort: devicePairingCode.tailscalePort,
-    });
+  // The claim path looks up the claiming session's SPKI OUTSIDE the
+  // pair-claim transaction. `session_attestation` is immutable for
+  // the session's lifetime (written atomically at sign-in) so
+  // reading it outside the transaction does not race with anything
+  // the pair claim depends on. Keeping the SPKI lookup out of the
+  // transaction lets us fail fast (before the UPDATE) if the row is
+  // missing; a concurrent sign-out would only drop the session and
+  // the bearer check above already rejects that case.
+  const sessionSpki = await loadSessionSpki(input.sessionId);
+  if (sessionSpki === null) {
+    // Should be unreachable for a caller past the protected-route
+    // gate: the gate requires an attested session, and sign-in
+    // writes session_attestation atomically. Surface as not_found
+    // rather than leaking a distinct internal-state signal.
+    return { kind: 'not_found' };
+  }
 
-  const claimedRow = claimed[0];
-  if (claimedRow !== undefined) {
+  const claimed = await db.transaction(
+    async (tx) =>
+      await runClaimTransaction(tx, {
+        codeHash,
+        deviceId: input.deviceId,
+        userId: input.userId,
+        sessionSpki,
+        now,
+      }),
+  );
+
+  if (claimed !== null) {
     return {
       kind: 'ok',
       device: {
-        deviceId: claimedRow.deviceId,
-        deviceName: claimedRow.deviceName,
-        host: claimedRow.tailscaleHost,
-        port: claimedRow.tailscalePort,
+        deviceId: claimed.deviceId,
+        deviceName: claimed.deviceName,
+        host: claimed.tailscaleHost,
+        port: claimed.tailscalePort,
       },
     };
   }
@@ -461,4 +709,68 @@ export const exchangePairingCode = async (
   // through as a not-found — safer than leaking internal state if the
   // predicate and the classifier ever drift.
   return { kind: 'not_found' };
+};
+
+/**
+ * One active pairing surfaced by `listPairedDevicesForUser`. Mirrors
+ * the wire shape returned by `GET /api/v1/devices/paired`. `pairedAt`
+ * is the claim timestamp so the app can show "paired 3 days ago" and
+ * sort multiple devices deterministically.
+ */
+export interface ActivePairedDevice {
+  readonly deviceId: string;
+  readonly deviceName: string | null;
+  readonly host: string;
+  readonly port: number;
+  readonly pairedAt: Date;
+}
+
+/**
+ * Return the current non-revoked active claims owned by `userId`,
+ * ordered by most-recent claim first.
+ *
+ * "Active" = `claimed_at IS NOT NULL AND revoked_at IS NULL`. A row
+ * that was once claimed and later superseded by a re-pair has
+ * `revoked_at` set and is excluded. A row whose user was deleted has
+ * `claimed_by_user_id` NULL-ed via the FK cascade and is excluded
+ * here by the `eq(claimedByUserId, userId)` predicate.
+ *
+ * Used by the iOS app's launch-time / daily ownership-re-check: the
+ * app compares its Keychain-cached `device_id` against this list, and
+ * treats a miss as "another user pairs this device now" → wipe
+ * endpoint + force re-pair.
+ */
+export const listPairedDevicesForUser = async (
+  userId: string,
+): Promise<readonly ActivePairedDevice[]> => {
+  const rows = await db
+    .select({
+      deviceId: devicePairingCode.deviceId,
+      deviceName: devicePairingCode.deviceName,
+      tailscaleHost: devicePairingCode.tailscaleHost,
+      tailscalePort: devicePairingCode.tailscalePort,
+      claimedAt: devicePairingCode.claimedAt,
+    })
+    .from(devicePairingCode)
+    .where(
+      and(
+        eq(devicePairingCode.claimedByUserId, userId),
+        sql`${devicePairingCode.claimedAt} IS NOT NULL`,
+        isNull(devicePairingCode.revokedAt),
+      ),
+    )
+    .orderBy(sql`${devicePairingCode.claimedAt} DESC`);
+  return rows.map(
+    (row): ActivePairedDevice => ({
+      deviceId: row.deviceId,
+      deviceName: row.deviceName,
+      host: row.tailscaleHost,
+      port: row.tailscalePort,
+      // `claimed_at` is non-null because the SQL predicate guarantees
+      // it. Drizzle's typed projection keeps it `Date | null`, so we
+      // assert here rather than threading a narrowed type out of the
+      // query.
+      pairedAt: row.claimedAt ?? new Date(0),
+    }),
+  );
 };

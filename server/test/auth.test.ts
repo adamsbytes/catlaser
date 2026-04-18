@@ -10,7 +10,10 @@ import { buildSignedAttestationHeader, createTestDeviceKey } from './support/sig
 
 const AUTH_BASE = '/api/v1/auth';
 
-const trustedOrigin = env.TRUSTED_ORIGINS[0] ?? 'http://localhost:3000';
+const [trustedOrigin] = env.TRUSTED_ORIGINS;
+if (trustedOrigin === undefined) {
+  throw new Error('env.TRUSTED_ORIGINS must contain at least one entry');
+}
 const untrustedOrigin = 'https://evil.example';
 
 const sessionShape = z.object({
