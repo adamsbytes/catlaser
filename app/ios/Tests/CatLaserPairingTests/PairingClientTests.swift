@@ -94,15 +94,24 @@ struct PairingClientTests {
     }
 
     @Test
-    func maps401ToMissingSession() async throws {
+    func maps401ToSessionExpired() async throws {
+        // A 401 from the server indicates the bearer was rejected, not
+        // that the local bearer store was empty. The distinction
+        // matters: `.sessionExpired` routes to "sign in again" without
+        // disturbing any paired-device state, whereas `.missingSession`
+        // (local empty-store) routes to the full sign-in/pair flow.
         let http = MockHTTPClient()
-        await http.enqueue(.response(.empty(status: 401)))
+        await http.enqueue(.response(.json(["message": "expired"], status: 401)))
         let client = makeClient(http: http)
         do {
             _ = try await client.exchange(code: try makeCode())
             Issue.record("expected throw")
         } catch let error as PairingError {
-            #expect(error == .missingSession)
+            if case let .sessionExpired(message) = error {
+                #expect(message == "expired")
+            } else {
+                Issue.record("expected .sessionExpired, got \(error)")
+            }
         }
     }
 

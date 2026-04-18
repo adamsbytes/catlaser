@@ -68,6 +68,23 @@ public enum DeviceClientError: Error, Equatable, Sendable {
     /// does not rely on a magic string.
     public static let handshakeReasonNotAuthorized = "DEVICE_AUTH_NOT_AUTHORIZED"
 
+    /// `DEVICE_AUTH_REPLAY_DETECTED` reason string — the device rejects
+    /// a first-frame handshake whose exact `(spki, timestamp,
+    /// signature)` tuple was already consumed within the server's
+    /// replay-cache TTL. Mirrors
+    /// `catlaser_brain.auth.handshake.HandshakeReason.REPLAY_DETECTED`.
+    ///
+    /// Deliberately **not** terminal: an honest client never collides
+    /// with itself under ECDSA-P256-SHA256 (the random `k` makes every
+    /// signing op produce a distinct signature), so if this reason
+    /// reaches the client the on-path attacker beat us to the server
+    /// with our own captured bytes. The supervisor's next reconnect
+    /// signs a fresh attestation with a fresh `k` — the collision is
+    /// not reproducible without the SE private key — and the retry
+    /// succeeds. Kept out of `isTerminalAuthRevocation` so the normal
+    /// transient-failure backoff path handles it.
+    public static let handshakeReasonReplayDetected = "DEVICE_AUTH_REPLAY_DETECTED"
+
     /// True if this error indicates the device side permanently no
     /// longer considers the current user authorized. Two distinct
     /// wire signals map here:

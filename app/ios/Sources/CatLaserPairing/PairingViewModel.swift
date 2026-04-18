@@ -381,6 +381,18 @@ public final class PairingViewModel {
     /// pairing survives when the host app hasn't plumbed the client
     /// — tests and migration surfaces can construct the view model
     /// without it.
+    ///
+    /// Crucially, the **only** signal that resolves to `.noLongerOwned`
+    /// is a 2xx list response that omits the device id. Every error
+    /// path — including authentication failures (`.missingSession`,
+    /// `.sessionExpired`) — resolves to `.indeterminate`. A 401 means
+    /// "your bearer was rejected," not "your device was re-paired to
+    /// someone else"; conflating the two would wipe the pairing on an
+    /// ordinary session expiry and force the user to locate a fresh
+    /// QR from the physical device to recover. The UI surfaces
+    /// `.sessionExpired` through the `SessionLifecycleObserver`
+    /// `sessionDidExpire` hook (in the auth coordinator) so the user
+    /// is prompted to sign in again WITHOUT touching the pairing.
     private func reverifyOwnership(of device: PairedDevice) async -> OwnershipCheckOutcome {
         guard let client = pairedDevicesClient else { return .indeterminate }
         let devices: [PairedDevice]
@@ -388,21 +400,30 @@ public final class PairingViewModel {
             devices = try await client.list()
         } catch {
             // `client.list()` is `throws(PairingError)`, so every
-            // failure is already the right type. Classify it:
-            // `missingSession` is authoritative "nothing owned";
-            // everything else is transient and callers must keep the
-            // cached pairing until the next window.
+            // failure is already the right type. Every failure
+            // resolves to `.indeterminate` — the cached pairing
+            // survives. Only a successful 2xx list whose contents
+            // omit the device id is an authoritative "no longer
+            // owned" signal.
             switch error {
-            case .missingSession:
-                return .noLongerOwned
-            case .network, .rateLimited, .serverError, .invalidServerResponse,
-                 .storage, .attestation, .codeAlreadyUsed, .codeExpired,
-                 .codeNotFound, .invalidCode, .authRevoked:
+            case .missingSession,
+                 .sessionExpired,
+                 .network,
+                 .rateLimited,
+                 .serverError,
+                 .invalidServerResponse,
+                 .storage,
+                 .attestation,
+                 .codeAlreadyUsed,
+                 .codeExpired,
+                 .codeNotFound,
+                 .invalidCode,
+                 .authRevoked:
                 // `.authRevoked` is a device-side-only signal —
                 // `PairedDevicesClient` cannot synthesise it. If it
                 // ever reaches here that's a library bug; mapping to
                 // `.indeterminate` preserves the cached pairing
-                // instead of double-wiping on a spurious signal.
+                // instead of a spurious wipe.
                 return .indeterminate
             }
         }

@@ -21,6 +21,29 @@ public extension BearerTokenStore {
     func cachedSession() async -> AuthSession? { nil }
 }
 
+/// Opt-in narrow protocol for bearer stores that maintain an in-memory
+/// cache and want to expose cache invalidation without disturbing the
+/// persistent keychain row.
+///
+/// `AuthCoordinator.handleSessionExpired()` checks the configured
+/// store for conformance at call time and invokes
+/// `invalidateSession()` when present, so the in-memory bearer cache
+/// is dropped after a server-side 401 and the next protected call
+/// forces a fresh read (and, at that read, a biometric prompt via the
+/// keychain's `.userPresence` ACL). The keychain row itself is
+/// deliberately untouched: the token is still valid at rest, and the
+/// keychain wipe belongs to the `delete()` path, which fires on
+/// explicit sign-out, not on bearer rejection.
+///
+/// Not merged into `BearerTokenStore` because stores that have no
+/// in-memory cache (the keychain-only variant, the test-only
+/// in-memory store) have nothing to invalidate; making this a narrow
+/// opt-in keeps the core protocol unchanged and lets the coordinator
+/// feature-detect cleanly.
+public protocol SessionInvalidating: Sendable {
+    func invalidateSession() async
+}
+
 /// In-memory bearer token store. **Test-only**: intentionally internal so
 /// it cannot be wired into production from outside the module. Production
 /// callers must use `KeychainBearerTokenStore` (optionally wrapped by

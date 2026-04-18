@@ -53,9 +53,16 @@ import FoundationNetworking
 ///
 /// ## Failure mapping
 ///
-/// * 401 — `PairingError.missingSession`. The signed wrapper normally
-///   catches this, but a session revoked between bearer read and wire
-///   send can surface here.
+/// * 401 — `PairingError.sessionExpired`. The bearer the client
+///   loaded was rejected server-side. Load-bearing: the
+///   `PairingViewModel.reverifyOwnership` path treats `.sessionExpired`
+///   as indeterminate (keep the cached pairing, retry on the next
+///   window) because a 401 is an authentication failure, NOT an
+///   authoritative ownership revocation. The only signal that wipes
+///   the pairing is a 2xx list that omits the device id. Kept
+///   distinct from `.missingSession` (which means the local bearer
+///   store is empty) so the UI can prompt re-sign-in without
+///   discarding the keychain-held pairing.
 /// * 429 — `PairingError.rateLimited` with the server's advisory
 ///   message.
 /// * 5xx — `PairingError.serverError`.
@@ -65,7 +72,12 @@ public struct PairedDevicesClient: Sendable {
     public static let pairedPath = "api/v1/devices/paired"
 
     private let baseURL: URL
-    private let http: SignedHTTPClient
+    /// Package-internal so the composition-invariants test suite can
+    /// assert the wrapped transport is a ``PinnedHTTPClient``. See the
+    /// matching comment on ``PairingClient/http`` — the rationale is
+    /// the same: make the "actually built on pinned transport"
+    /// property locally assertable in tests.
+    let http: SignedHTTPClient
     private let decoder: JSONDecoder
 
     /// - Parameters:
@@ -106,7 +118,7 @@ public struct PairedDevicesClient: Sendable {
         case 200 ..< 300:
             return try parseSuccess(response)
         case 401:
-            throw .missingSession
+            throw .sessionExpired(message: extractMessage(from: response))
         case 429:
             throw .rateLimited(message: extractMessage(from: response))
         case 500 ..< 600:

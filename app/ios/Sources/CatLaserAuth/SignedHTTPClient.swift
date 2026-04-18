@@ -89,11 +89,30 @@ public struct SignedHTTPClient: HTTPClient {
     /// regex cannot drift.
     public static let idempotencyKeyPattern = #"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"#
 
-    private let underlying: any HTTPClient
+    /// Callback fired once per observed HTTP 401 on a protected call.
+    /// Marked `async` because the production binding routes it into
+    /// `AuthCoordinator.handleSessionExpired()` — an actor method that
+    /// invalidates the in-memory bearer cache and notifies lifecycle
+    /// observers. The return of `send(_:)` is NOT awaited on the
+    /// callback; the 401 response is propagated to the caller exactly
+    /// as received, and the callback runs concurrently so it never
+    /// stalls the request/response path. Callers that depend on the
+    /// invalidation having landed before their own state transition
+    /// read from the bearer store on their next protected call, which
+    /// is naturally ordered-after by the actor queue.
+    public typealias SessionExpiryHandler = @Sendable () async -> Void
+
+    /// Package-internal so the composition-invariants test suite can
+    /// assert that pairing clients share a single signed transport.
+    /// A shipping product target cannot reach this property (no
+    /// ``@testable import CatLaserAuth`` in release code), so the
+    /// exposed reference does not weaken the public API surface.
+    let underlying: any HTTPClient
     private let store: any BearerTokenStore
     private let attestationProvider: any DeviceAttestationProviding
     private let clock: @Sendable () -> Date
     private let uuidFactory: @Sendable () -> UUID
+    private let onSessionExpired: SessionExpiryHandler?
 
     /// Package-private designated initializer. Tests inject a fixed clock
     /// so they can assert the exact `api:<ts>` timestamp threaded into
@@ -110,12 +129,14 @@ public struct SignedHTTPClient: HTTPClient {
         attestationProvider: any DeviceAttestationProviding,
         clock: @escaping @Sendable () -> Date,
         uuidFactory: @escaping @Sendable () -> UUID,
+        onSessionExpired: SessionExpiryHandler? = nil,
     ) {
         self.underlying = underlying
         self.store = store
         self.attestationProvider = attestationProvider
         self.clock = clock
         self.uuidFactory = uuidFactory
+        self.onSessionExpired = onSessionExpired
     }
 
     public func send(_ request: URLRequest) async throws -> HTTPResponse {
@@ -160,7 +181,20 @@ public struct SignedHTTPClient: HTTPClient {
             signed.setValue(nil, forHTTPHeaderField: Self.idempotencyHeaderName)
         }
 
-        return try await underlying.send(signed)
+        let response = try await underlying.send(signed)
+        if response.statusCode == 401, let onSessionExpired {
+            // Fire the expiry callback on EVERY observed 401, regardless
+            // of response body. The callback drives
+            // `AuthCoordinator.handleSessionExpired()` — invalidating the
+            // in-memory bearer cache and notifying lifecycle observers.
+            // It runs in its own Task so a slow observer never stalls
+            // the caller's response handling; the response itself is
+            // propagated unmodified so the caller sees the 401 and maps
+            // it to its domain error (`PairingError.sessionExpired`,
+            // etc.) as before.
+            Task { await onSessionExpired() }
+        }
+        return response
     }
 
     private func plausibleTimestamp() throws(AuthError) -> Int64 {
@@ -240,10 +274,22 @@ public extension SignedHTTPClient {
     /// `URLSession` or a test mock must instead reach the
     /// package-private `init(underlying:...)` via `@testable import
     /// CatLaserAuth`, which the product target cannot do.
+    ///
+    /// The `onSessionExpired` callback is fired every time the server
+    /// returns HTTP 401 on a signed call. The composition root binds
+    /// it to `AuthCoordinator.handleSessionExpired()` so a rejected
+    /// bearer invalidates the in-memory cache and notifies lifecycle
+    /// observers. Passing `nil` disables the notification — useful
+    /// only for tests or for composition paths that do not have an
+    /// auth coordinator wired yet; a release build MUST pass a
+    /// non-nil handler or a 401 will leave the in-memory cache
+    /// serving the rejected bearer until the next explicit
+    /// invalidation.
     init(
         transport: PinnedHTTPClient,
         store: any BearerTokenStore,
         attestationProvider: any DeviceAttestationProviding,
+        onSessionExpired: SessionExpiryHandler? = nil,
     ) {
         self.init(
             underlying: transport,
@@ -251,6 +297,7 @@ public extension SignedHTTPClient {
             attestationProvider: attestationProvider,
             clock: { Date() },
             uuidFactory: { UUID() },
+            onSessionExpired: onSessionExpired,
         )
     }
 }

@@ -89,7 +89,15 @@ struct PairedDevicesClientTests {
     // MARK: - Error mapping
 
     @Test
-    func missingSessionOn401() async throws {
+    func sessionExpiredOn401() async throws {
+        // The server rejected the bearer. The client surfaces this as
+        // `.sessionExpired`, distinct from `.missingSession` (local
+        // bearer store empty). The distinction is load-bearing:
+        // `PairingViewModel.reverifyOwnership` treats `.sessionExpired`
+        // as indeterminate (keep the cached pairing), whereas the
+        // original coalesced `.missingSession` used to wipe the
+        // pairing on every bearer expiry. See `PairingError` for the
+        // full rationale.
         let http = MockHTTPClient(outcomes: [
             .response(HTTPResponse.json(
                 ["ok": false, "error": ["code": "SESSION_REQUIRED", "message": "no session"]],
@@ -101,7 +109,11 @@ struct PairedDevicesClientTests {
             _ = try await client.list()
             Issue.record("expected throw")
         } catch {
-            #expect(error == .missingSession)
+            if case let .sessionExpired(message) = error {
+                #expect(message == "no session")
+            } else {
+                Issue.record("expected .sessionExpired, got \(error)")
+            }
         }
     }
 

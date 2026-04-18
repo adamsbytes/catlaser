@@ -34,7 +34,7 @@ import LocalAuthentication
 /// * `invalidateSession` is a soft reset: drops memory cache and gate
 ///   freshness without touching the keychain. Intended for app-lifecycle
 ///   hooks (`scenePhase == .background`, tamper signals).
-public actor GatedBearerTokenStore: BearerTokenStore {
+public actor GatedBearerTokenStore: BearerTokenStore, SessionInvalidating {
     private let underlying: any AuthenticatingBearerTokenStore
     private let gate: SessionAccessGate
     private let unlockReason: String

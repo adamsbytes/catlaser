@@ -225,6 +225,19 @@ let package = Package(
                 "CatLaserApp",
                 "CatLaserAuth",
                 "CatLaserAuthTestSupport",
+                // Live, pairing, device, and proto are pulled in by
+                // the composition-invariants suite: it asserts that
+                // the real production graph wires every cross-module
+                // seam correctly (LiveKit allowlist threaded into the
+                // `LiveStreamCredentials` constructor, SignedHTTPClient
+                // attached to `PairingClient` / `PairedDevicesClient`,
+                // the handshake builder producing a device-bound
+                // attestation). Without these deps the invariant
+                // suite cannot exercise the wiring end-to-end.
+                "CatLaserLive",
+                "CatLaserPairing",
+                "CatLaserDevice",
+                "CatLaserProto",
             ],
             path: "Tests/CatLaserAppTests",
         ),

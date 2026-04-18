@@ -40,9 +40,13 @@ import FoundationNetworking
 ///
 /// * 400 — `PairingError.invalidCode(.malformedURL)` (unlikely — we
 ///   validated client-side, but the server has authority).
-/// * 401 — `PairingError.missingSession`. The signed wrapper should
-///   have caught this; surfacing 401 here means the bearer was
-///   revoked between load and send.
+/// * 401 — `PairingError.sessionExpired`. The bearer the client
+///   loaded was rejected server-side. Distinct from `.missingSession`
+///   (which indicates a completely empty bearer store) because the
+///   remediation is "sign in again," not "this device is no longer
+///   yours." The caller MUST NOT wipe the paired-device keychain row
+///   on this signal — ownership is determined by the `/devices/paired`
+///   2xx list, never by a 401.
 /// * 404 — `PairingError.codeNotFound` (code never issued).
 /// * 409 — `PairingError.codeAlreadyUsed` (single-use QR already
 ///   consumed by another session; get a fresh QR from the device).
@@ -57,7 +61,14 @@ public struct PairingClient: Sendable {
     public static let pairPath = "api/v1/devices/pair"
 
     private let baseURL: URL
-    private let http: SignedHTTPClient
+    /// Package-internal so the composition-invariants test suite can
+    /// assert the wrapped transport is a ``PinnedHTTPClient`` (and
+    /// thereby that no refactor silently threads an unpinned session
+    /// into this call site). ``SignedHTTPClient``'s own public
+    /// initializer already enforces the pinning type at compile time
+    /// on every reachable construction path; this property makes the
+    /// structural property locally assertable.
+    let http: SignedHTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -114,7 +125,7 @@ public struct PairingClient: Sendable {
             let message = extractMessage(from: response)
             throw .invalidServerResponse(message ?? "server rejected pairing request (400)")
         case 401:
-            throw .missingSession
+            throw .sessionExpired(message: extractMessage(from: response))
         case 404:
             throw .codeNotFound(message: extractMessage(from: response))
         case 409:

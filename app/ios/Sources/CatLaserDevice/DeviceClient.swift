@@ -59,7 +59,21 @@ public actor DeviceClient {
 
     private enum State {
         case idle
+        /// Transport open in progress. No frames may be sent or received
+        /// application-side yet.
         case connecting
+        /// Transport is open and the receive loop is running. Only the
+        /// internal handshake path (``performRequestInternal``) may emit
+        /// a frame in this state — the public ``request`` / ``send``
+        /// surface refuses to. Prevents actor-reentrancy from letting a
+        /// second caller smuggle a non-``AuthRequest`` frame ahead of
+        /// the mandatory first-frame handshake: the receive-loop
+        /// continuation handshake is in flight awaits another actor-
+        /// isolated step, during which the actor may accept other
+        /// messages, so gating on a state distinct from ``connected``
+        /// is the only way to keep a public ``request`` from reaching
+        /// the wire before ``AuthResponse`` arrives.
+        case handshaking
         case connected
         case closed
     }
@@ -116,7 +130,7 @@ public actor DeviceClient {
     ///   handshake against a real device is a guaranteed failure.
     public func connect(handshake: AttestationBuilder? = nil) async throws {
         switch state {
-        case .connecting, .connected:
+        case .connecting, .handshaking, .connected:
             throw DeviceClientError.alreadyConnected
         case .closed:
             // Closed clients are terminal; callers must build a new
@@ -135,12 +149,25 @@ public actor DeviceClient {
             state = .closed
             throw DeviceClientError.connectFailed(error.localizedDescription)
         }
-        state = .connected
         let stream = await transport.receiveStream
         receiveTask = Task { [weak self] in
             await self?.runReceiveLoop(stream)
         }
-        guard let handshake else { return }
+        // When no handshake is wired (legacy test-only path using the
+        // in-memory transport), flip straight to ``.connected`` — the
+        // tests that use this path don't exercise the handshake gate
+        // and would otherwise stall forever waiting for an
+        // ``AuthResponse`` nobody is going to send. Production callers
+        // MUST always pass a handshake block; the composition-root
+        // invariants assert this.
+        guard let handshake else {
+            state = .connected
+            return
+        }
+        // Enter the handshake-only state. ``request`` / ``send`` from
+        // the public API refuse to transmit in this state — the only
+        // path to the wire is the internal handshake request below.
+        state = .handshaking
         do {
             try await performHandshake(handshake)
         } catch {
@@ -152,6 +179,7 @@ public actor DeviceClient {
             // failure, so we just surface the error.
             throw error
         }
+        state = .connected
     }
 
     private func performHandshake(_ handshake: AttestationBuilder) async throws {
@@ -171,7 +199,13 @@ public actor DeviceClient {
         authRequest.auth.attestationHeader = header
         let event: Catlaser_App_V1_DeviceEvent
         do {
-            event = try await request(authRequest)
+            // Use the internal send path rather than the public
+            // ``request``: the public path gates on ``state ==
+            // .connected``, and we are deliberately in ``.handshaking``
+            // so that no concurrent actor-reentrant call can smuggle
+            // a non-``AuthRequest`` frame out before the handshake
+            // completes.
+            event = try await performRequestInternal(authRequest, allowedInHandshake: true)
         } catch let error as DeviceClientError {
             await shutdownForHandshakeFailure()
             // A remote error during handshake means the device
@@ -228,6 +262,11 @@ public actor DeviceClient {
     }
 
     /// Current connection state — inspected by tests and diagnostics.
+    /// Returns ``true`` ONLY in the post-handshake ``.connected``
+    /// state: consumers like ``LiveViewModel`` that gate behavior on
+    /// "is the device talking" must see ``false`` while the mandatory
+    /// auth handshake is still in flight, otherwise they could
+    /// schedule a ``request`` that the public gate would then refuse.
     public var isConnected: Bool { state == .connected }
 
     /// Send a request that expects exactly one response. The response
@@ -236,12 +275,80 @@ public actor DeviceClient {
     /// etc.) itself; `DeviceError` payloads are surfaced as the typed
     /// `DeviceClientError.remote` rather than wrapped in an event.
     ///
+    /// The public ``request`` surface refuses to transmit unless the
+    /// client has reached the ``.connected`` state — an in-progress
+    /// handshake (``.handshaking``) gates out non-auth frames so
+    /// actor-reentrancy cannot smuggle an application frame onto the
+    /// wire before the device daemon has accepted our first-frame
+    /// ``AuthRequest``.
+    ///
     /// - Parameter request: populated `AppRequest` oneof. `request_id`
     ///   is overwritten by this call — callers cannot pre-assign.
     public func request(
         _ request: Catlaser_App_V1_AppRequest,
     ) async throws -> Catlaser_App_V1_DeviceEvent {
+        try await performRequestInternal(request, allowedInHandshake: false)
+    }
+
+    /// Fire-and-forget send: no response is awaited. Sets `request_id`
+    /// to `0` per the proto contract so the device does not attempt to
+    /// correlate its reply (and any spontaneous event echoing this
+    /// request will flow down the `events` stream).
+    ///
+    /// Gates on ``state == .connected`` for the same reason as
+    /// ``request(_:)``: a handshake in progress must not be able to
+    /// interleave with a caller's ``send`` reaching the wire.
+    public func send(_ request: Catlaser_App_V1_AppRequest) async throws {
         guard state == .connected else {
+            throw DeviceClientError.notConnected
+        }
+        var outbound = request
+        outbound.requestID = 0
+
+        let payload: Data
+        do {
+            payload = try outbound.serializedData()
+        } catch {
+            throw DeviceClientError.encodingFailed(error.localizedDescription)
+        }
+
+        let frame: Data
+        do {
+            frame = try FrameCodec.encode(payload)
+        } catch {
+            throw DeviceClientError.fromCodec(error)
+        }
+
+        do {
+            try await transport.send(frame)
+        } catch let error as DeviceClientError {
+            throw error
+        } catch {
+            throw DeviceClientError.transport(error.localizedDescription)
+        }
+    }
+
+    /// Core request/response implementation shared by the public
+    /// ``request`` surface and the handshake path.
+    ///
+    /// - Parameter allowedInHandshake: When ``true``, the method also
+    ///   accepts ``state == .handshaking``. The ONLY caller that
+    ///   passes ``true`` is ``performHandshake``. The flag is a
+    ///   deliberate belt-and-braces on top of the file-private
+    ///   visibility: a hypothetical future refactor that tried to
+    ///   expose ``performRequestInternal`` publicly would still have
+    ///   to explicitly opt into the handshake-stage gate, making the
+    ///   contract visible at the call site.
+    private func performRequestInternal(
+        _ request: Catlaser_App_V1_AppRequest,
+        allowedInHandshake: Bool,
+    ) async throws -> Catlaser_App_V1_DeviceEvent {
+        switch state {
+        case .connected:
+            break
+        case .handshaking where allowedInHandshake:
+            break
+        default:
             throw DeviceClientError.notConnected
         }
         var outbound = request
@@ -283,40 +390,6 @@ public actor DeviceClient {
             throw DeviceClientError.remote(code: remote.code, message: remote.message)
         }
         return event
-    }
-
-    /// Fire-and-forget send: no response is awaited. Sets `request_id`
-    /// to `0` per the proto contract so the device does not attempt to
-    /// correlate its reply (and any spontaneous event echoing this
-    /// request will flow down the `events` stream).
-    public func send(_ request: Catlaser_App_V1_AppRequest) async throws {
-        guard state == .connected else {
-            throw DeviceClientError.notConnected
-        }
-        var outbound = request
-        outbound.requestID = 0
-
-        let payload: Data
-        do {
-            payload = try outbound.serializedData()
-        } catch {
-            throw DeviceClientError.encodingFailed(error.localizedDescription)
-        }
-
-        let frame: Data
-        do {
-            frame = try FrameCodec.encode(payload)
-        } catch {
-            throw DeviceClientError.fromCodec(error)
-        }
-
-        do {
-            try await transport.send(frame)
-        } catch let error as DeviceClientError {
-            throw error
-        } catch {
-            throw DeviceClientError.transport(error.localizedDescription)
-        }
     }
 
     // MARK: - Receive loop

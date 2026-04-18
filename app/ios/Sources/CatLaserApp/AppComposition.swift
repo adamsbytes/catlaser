@@ -1,0 +1,314 @@
+import CatLaserAuth
+import CatLaserDevice
+import CatLaserLive
+import CatLaserPairing
+import Foundation
+
+/// Single production wiring for the app's object graph.
+///
+/// Every cross-module seam that is security-relevant at runtime — TLS
+/// pinning, LiveKit host allowlisting, bearer-token biometric gating,
+/// `dev:` handshake attestation, 401-triggered session invalidation —
+/// is assembled here. The product target (the Xcode app bundle)
+/// constructs an ``AppComposition`` once at launch via
+/// ``AppComposition/production(config:)`` and then hands out the
+/// prebuilt components to SwiftUI views.
+///
+/// ## Platform posture
+///
+/// The type itself builds on every platform so the
+/// ``AppCompositionInvariantsTests`` suite runs on Linux CI (where
+/// ``SecureEnclaveIdentityStore``, ``KeychainBearerTokenStore``,
+/// ``GatedBearerTokenStore``, and ``PinnedHTTPClient`` are all
+/// unavailable). Production construction lives in a Darwin-only
+/// extension (``production(config:)``) so a shipping iOS / macOS
+/// build always threads the pinned + SE-backed dependencies. The
+/// cross-platform ``make`` factory is package-internal — the product
+/// target reaches it only via ``production(config:)``.
+///
+/// ## What is asserted
+///
+/// The accompanying ``AppCompositionInvariantsTests`` suite locks in
+/// four structural guarantees that the type system cannot express on
+/// its own:
+///
+/// 1. The LiveKit allowlist exactly matches the operator-provisioned
+///    host set — a silent over-permissive allowlist would defeat the
+///    defence against a tampered ``StreamOffer``.
+/// 2. The live-view ``AuthGate`` routes through a ``LiveVideoGate``
+///    conformer that actually performs a user-presence check
+///    (production binds ``GatedBearerTokenStore/requireLiveVideo``).
+///    Skipping this would let a momentarily-unlocked phone reveal the
+///    in-home feed.
+/// 3. The ``ConnectionManager/HandshakeBuilder`` produces a header
+///    whose ``bnd`` decodes to ``AttestationBinding/device(timestamp:)``
+///    — any other binding tag would be rejected by the device daemon,
+///    and using ``api:`` by mistake would still succeed against the
+///    coordination server, inviting cross-context replay.
+/// 4. The Darwin ``production`` factory constructs the
+///    ``SignedHTTPClient`` from a ``PinnedHTTPClient``. The type
+///    system already enforces this on the public initialiser; the
+///    invariant test locks in the concrete construction path in
+///    case a refactor reached for the package-internal
+///    ``init(underlying:...)``.
+public struct AppComposition: Sendable {
+    // MARK: - Deployment input
+
+    /// Inputs a release product target must supply. Construction
+    /// fails closed: every field is validated before use.
+    public struct DeploymentConfig: Sendable {
+        /// Auth endpoint configuration — base URL, OAuth client IDs,
+        /// Universal-Link host/path.
+        public let authConfig: AuthConfig
+
+        /// SPKI-SHA256 pin set for the coordination server. Must
+        /// contain at least one pin; empty is rejected at
+        /// ``TLSPinning/init``.
+        public let tlsPinning: TLSPinning
+
+        /// LiveKit hosts the app may dial. Must be non-empty; exactly
+        /// the hosts the operator provisioned LiveKit on, with no
+        /// wildcards. Mirrors the server's per-device-room isolation
+        /// by constraining the subscriber-side dial target.
+        public let liveKitAllowlist: LiveKitHostAllowlist
+
+        /// Keychain access group shared with extensions, if any.
+        /// ``nil`` keeps the store in the app-private access group
+        /// (the release default).
+        public let keychainAccessGroup: String?
+
+        public init(
+            authConfig: AuthConfig,
+            tlsPinning: TLSPinning,
+            liveKitAllowlist: LiveKitHostAllowlist,
+            keychainAccessGroup: String? = nil,
+        ) {
+            self.authConfig = authConfig
+            self.tlsPinning = tlsPinning
+            self.liveKitAllowlist = liveKitAllowlist
+            self.keychainAccessGroup = keychainAccessGroup
+        }
+    }
+
+    // MARK: - Assembled graph
+
+    /// Auth coordinator — sign-in flows, session management, 401
+    /// handling via ``AuthCoordinator/handleSessionExpired()``.
+    public let authCoordinator: AuthCoordinator
+
+    /// Pairing-code exchange client. Always built on top of the
+    /// pinned + signed transport in production; no code path in this
+    /// module can construct one on an unpinned session.
+    public let pairingClient: PairingClient
+
+    /// Ownership re-verification client — ``/api/v1/devices/paired``.
+    /// Same pinning + signing posture as ``pairingClient``.
+    public let pairedDevicesClient: PairedDevicesClient
+
+    /// LiveKit host allowlist. Re-exposed verbatim so
+    /// ``LiveViewModel`` construction does not touch
+    /// ``DeploymentConfig`` directly.
+    public let liveKitAllowlist: LiveKitHostAllowlist
+
+    /// Device-handshake builder. Emits a v4 attestation header with
+    /// ``bnd = "dev:<unix_seconds>"``. The ``ConnectionManager``
+    /// threads this into ``DeviceClient/connect(handshake:)`` on
+    /// every reconnect.
+    public let handshakeBuilder: ConnectionManager.HandshakeBuilder
+
+    /// Live-view user-presence gate. Always prompts the user (Face
+    /// ID / passcode) before any stream machinery touches the wire —
+    /// even inside the bearer cache's idle window. Returns
+    /// ``LiveAuthGateOutcome/allowed``, ``/cancelled``, or
+    /// ``/denied(_:)`` for the ``LiveViewModel`` to route on.
+    public let liveAuthGate: LiveViewModel.AuthGate
+
+    // MARK: - Cross-platform construction
+
+    /// Closure that builds a ``SignedHTTPClient`` given the
+    /// ``onSessionExpired`` callback the composition needs to thread
+    /// in. Indirected as a factory so the composition can inject its
+    /// own 401 callback (which closes over the ``AuthCoordinator`` it
+    /// just built) without forcing the caller to construct the
+    /// coordinator first.
+    ///
+    /// The production factory on Darwin passes the pinned transport
+    /// to ``SignedHTTPClient``'s ``init(transport:...)`` public
+    /// initializer, which enforces the ``PinnedHTTPClient`` type
+    /// invariant at compile time. The invariants test suite passes a
+    /// factory that uses ``@testable import CatLaserAuth`` to reach
+    /// the package-internal ``init(underlying:...)`` with a mock HTTP
+    /// client — that seam is invisible to the shipping product target
+    /// (no ``@testable`` imports in release code), so a refactor
+    /// cannot accidentally smuggle an unpinned transport into
+    /// production.
+    public typealias SignedHTTPClientFactory = @Sendable (
+        @escaping SignedHTTPClient.SessionExpiryHandler,
+    ) -> SignedHTTPClient
+
+    /// Wire the production object graph from injectable dependencies.
+    ///
+    /// Called on Darwin by the thin ``production(config:)`` factory
+    /// with real SE-backed / keychain-backed / pinned-URLSession
+    /// dependencies; called on all platforms by the
+    /// ``AppCompositionInvariantsTests`` suite with test doubles so
+    /// the wiring invariants are asserted on a real composition, not
+    /// a bespoke per-test rig.
+    public static func make(
+        authConfig: AuthConfig,
+        authHTTPClient: any HTTPClient,
+        signedHTTPClientFactory: SignedHTTPClientFactory,
+        liveKitAllowlist: LiveKitHostAllowlist,
+        attestationProvider: any DeviceAttestationProviding,
+        bearerStore: any BearerTokenStore & SessionInvalidating,
+        liveVideoGate: any LiveVideoGate,
+        clock: @escaping @Sendable () -> Date = { Date() },
+    ) -> AppComposition {
+        let authClient = AuthClient(
+            config: authConfig,
+            http: authHTTPClient,
+        )
+
+        // Build the coordinator first (no dependency on the signed
+        // wrapper). The ``handleSessionExpired`` hook closes over it.
+        let coordinator = AuthCoordinator(
+            client: authClient,
+            store: bearerStore,
+            attestationProvider: attestationProvider,
+        )
+
+        // Build the signed transport via the caller-supplied factory,
+        // threading the composition's 401 callback. The factory is
+        // the seam that controls pinning: Darwin production passes
+        // the ``PinnedHTTPClient``-taking init; tests pass a
+        // ``@testable``-accessible internal init.
+        let signedTransport = signedHTTPClientFactory { [coordinator] in
+            // Fire-and-forget on a 401. The coordinator drops the
+            // in-memory bearer cache and notifies observers; any
+            // subsequent protected call re-reads the keychain
+            // (prompting for biometrics under the ``.userPresence``
+            // ACL). The keychain row itself is NOT deleted.
+            await coordinator.handleSessionExpired()
+        }
+
+        let pairingClient = PairingClient(
+            baseURL: authConfig.baseURL,
+            http: signedTransport,
+        )
+        let pairedDevicesClient = PairedDevicesClient(
+            baseURL: authConfig.baseURL,
+            http: signedTransport,
+        )
+
+        // The handshake builder captures the attestation provider so
+        // every reconnect produces a fresh ``dev:<unix_seconds>``
+        // signature under a fresh ECDSA ``k`` — the property the
+        // server's replay cache relies on to distinguish legitimate
+        // retries from captured-byte replays.
+        let handshakeBuilder: ConnectionManager.HandshakeBuilder = { [attestationProvider, clock] in
+            let timestamp = Int64(clock().timeIntervalSince1970)
+            return try await attestationProvider.currentAttestationHeader(
+                binding: .device(timestamp: timestamp),
+            )
+        }
+
+        // The live auth gate calls the strict re-auth path on every
+        // stream start. Cancellation maps to ``.cancelled``;
+        // unavailability / biometric failure maps to ``.denied`` with
+        // a diagnostic string. Every other error path also maps to
+        // ``.denied`` — a failure to obtain user presence must NEVER
+        // default-allow.
+        let liveAuthGate: LiveViewModel.AuthGate = { [liveVideoGate] in
+            do {
+                try await liveVideoGate.requireLiveVideo()
+                return .allowed
+            } catch AuthError.cancelled {
+                return .cancelled
+            } catch {
+                return .denied(String(describing: error))
+            }
+        }
+
+        return AppComposition(
+            authCoordinator: coordinator,
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedDevicesClient,
+            liveKitAllowlist: liveKitAllowlist,
+            handshakeBuilder: handshakeBuilder,
+            liveAuthGate: liveAuthGate,
+        )
+    }
+
+    // MARK: - Private memberwise
+
+    private init(
+        authCoordinator: AuthCoordinator,
+        pairingClient: PairingClient,
+        pairedDevicesClient: PairedDevicesClient,
+        liveKitAllowlist: LiveKitHostAllowlist,
+        handshakeBuilder: @escaping ConnectionManager.HandshakeBuilder,
+        liveAuthGate: @escaping LiveViewModel.AuthGate,
+    ) {
+        self.authCoordinator = authCoordinator
+        self.pairingClient = pairingClient
+        self.pairedDevicesClient = pairedDevicesClient
+        self.liveKitAllowlist = liveKitAllowlist
+        self.handshakeBuilder = handshakeBuilder
+        self.liveAuthGate = liveAuthGate
+    }
+}
+
+// MARK: - Production factory (Darwin-only)
+
+#if canImport(Security) && canImport(Darwin) && canImport(LocalAuthentication)
+public extension AppComposition {
+    /// Build the production object graph. Darwin-only because it
+    /// wires the Secure-Enclave-backed identity store, the
+    /// ``LocalAuthentication``-gated bearer store, and the
+    /// SPKI-pinned HTTP transport — none of which are available on
+    /// Linux.
+    ///
+    /// Called once at app launch from the SwiftUI `App` entry point.
+    /// Every component returned is already connected: invoking an
+    /// authenticated HTTP call via ``pairingClient`` attaches the
+    /// pinned transport, the signed bearer, the SE-backed attestation
+    /// header, and the idempotency key; the ``onSessionExpired`` path
+    /// routes into ``authCoordinator`` / ``bearerStore`` to drop the
+    /// in-memory cache on a 401 without disturbing the keychain row.
+    static func production(config: DeploymentConfig) -> AppComposition {
+        let identity = SecureEnclaveIdentityStore()
+        let attestationProvider = SystemDeviceAttestationProvider(identity: identity)
+        let bearerStore = GatedBearerTokenStore(
+            underlying: KeychainBearerTokenStore(accessGroup: config.keychainAccessGroup),
+            gate: SessionAccessGate(),
+        )
+        let pinnedTransport = PinnedHTTPClient(pinning: config.tlsPinning)
+        // The signed-client factory uses the Darwin-only
+        // ``SignedHTTPClient/init(transport:store:attestationProvider:
+        // onSessionExpired:)`` initialiser, which enforces the
+        // ``PinnedHTTPClient`` type invariant at compile time: the
+        // product target has no way to reach the package-internal
+        // init that accepts a raw ``HTTPClient``. A future refactor
+        // that threaded an unpinned session into production would
+        // have to either change this factory (visible diff) or reach
+        // for ``@testable import``, which a release target cannot do.
+        let pinnedFactory: SignedHTTPClientFactory = { [bearerStore, attestationProvider] onExpired in
+            SignedHTTPClient(
+                transport: pinnedTransport,
+                store: bearerStore,
+                attestationProvider: attestationProvider,
+                onSessionExpired: onExpired,
+            )
+        }
+        return make(
+            authConfig: config.authConfig,
+            authHTTPClient: pinnedTransport,
+            signedHTTPClientFactory: pinnedFactory,
+            liveKitAllowlist: config.liveKitAllowlist,
+            attestationProvider: attestationProvider,
+            bearerStore: bearerStore,
+            liveVideoGate: bearerStore,
+        )
+    }
+}
+#endif

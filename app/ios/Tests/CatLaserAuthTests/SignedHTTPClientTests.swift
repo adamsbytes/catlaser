@@ -116,6 +116,7 @@ private func makeWrapper(
     identity: any DeviceIdentityStoring,
     clock: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_700_000_000) },
     uuidFactory: @escaping @Sendable () -> UUID = { UUID() },
+    onSessionExpired: SignedHTTPClient.SessionExpiryHandler? = nil,
 ) -> SignedHTTPClient {
     let provider = StubDeviceAttestationProvider(
         fingerprint: makeFingerprint(),
@@ -127,7 +128,35 @@ private func makeWrapper(
         attestationProvider: provider,
         clock: clock,
         uuidFactory: uuidFactory,
+        onSessionExpired: onSessionExpired,
     )
+}
+
+/// Counter for session-expiry callback invocations. Used by the tests
+/// below to assert the callback fires exactly once per observed 401.
+private actor ExpiryCounter {
+    private var count: Int = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func record() {
+        count += 1
+        if let continuation {
+            self.continuation = nil
+            continuation.resume()
+        }
+    }
+
+    func value() -> Int { count }
+
+    /// Wait until the counter reaches at least ``target``. Used because
+    /// the wrapper fires the callback from a detached Task so it does
+    /// not stall the caller — tests need a deterministic wait.
+    func awaitAtLeast(_ target: Int) async {
+        if count >= target { return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            self.continuation = c
+        }
+    }
 }
 
 private func successResponse() -> HTTPResponse {
@@ -740,5 +769,132 @@ struct SignedHTTPClientTests {
         #expect(!SignedHTTPClient.isValidIdempotencyKey(""))
         #expect(!SignedHTTPClient.isValidIdempotencyKey("deadbeef00004000800feedfacecafe"))
         #expect(!SignedHTTPClient.isValidIdempotencyKey("xxxxxxxx-0000-4000-8000-feedfacecafe"))
+    }
+
+    // MARK: - Session-expiry callback
+
+    @Test
+    func sessionExpiredCallbackFiresOn401() async throws {
+        // A 401 response must trigger the `onSessionExpired` callback
+        // exactly once. The callback is the seam by which the auth
+        // coordinator learns the server rejected the bearer and
+        // invalidates its in-memory cache; without this signal the
+        // wrapper would keep serving the rejected bearer until the
+        // next explicit sign-out.
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(
+                statusCode: 401,
+                headers: [:],
+                body: Data("{\"error\":\"session_required\"}".utf8),
+            )),
+        ])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let counter = ExpiryCounter()
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            onSessionExpired: { await counter.record() },
+        )
+        let response = try await signed.send(
+            URLRequest(url: URL(string: "https://api.example/api/v1/me")!),
+        )
+        // The 401 is propagated to the caller unchanged — the
+        // callback does not swallow it.
+        #expect(response.statusCode == 401)
+        await counter.awaitAtLeast(1)
+        #expect(await counter.value() == 1)
+    }
+
+    @Test
+    func sessionExpiredCallbackDoesNotFireOnSuccess() async throws {
+        // The callback is specific to 401s — a healthy 2xx must leave
+        // the counter untouched. A regression that fired on every
+        // response would have the coordinator invalidating the bearer
+        // cache on normal calls and re-prompting the user endlessly.
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let counter = ExpiryCounter()
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            onSessionExpired: { await counter.record() },
+        )
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        #expect(await counter.value() == 0)
+    }
+
+    @Test
+    func sessionExpiredCallbackDoesNotFireOnNon401Failure() async throws {
+        // Server errors (5xx), rate limits (429), and other non-401
+        // failures must NOT fire the callback — they are transient and
+        // reflect server state, not bearer validity. Conflating them
+        // with bearer rejection would produce a signout cascade on
+        // every flaky-network launch.
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(
+                statusCode: 503,
+                headers: [:],
+                body: Data("{\"error\":\"boom\"}".utf8),
+            )),
+        ])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let counter = ExpiryCounter()
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            onSessionExpired: { await counter.record() },
+        )
+        let response = try await signed.send(
+            URLRequest(url: URL(string: "https://api.example/api/v1/me")!),
+        )
+        #expect(response.statusCode == 503)
+        // Callback runs in a detached Task; yield the task queue before
+        // asserting so any (bug) invocation would have landed.
+        try await Task.sleep(nanoseconds: 10_000_000)
+        #expect(await counter.value() == 0)
+    }
+
+    @Test
+    func sessionExpiredCallbackFiresPerEvery401() async throws {
+        // Two separate 401 responses must each fire the callback —
+        // the auth coordinator's invalidation is idempotent, so double
+        // firing is safe, but a drop of legitimate expiry signals
+        // would leave stale state.
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
+            .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
+        ])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let counter = ExpiryCounter()
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            onSessionExpired: { await counter.record() },
+        )
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/a")!))
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/b")!))
+        await counter.awaitAtLeast(2)
+        #expect(await counter.value() == 2)
+    }
+
+    @Test
+    func sessionExpiredCallbackOptional() async throws {
+        // Omitting the callback at construction is supported so tests
+        // and composition paths that have no auth coordinator can
+        // still build a wrapper. A 401 must simply propagate as the
+        // plain response with no callback fanout.
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
+        ])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+        let response = try await signed.send(
+            URLRequest(url: URL(string: "https://api.example/api/v1/me")!),
+        )
+        #expect(response.statusCode == 401)
     }
 }

@@ -15,7 +15,20 @@ import Foundation
 ///
 /// * `.invalidCode` — user-scanned QR was malformed; UI prompts to
 ///   scan again or tap manual entry.
-/// * `.missingSession` — user is signed out; UI routes to sign-in.
+/// * `.missingSession` — local bearer store is empty; the user is
+///   genuinely signed out. UI routes to sign-in.
+/// * `.sessionExpired` — server returned HTTP 401 on an otherwise-
+///   valid protected call. The bearer stored locally was not accepted
+///   server-side (expired, revoked, bearer/session mismatch). The
+///   fix is to sign in again — the pairing itself is NOT invalidated
+///   and the keychain row must NOT be wiped on this signal. Kept
+///   distinct from `.missingSession` because the two require different
+///   UI treatment (`.missingSession` may never have had a session;
+///   `.sessionExpired` had one that stopped being accepted) and
+///   because the pairing re-verification path treats only an
+///   authoritative 2xx-list-that-omits-the-device as "no longer
+///   owned" — a 401 is an authentication failure, not an ownership
+///   revocation.
 /// * `.codeAlreadyUsed` — server 409; UI prompts to get a fresh QR
 ///   from the device.
 /// * `.codeExpired` — server 410; same remediation as above.
@@ -37,6 +50,7 @@ import Foundation
 public enum PairingError: Error, Equatable, Sendable {
     case invalidCode(PairingCodeError)
     case missingSession
+    case sessionExpired(message: String?)
     case codeAlreadyUsed(message: String?)
     case codeExpired(message: String?)
     case codeNotFound(message: String?)

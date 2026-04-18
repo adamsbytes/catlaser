@@ -922,14 +922,170 @@ struct AuthCoordinatorTests {
         try await coord.signOut()
         #expect(await recorder.callCount == 1)
     }
+
+    // MARK: - handleSessionExpired
+
+    @Test
+    func handleSessionExpiredInvalidatesInMemoryCacheViaSessionInvalidating() async throws {
+        // `handleSessionExpired()` must drop any in-memory bearer
+        // cache so the next authenticated call is forced to re-read
+        // the keychain (which, under the production access-control,
+        // prompts for re-auth). The persistent keychain row must NOT
+        // be deleted — the token is still valid at rest and the user's
+        // pairing, push tokens, and other session-scoped state are
+        // orthogonal to momentary server-side rejection.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let invalidator = TestSessionInvalidatingStore(
+            initial: AuthSession(
+                bearerToken: "still-on-disk",
+                user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+                provider: .magicLink,
+                establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            ),
+        )
+        let coord = AuthCoordinator(
+            client: client,
+            store: invalidator,
+            appleProvider: nil,
+            googleProvider: nil,
+        )
+        await coord.handleSessionExpired()
+        #expect(await invalidator.invalidateCount == 1)
+        #expect(await invalidator.deleteCount == 0)
+        // The underlying stored session is still there — only the
+        // in-memory cache was dropped.
+        #expect(try await invalidator.load() != nil)
+    }
+
+    @Test
+    func handleSessionExpiredNotifiesLifecycleObservers() async throws {
+        // Observers learn about the expiry so the app can route the
+        // user to re-sign-in. The endpoint-store-style observer uses
+        // the protocol default (no-op) — but a coordinator observer
+        // that overrides `sessionDidExpire` sees exactly one call.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let recorder1 = RecordingLifecycleObserver()
+        let recorder2 = RecordingLifecycleObserver()
+        let defaultObserver = DefaultOnlyLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: InMemoryBearerTokenStore(),
+            appleProvider: nil,
+            googleProvider: nil,
+            lifecycleObservers: [recorder1, defaultObserver, recorder2],
+        )
+        await coord.handleSessionExpired()
+        #expect(await recorder1.expireCount == 1)
+        #expect(await recorder2.expireCount == 1)
+        // The observer with only the default `sessionDidExpire`
+        // behaves as a no-op — the call is issued but nothing happens.
+        // This is exactly the pairing module's posture: a session
+        // expiry must not wipe the endpoint keychain row.
+        #expect(await defaultObserver.signOutCount == 0)
+    }
+
+    @Test
+    func handleSessionExpiredDoesNotFireSignOutObservers() async throws {
+        // Regression guard: `handleSessionExpired` and `signOut` are
+        // distinct flows. Expiring must not collaterally notify
+        // sign-out observers, because their contract (wipe the
+        // endpoint row, etc.) is wrong for a transient bearer
+        // rejection.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let recorder = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: InMemoryBearerTokenStore(),
+            appleProvider: nil,
+            googleProvider: nil,
+            lifecycleObservers: [recorder],
+        )
+        await coord.handleSessionExpired()
+        #expect(await recorder.expireCount == 1)
+        #expect(await recorder.callCount == 0,
+                "sessionDidSignOut must NOT fire for a session expiry")
+    }
+
+    @Test
+    func handleSessionExpiredOnStoreWithoutSessionInvalidatingIsNoOpOnStore() async throws {
+        // A keychain-only bearer store (no in-memory cache) does not
+        // conform to `SessionInvalidating`. The coordinator must still
+        // complete cleanly — observers still fire — but the
+        // invalidate path is skipped because there is nothing to
+        // invalidate. This exercises the feature-detection branch.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let plainStore = InMemoryBearerTokenStore() // Does not conform to SessionInvalidating
+        let recorder = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: plainStore,
+            appleProvider: nil,
+            googleProvider: nil,
+            lifecycleObservers: [recorder],
+        )
+        await coord.handleSessionExpired()
+        #expect(await recorder.expireCount == 1)
+    }
 }
 
 // MARK: - Recording observer
 
 private actor RecordingLifecycleObserver: SessionLifecycleObserver {
     private(set) var callCount: Int = 0
+    private(set) var expireCount: Int = 0
 
     func sessionDidSignOut() async {
         callCount += 1
+    }
+
+    func sessionDidExpire() async {
+        expireCount += 1
+    }
+}
+
+/// Observer that does NOT override `sessionDidExpire` — relies on the
+/// protocol's default no-op. Exercises the pairing-module-posture
+/// branch where a session expiry must not touch orthogonal state.
+private actor DefaultOnlyLifecycleObserver: SessionLifecycleObserver {
+    private(set) var signOutCount: Int = 0
+
+    func sessionDidSignOut() async {
+        signOutCount += 1
+    }
+}
+
+/// Bearer-token store that also conforms to `SessionInvalidating`
+/// so the coordinator's feature-detection branch can be exercised.
+/// Records both invalidate and delete call counts separately so tests
+/// can assert the coordinator's expiry path invalidates WITHOUT
+/// deleting the persisted row.
+private actor TestSessionInvalidatingStore: BearerTokenStore, SessionInvalidating {
+    private var session: AuthSession?
+    private(set) var invalidateCount: Int = 0
+    private(set) var deleteCount: Int = 0
+
+    init(initial: AuthSession? = nil) {
+        self.session = initial
+    }
+
+    func save(_ session: AuthSession) async throws {
+        self.session = session
+    }
+
+    func load() async throws -> AuthSession? { session }
+
+    func delete() async throws {
+        deleteCount += 1
+        session = nil
+    }
+
+    func cachedSession() async -> AuthSession? { session }
+
+    func invalidateSession() async {
+        invalidateCount += 1
     }
 }

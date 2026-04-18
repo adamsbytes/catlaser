@@ -80,6 +80,39 @@ public actor AuthCoordinator {
         try await store.load()
     }
 
+    /// Handle an HTTP 401 observed on a downstream protected call.
+    ///
+    /// The signed HTTP client wrapper calls this (via the
+    /// `onSessionExpired` callback threaded in at construction time)
+    /// whenever the coordination server rejects a bearer with 401.
+    /// The response is:
+    ///
+    /// * Invalidate the in-memory bearer cache so the next protected
+    ///   call prompts the user to re-authenticate instead of reusing
+    ///   the already-rejected token. The persistent keychain row is
+    ///   intentionally left alone — the token is still valid at rest;
+    ///   it is just no longer accepted by the server, and the correct
+    ///   remediation is a fresh sign-in, not destruction of the
+    ///   stored material.
+    /// * Notify every lifecycle observer via `sessionDidExpire()`.
+    ///   Observers with no `sessionDidExpire` override (e.g., the
+    ///   pairing endpoint store) take the default no-op, so a 401 in
+    ///   the middle of a paired-devices re-verification does NOT
+    ///   clobber the keychain-held pairing. Observers that care about
+    ///   re-auth UX (the app-level coordinator) override the hook.
+    ///
+    /// Idempotent and safe to call from any thread that can reach the
+    /// actor; the in-memory cache invalidation + observer notification
+    /// are serialised through the actor's isolation domain.
+    public func handleSessionExpired() async {
+        if let invalidator = store as? SessionInvalidating {
+            await invalidator.invalidateSession()
+        }
+        for observer in lifecycleObservers {
+            await observer.sessionDidExpire()
+        }
+    }
+
     /// Apple sign-in. The flow commits a SHA-256-hashed nonce in the
     /// authorization request, receives an ID token whose `nonce` claim
     /// must match that hash, and posts the raw nonce to the server so it

@@ -712,12 +712,22 @@ struct PairingViewModelTests {
     }
 
     @Test
-    func startWipesPersistedDeviceOn401FromListEndpoint() async throws {
-        // A 401 on the re-check means the server no longer has a
-        // session for this bearer. That's the same authoritative
-        // "you don't own anything" answer as an empty list — wipe
-        // and route to re-pair (which will itself route to sign-in
-        // because the bearer is invalid).
+    func startAdoptsCachedDeviceOn401FromListEndpoint() async throws {
+        // A 401 is an authentication failure, NOT an authoritative
+        // ownership revocation. The server is saying "your bearer
+        // is bad," not "this device is no longer yours." Wiping the
+        // pairing on every bearer expiry would force users who had a
+        // session time out to go locate the physical device and
+        // generate a fresh single-use QR — a terrible UX and
+        // decoupled from the actual ownership check.
+        //
+        // The only authoritative "not yours" signal is a 2xx list
+        // that omits the device id. A 401 keeps the cached pairing
+        // intact; separately the signed HTTP client fires its
+        // `onSessionExpired` callback, which the composition root
+        // wires to `AuthCoordinator.handleSessionExpired()` so the
+        // UI can route the user to sign in again without touching
+        // the keychain-held pairing.
         let device = try makeDevice()
         let store = PublicInMemoryEndpointStore(initial: device)
         let (_, pairingClient) = makeClient(outcomes: [])
@@ -740,8 +750,12 @@ struct PairingViewModelTests {
             connectionManagerFactory: makeFactory(),
         )
         await vm.start()
-        #expect(vm.phase == .scanning)
-        #expect(try await store.load() == nil)
+        if case let .paired(loaded) = vm.phase {
+            #expect(loaded == device)
+        } else {
+            Issue.record("expected .paired on 401 from list endpoint, got \(vm.phase)")
+        }
+        #expect(try await store.load() == device)
     }
 
     @Test
@@ -881,5 +895,95 @@ struct PairingViewModelTests {
         await vm.reverifyOwnershipIfNeeded()
         #expect(vm.phase == .scanning)
         #expect(try await store.load() == nil)
+    }
+
+    @Test
+    func reverifyOwnershipIfNeededKeepsPairingOn401() async throws {
+        // The post-adoption reverify path must treat a 401 as
+        // indeterminate exactly like the `start()` path. Otherwise a
+        // scene-foreground event that fires after a sub-minute session
+        // expiry would wipe the pairing the user just legitimately
+        // established. The session-expiry UX lives in the auth
+        // coordinator (via `onSessionExpired` → `sessionDidExpire`);
+        // the pairing module's job is to keep the device record alive.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            // First call (start) confirms ownership.
+            .response(makePairedListResponse(for: [device])),
+            // Second call (manual reverify) returns 401.
+            .response(HTTPResponse.json(
+                ["ok": false, "error": ["code": "SESSION_REQUIRED", "message": "expired"]],
+                status: 401,
+            )),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            reverifyInterval: 0,
+        )
+        await vm.start()
+        await vm.reverifyOwnershipIfNeeded()
+        if case let .paired(loaded) = vm.phase {
+            #expect(loaded == device)
+        } else {
+            Issue.record("expected .paired after 401 reverify, got \(vm.phase)")
+        }
+        #expect(try await store.load() == device)
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
+    }
+
+    @Test
+    func reverifyOwnershipKeepsPairingWhenBearerStoreEmpty() async throws {
+        // The other half of the 401 story: if the SignedHTTPClient
+        // short-circuits with `.missingBearerToken` (store read
+        // returned nil), the pairing module must still treat it as
+        // indeterminate. Historically this path coalesced with the
+        // server's 401 into a single `.missingSession` signal that
+        // wiped the keychain; the fix keeps the pairing and lets the
+        // auth coordinator drive the re-sign-in UX.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        // Signed client reads the (empty) bearer store and throws
+        // `AuthError.missingBearerToken` BEFORE issuing any HTTP call.
+        // `signedTestClientWithoutBearer` is a companion helper that
+        // wires an empty-session store into the signed wrapper so the
+        // pre-wire check fires.
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClientWithoutBearer(),
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        if case let .paired(loaded) = vm.phase {
+            #expect(loaded == device)
+        } else {
+            Issue.record(
+                "expected .paired when bearer store is empty (indeterminate), got \(vm.phase)",
+            )
+        }
+        #expect(try await store.load() == device)
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
     }
 }

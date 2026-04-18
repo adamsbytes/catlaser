@@ -567,12 +567,230 @@ struct DeviceClientTests {
     func isTerminalAuthRevocationClassification() {
         #expect(DeviceClientError.authRevoked(message: "anything").isTerminalAuthRevocation)
         #expect(DeviceClientError.handshakeFailed(reason: "DEVICE_AUTH_NOT_AUTHORIZED").isTerminalAuthRevocation)
-        // Transient auth states: ACL not primed yet, clock skew — not
-        // terminal; reconnect-with-backoff is the correct behavior.
+        // Transient auth states: ACL not primed yet, clock skew,
+        // replay-detected — not terminal; reconnect-with-backoff is
+        // the correct behavior. The replay-detected path in particular
+        // MUST be non-terminal: an honest client's next attestation
+        // signs with a fresh ECDSA k and therefore produces a fresh
+        // signature that does not collide with the cached replay
+        // tuple, so the retry naturally self-heals.
         #expect(!DeviceClientError.handshakeFailed(reason: "DEVICE_AUTH_ACL_NOT_READY").isTerminalAuthRevocation)
         #expect(!DeviceClientError.handshakeFailed(reason: "DEVICE_AUTH_SKEW_EXCEEDED").isTerminalAuthRevocation)
+        #expect(!DeviceClientError.handshakeFailed(reason: DeviceClientError.handshakeReasonReplayDetected).isTerminalAuthRevocation)
         #expect(!DeviceClientError.closedByPeer.isTerminalAuthRevocation)
         #expect(!DeviceClientError.transport("network down").isTerminalAuthRevocation)
         #expect(!DeviceClientError.requestTimedOut.isTerminalAuthRevocation)
+    }
+
+    // MARK: - Handshake-stage gating
+
+    @Test
+    func publicRequestIsRefusedWhileHandshakeIsInFlight() async throws {
+        // The public `request` API must refuse to transmit until the
+        // mandatory first-frame `AuthRequest` handshake has completed
+        // and the device has accepted us. The scenario:
+        //
+        //   1. `connect(handshake:)` is called. It opens the transport
+        //      (successful), enters `.handshaking`, builds and sends
+        //      the AuthRequest, then awaits the AuthResponse.
+        //   2. During that await, `DeviceClient` is an actor and
+        //      reentrant — a second task that can reach the client
+        //      reference COULD call `request(_:)`.
+        //   3. The contract is that such a call MUST throw
+        //      `.notConnected` so a non-AuthRequest frame cannot race
+        //      the handshake onto the wire. The server enforces this
+        //      by dropping any connection whose first frame is not
+        //      `AuthRequest`, but the app-side gate prevents us from
+        //      emitting such a frame at all.
+        //
+        // The test constructs a handshake builder that never returns
+        // until the test explicitly unblocks it. Meanwhile, a
+        // concurrent `request(_:)` call is issued — it must throw
+        // synchronously, without ever seeing the wire.
+        let (client, transport) = makeClient()
+        let gate = HandshakeGate()
+        async let connectResult: Void = client.connect(handshake: {
+            // Park until the test resumes us. Once resumed, return a
+            // syntactically-valid-but-test-irrelevant header string —
+            // the test drives the response path directly below via
+            // `transport.deliver`.
+            await gate.wait()
+            return "handshake-header"
+        })
+
+        // Wait until the client has entered `.handshaking`.
+        // `isConnected` must be false during this window.
+        while await client.isConnected {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(await client.isConnected == false)
+
+        // Issue a parallel public request. It must be refused with
+        // `.notConnected` because we are in `.handshaking`. We do NOT
+        // drive the wire — if the gate were broken and the frame went
+        // out, the test would detect it via a non-throwing branch.
+        var statusReq = Catlaser_App_V1_AppRequest()
+        statusReq.getStatus = Catlaser_App_V1_GetStatusRequest()
+        do {
+            _ = try await client.request(statusReq)
+            Issue.record("expected .notConnected; a request slipped past the handshake gate")
+        } catch let error as DeviceClientError {
+            #expect(error == .notConnected)
+        }
+
+        // Unblock the handshake and complete it with a valid
+        // AuthResponse. The AuthRequest frame should be the FIRST and
+        // ONLY frame on the outbound path at this point.
+        await gate.release()
+        let firstFrame = try await transport.nextAppRequest(timeout: 2.0)
+        #expect(firstFrame.request != nil)
+        if case .auth = firstFrame.request {
+            // correct: handshake frame landed first
+        } else {
+            Issue.record("first outbound frame was not AuthRequest: \(String(describing: firstFrame.request))")
+        }
+        var ok = Catlaser_App_V1_DeviceEvent()
+        ok.authResponse = Catlaser_App_V1_AuthResponse()
+        ok.authResponse.ok = true
+        ok.requestID = firstFrame.requestID
+        try transport.deliver(event: ok)
+        try await connectResult
+
+        // Post-handshake the public gate opens and the same call
+        // succeeds (driven via the standard request/response dance).
+        #expect(await client.isConnected)
+        await client.disconnect()
+    }
+
+    @Test
+    func publicSendIsRefusedWhileHandshakeIsInFlight() async throws {
+        // Matching coverage for the fire-and-forget `send` path: it
+        // must also gate on `.connected`, not `.handshaking`, so an
+        // attacker or buggy caller cannot smuggle a non-auth frame
+        // past the handshake using the zero-request_id path.
+        let (client, transport) = makeClient()
+        let gate = HandshakeGate()
+        async let connectResult: Void = client.connect(handshake: {
+            await gate.wait()
+            return "handshake-header"
+        })
+
+        while await client.isConnected {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        var stopReq = Catlaser_App_V1_AppRequest()
+        stopReq.stopSession = Catlaser_App_V1_StopSessionRequest()
+        do {
+            try await client.send(stopReq)
+            Issue.record("expected .notConnected on send during handshake")
+        } catch let error as DeviceClientError {
+            #expect(error == .notConnected)
+        }
+
+        await gate.release()
+        let first = try await transport.nextAppRequest(timeout: 2.0)
+        if case .auth = first.request {
+            // correct
+        } else {
+            Issue.record("first frame after unblock was not AuthRequest")
+        }
+        var ok = Catlaser_App_V1_DeviceEvent()
+        ok.authResponse = Catlaser_App_V1_AuthResponse()
+        ok.authResponse.ok = true
+        ok.requestID = first.requestID
+        try transport.deliver(event: ok)
+        try await connectResult
+
+        await client.disconnect()
+    }
+
+    @Test
+    func connectReachesConnectedOnlyAfterSuccessfulHandshake() async throws {
+        // Regression guard: `isConnected` must be false during
+        // `.handshaking` and true only after the AuthResponse(ok=true)
+        // lands. A prior implementation flipped the flag to true
+        // before the handshake and relied on composition discipline
+        // to keep callers out — the type system now enforces it.
+        let (client, transport) = makeClient()
+        async let connectResult: Void = client.connect(handshake: { "header" })
+
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+        #expect(await client.isConnected == false,
+                "isConnected must remain false during .handshaking")
+
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = true
+        reply.requestID = auth.requestID
+        try transport.deliver(event: reply)
+        try await connectResult
+
+        #expect(await client.isConnected)
+        await client.disconnect()
+    }
+
+    @Test
+    func handshakeRejectionClosesClientWithoutFlippingToConnected() async throws {
+        // A rejected handshake (ok=false) must surface the typed
+        // `handshakeFailed(reason:)` error and leave the client in a
+        // terminal state — it must never transition to `.connected`.
+        let (client, transport) = makeClient()
+        async let connectResult: Void = client.connect(handshake: { "header" })
+
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = false
+        reply.authResponse.reason = "DEVICE_AUTH_NOT_AUTHORIZED"
+        reply.requestID = auth.requestID
+        try transport.deliver(event: reply)
+
+        do {
+            try await connectResult
+            Issue.record("expected handshake rejection to throw")
+        } catch let error as DeviceClientError {
+            if case let .handshakeFailed(reason) = error {
+                #expect(reason == "DEVICE_AUTH_NOT_AUTHORIZED")
+            } else {
+                Issue.record("expected .handshakeFailed, got \(error)")
+            }
+        }
+
+        // The client is terminal; isConnected must be false and any
+        // further send attempt must be refused.
+        #expect(await client.isConnected == false)
+        var req = Catlaser_App_V1_AppRequest()
+        req.getStatus = Catlaser_App_V1_GetStatusRequest()
+        do {
+            _ = try await client.request(req)
+            Issue.record("expected post-rejection request to throw")
+        } catch let error as DeviceClientError {
+            #expect(error == .notConnected)
+        }
+    }
+}
+
+/// Test-only gate used to stall a handshake builder until the test
+/// explicitly releases it. Mirrors the role of a real
+/// `DeviceAttestationProviding` that could take a non-trivial time
+/// to produce a signed header, giving us a controlled window in
+/// which to exercise the `.handshaking` state.
+private actor HandshakeGate {
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            waiters.append(c)
+        }
+    }
+
+    func release() {
+        released = true
+        let snap = waiters
+        waiters.removeAll()
+        for c in snap { c.resume() }
     }
 }

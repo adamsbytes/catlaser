@@ -58,6 +58,15 @@ public enum PairingStrings {
             return invalidCodeMessage(reason)
         case .missingSession:
             return "You're signed out. Sign back in to pair a Catlaser."
+        case let .sessionExpired(message):
+            // Distinct from `.missingSession`: the user has a stored
+            // session but the server rejected it. The remediation is a
+            // fresh sign-in — the pairing itself is intact and the UI
+            // must not imply the Catlaser has been un-paired.
+            if let message, !message.isEmpty {
+                return "Your sign-in session ended. Sign in again to continue. (\(message))"
+            }
+            return "Your sign-in session ended. Sign in again to continue."
         case .codeAlreadyUsed:
             return "This pairing code has already been used. Generate a new QR on the Catlaser and try again."
         case .codeExpired:
