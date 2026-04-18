@@ -130,7 +130,7 @@ const bindingWireBytes = (parsed: ParsedAttestation): Uint8Array => {
     case 'verify':
       return utf8Encoder.encode(`ver:${binding.token}`);
     case 'social':
-      return utf8Encoder.encode(`sis:${binding.rawNonce}`);
+      return utf8Encoder.encode(`sis:${binding.timestamp.toString()}:${binding.rawNonce}`);
     case 'signOut':
       return utf8Encoder.encode(`out:${binding.timestamp.toString()}`);
     case 'api':

@@ -120,6 +120,7 @@ const magicLinkVerBinding = (token: string): AttestationBinding => ({
 
 const socialBinding = (rawNonce: string): AttestationBinding => ({
   tag: 'social',
+  timestamp: currentUnixSeconds(),
   rawNonce,
 });
 
@@ -208,7 +209,7 @@ describe('attestation plugin: structural parse failures return ATTESTATION_INVAL
     const sig = Buffer.from(
       new Uint8Array([0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]),
     ).toString('base64');
-    const inner = `{"bnd":"req:01","fph":"${fph}","pk":"${pk}","sig":"${sig}","v":3}`;
+    const inner = `{"bnd":"req:01","fph":"${fph}","pk":"${pk}","sig":"${sig}","v":4}`;
     const header = Buffer.from(inner, 'utf8').toString('base64');
     const { response, code } = await post(
       MAGIC_LINK_URL,

@@ -5,11 +5,11 @@ import CryptoKit
 import Crypto
 #endif
 
-/// Wire-format attestation attached to magic-link request and verify
-/// calls. Replaces the v1 plaintext-JSON fingerprint header and the v2
+/// Wire-format attestation attached to authenticated server calls.
+/// Replaces the v1 plaintext-JSON fingerprint header and the v2
 /// unbounded-lifetime signature.
 ///
-/// ## Wire format (v3)
+/// ## Wire format (v4)
 ///
 /// Header name: `x-device-attestation`.
 ///
@@ -18,13 +18,32 @@ import Crypto
 ///
 /// ```
 /// {
-///   "bnd": "req:<unix_seconds>" | "ver:<magic_link_token>",
+///   "bnd": "req:<unix_seconds>"
+///        | "ver:<magic_link_token>"
+///        | "sis:<unix_seconds>:<raw_nonce>"
+///        | "out:<unix_seconds>"
+///        | "api:<unix_seconds>",
 ///   "fph": "<base64url-no-pad(sha256(canonical fingerprint JSON), 32 bytes)>",
 ///   "pk":  "<base64(DER SubjectPublicKeyInfo of the client's P-256 public key, 91 bytes)>",
 ///   "sig": "<base64(DER ECDSA-P256-SHA256 signature over fph_raw || bnd_utf8)>",
-///   "v":   3
+///   "v":   4
 /// }
 /// ```
+///
+/// ### Version history
+///
+/// * v4 (current) — adds a signed wall-clock timestamp to the `sis:`
+///   binding. The server enforces the same ±60s skew window on `sis:`
+///   as on `req:`/`out:`/`api:`. Closes the capture-then-replay vector
+///   the v3 nonce-only `sis:` left open: a captured `(body,
+///   attestation)` pair could otherwise be replayed for the full
+///   ID-token lifetime (~10 min on Apple, up to an hour on Google)
+///   without the SE private key, since replay is a verbatim resend of
+///   the original bytes. Also introduces the `api:` binding used on
+///   every authenticated API call after sign-in (ADR-006).
+/// * v3 — introduced per-binding tagged freshness; `sis:` carried the
+///   raw nonce only. Retired with v4.
+/// * v2, v1 — pre-attestation wire formats. Permanently retired.
 ///
 /// Outer encoding is standard base64 (with `+`/`/`/padding) — HTTP
 /// headers accept those characters. Inner `fph` is base64url-no-pad for
@@ -38,7 +57,7 @@ import Crypto
 /// forever-valid attestation for that device — an attacker who got a
 /// single `(fph, pk, sig)` triple out of a log store, an eBPF hook on
 /// the unencrypted path, or a briefly-compromised TLS middlebox could
-/// replay it indefinitely. v3 binds each signature to a freshness input:
+/// replay it indefinitely. v3+ binds each signature to a freshness input:
 ///
 /// * On `requestMagicLink`: `bnd = "req:<now_seconds>"`. Server rejects
 ///   skew > ~60s; captured headers expire within a minute.
@@ -47,13 +66,20 @@ import Crypto
 ///   request-time signature cannot satisfy a verify call because the
 ///   signed bytes differ, and a verify-time signature cannot be re-used
 ///   with any other token.
-/// * On `exchangeSocial`: `bnd = "sis:<raw_nonce>"`. The nonce is
-///   single-use, echoed through the identity provider, and
-///   three-way-matched server-side (request body, ID-token claim, `bnd`).
+/// * On `exchangeSocial`: `bnd = "sis:<now_seconds>:<raw_nonce>"`. The
+///   nonce is single-use, echoed through the identity provider, and
+///   three-way-matched server-side (request body, ID-token claim, `bnd`
+///   raw nonce). The timestamp adds the ±60s skew window so that a
+///   captured `(body, attestation)` pair cannot be replayed past that
+///   bound even within the provider ID-token's validity period.
 /// * On `signOut`: `bnd = "out:<now_seconds>"`. Same skew contract as
 ///   the request-time binding; the distinct tag means a captured
 ///   `req:<ts>` header cannot be replayed against the sign-out
 ///   endpoint, and vice versa.
+/// * On every authenticated API call after sign-in: `bnd =
+///   "api:<now_seconds>"`. Same skew contract; server verifies the
+///   signature under the pk captured at sign-in so a leaked bearer
+///   alone cannot act.
 ///
 /// The tagged prefix also prevents cross-context confusion in which a
 /// client or server strips the prefix before parsing — the raw bytes fed
@@ -61,16 +87,19 @@ import Crypto
 ///
 /// ## Server verification
 ///
-/// For BOTH request and verify endpoints:
+/// On every attestation-bearing endpoint:
 ///
-/// 1. Parse the header; reject if `v != 3`.
+/// 1. Parse the header; reject if `v != 4`.
 /// 2. base64-decode `pk`; assert length == 91 and the first 26 bytes
 ///    match the P-256 SPKI prefix (`DeviceIdentity.ecP256SPKIPrefix`).
 /// 3. base64url-decode `fph`; assert length == 32.
-/// 4. Parse `bnd`. On `requestMagicLink`, require the `"req:"` tag and a
-///    positive Int64 timestamp within the skew window. On
-///    `completeMagicLink`, require the `"ver:"` tag and byte-equality
-///    against the magic-link token parsed from the URL.
+/// 4. Parse `bnd`. The tag must match the endpoint (`req:` on
+///    `requestMagicLink`, `ver:` on `completeMagicLink`, `sis:` on
+///    `exchangeSocial`, `out:` on `signOut`, `api:` on every
+///    authenticated API call). Payload validation is per-tag: timestamps
+///    must be positive Int64s inside the ±60s skew window; `ver:` token
+///    must byte-equal the token parsed from the magic-link URL; `sis:`
+///    raw nonce must byte-equal `body.idToken.nonce`.
 /// 5. Reconstruct the signed message as `fph_raw_32_bytes || bnd_utf8`
 ///    and verify `sig` over it using the public key from `pk`. Reject on
 ///    verify failure.
@@ -88,6 +117,11 @@ import Crypto
 /// stored-`pk` comparison binds the verify call to the exact Secure
 /// Enclave that requested the link.
 ///
+/// On **protected-route** (`api:`) calls the verify path uses the pk
+/// captured against the session at sign-in instead of the pk on the
+/// wire, so a captured bearer paired with a fresh attestation signed
+/// by any other key cannot satisfy the signature check.
+///
 /// ## What is NOT on the wire
 ///
 /// `platform`, `model`, `systemName`, `osVersion`, `locale`, `timezone`,
@@ -95,7 +129,7 @@ import Crypto
 /// into the 32-byte `fph` hash. Server-side observability tools that
 /// capture request headers cannot derive them.
 public struct DeviceAttestation: Sendable, Equatable {
-    public static let currentVersion: Int = 3
+    public static let currentVersion: Int = 4
 
     public let version: Int
     public let fingerprintHash: Data

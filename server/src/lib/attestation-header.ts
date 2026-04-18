@@ -14,7 +14,7 @@ import { decodeAttestationBinding } from '~/lib/attestation-binding.ts';
  *   "fph": "<base64url-no-pad(sha256(canonical fingerprint JSON), 32 bytes)>",
  *   "pk":  "<base64(DER SubjectPublicKeyInfo of the client's P-256 public key)>",
  *   "sig": "<base64(DER ECDSA-P256-SHA256 signature over fph_raw || bnd_utf8)>",
- *   "v":   3
+ *   "v":   4
  * })))
  * ```
  *
@@ -28,7 +28,7 @@ import { decodeAttestationBinding } from '~/lib/attestation-binding.ts';
  * - Outer value is valid standard base64.
  * - Inner payload is a JSON object with exactly the five required keys, each
  *   of the expected type.
- * - `v === 3`.
+ * - `v === 4`.
  * - `fph` decodes via base64url-no-pad to exactly 32 bytes (SHA-256 digest).
  * - `pk` decodes via standard base64 to a non-empty byte sequence.
  * - `sig` decodes via standard base64 to a non-empty byte sequence.
@@ -44,8 +44,23 @@ import { decodeAttestationBinding } from '~/lib/attestation-binding.ts';
  */
 export const MAX_HEADER_VALUE_BYTES = 2048;
 
-/** Current wire-format version. Clients at `v != 3` are rejected outright. */
-export const ATTESTATION_VERSION = 3;
+/**
+ * Current wire-format version. Clients at `v != 4` are rejected outright.
+ *
+ * Version history:
+ *
+ * - v4 (current) — adds a signed timestamp to the `sis:` binding, rendered as
+ *   `sis:<unix_seconds>:<raw_nonce>`. The attestation plugin enforces the same
+ *   ±60s skew window on `sis:` that it does on `req:`/`out:`/`api:`, closing
+ *   the capture-then-replay vector the v3 nonce-only format left open (an
+ *   attacker who captured a complete v3 `(body, attestation)` pair could
+ *   replay it for the full Apple/Google ID-token lifetime — roughly 10
+ *   minutes for Apple, up to an hour for Google).
+ * - v3 — introduced per-binding tagged freshness; `sis:` carried the raw
+ *   nonce only (no timestamp). Retired with v4.
+ * - v2, v1 — pre-attestation wire formats. Permanently retired.
+ */
+export const ATTESTATION_VERSION = 4;
 
 /** SHA-256 digests are exactly 32 bytes. Hard-enforced. */
 export const FINGERPRINT_HASH_BYTES = 32;
@@ -193,7 +208,7 @@ const bindingWireValue = (binding: AttestationBinding): string => {
     case 'verify':
       return `ver:${binding.token}`;
     case 'social':
-      return `sis:${binding.rawNonce}`;
+      return `sis:${binding.timestamp.toString()}:${binding.rawNonce}`;
     case 'signOut':
       return `out:${binding.timestamp.toString()}`;
     case 'api':

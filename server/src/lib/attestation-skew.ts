@@ -1,6 +1,6 @@
 /**
- * Timestamp-skew enforcement for the `req:` / `out:` / `api:` attestation
- * bindings.
+ * Timestamp-skew enforcement for the `req:` / `sis:` / `out:` / `api:`
+ * attestation bindings.
  *
  * The crypto floor (header parse, SPKI validation, per-tag binding match,
  * ECDSA verify) deliberately does not enforce freshness on the timestamped

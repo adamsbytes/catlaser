@@ -317,7 +317,11 @@ describe('protected-route middleware: gate enforcement', () => {
   });
 
   test('valid bearer + sis: binding → 401 ATTESTATION_BINDING_MISMATCH', async () => {
-    const header = headerWithBinding({ tag: 'social', rawNonce: 'arbitrary-nonce' });
+    const header = headerWithBinding({
+      tag: 'social',
+      timestamp: fixedNow,
+      rawNonce: 'arbitrary-nonce',
+    });
     const { response, body } = await call({
       Authorization: `Bearer ${fixture.bearer}`,
       [ATTESTATION_HEADER_NAME]: header,

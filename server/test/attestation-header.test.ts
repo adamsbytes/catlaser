@@ -41,6 +41,7 @@ const captureHeaderError = (fn: () => unknown): AttestationHeaderParseError => {
 
 const wellFormedBinding: AttestationBinding = {
   tag: 'social',
+  timestamp: 1_734_489_600n,
   rawNonce: 'the-raw-nonce',
 };
 
@@ -81,8 +82,9 @@ describe('attestation header: round trip', () => {
     const bindings: readonly AttestationBinding[] = [
       { tag: 'request', timestamp: 1_734_489_600n },
       { tag: 'verify', token: 'magic-link-token-value' },
-      { tag: 'social', rawNonce: 'a-raw-nonce' },
+      { tag: 'social', timestamp: 1_734_489_600n, rawNonce: 'a-raw-nonce' },
       { tag: 'signOut', timestamp: 1n },
+      { tag: 'api', timestamp: 1_734_489_600n },
     ];
     for (const binding of bindings) {
       const header = encodeAttestationHeader({ ...wellFormedAttestation, binding });
@@ -141,19 +143,19 @@ describe('attestation header: inner payload shape', () => {
 
   test('inner JSON with unexpected keys rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"AAAA","pk":"AAAA","sig":"AAAA","v":3,"extra":true}`,
+      `{"bnd":"sis:1:x","fph":"AAAA","pk":"AAAA","sig":"AAAA","v":4,"extra":true}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_PAYLOAD_SHAPE');
   });
 
   test.each([
-    ['bnd as number', `{"bnd":1,"fph":"X","pk":"X","sig":"X","v":3}`],
-    ['fph as number', `{"bnd":"sis:x","fph":1,"pk":"X","sig":"X","v":3}`],
-    ['pk as null', `{"bnd":"sis:x","fph":"X","pk":null,"sig":"X","v":3}`],
-    ['sig as boolean', `{"bnd":"sis:x","fph":"X","pk":"X","sig":true,"v":3}`],
-    ['v as string', `{"bnd":"sis:x","fph":"X","pk":"X","sig":"X","v":"3"}`],
-    ['v as float', `{"bnd":"sis:x","fph":"X","pk":"X","sig":"X","v":3.5}`],
+    ['bnd as number', `{"bnd":1,"fph":"X","pk":"X","sig":"X","v":4}`],
+    ['fph as number', `{"bnd":"sis:1:x","fph":1,"pk":"X","sig":"X","v":4}`],
+    ['pk as null', `{"bnd":"sis:1:x","fph":"X","pk":null,"sig":"X","v":4}`],
+    ['sig as boolean', `{"bnd":"sis:1:x","fph":"X","pk":"X","sig":true,"v":4}`],
+    ['v as string', `{"bnd":"sis:1:x","fph":"X","pk":"X","sig":"X","v":"4"}`],
+    ['v as float', `{"bnd":"sis:1:x","fph":"X","pk":"X","sig":"X","v":4.5}`],
   ])('%s rejects with ATTESTATION_PAYLOAD_SHAPE', (_label, inner) => {
     const header = wrapInnerAsBase64(inner);
     const err = captureHeaderError(() => decodeAttestationHeader(header));
@@ -176,9 +178,22 @@ describe('attestation header: inner payload shape', () => {
 });
 
 describe('attestation header: version gate', () => {
-  test('v !== 3 rejects with ATTESTATION_VERSION_MISMATCH', () => {
+  test('v !== 4 rejects with ATTESTATION_VERSION_MISMATCH', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":2}`,
+      `{"bnd":"sis:1:x","fph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":2}`,
+    );
+    const err = captureHeaderError(() => decodeAttestationHeader(header));
+    expect(err.code).toBe('ATTESTATION_VERSION_MISMATCH');
+  });
+
+  test('v === 3 (retired nonce-only social binding) rejects', () => {
+    // v3 is the immediate predecessor version whose `sis:` binding carried
+    // only the raw nonce with no timestamp. A v3 client reaching a v4
+    // server would silently mismatch the skew contract, so the version
+    // gate must refuse v3 outright rather than let a malformed `sis:`
+    // parse into the new shape.
+    const header = wrapInnerAsBase64(
+      `{"bnd":"sis:x","fph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_VERSION_MISMATCH');
@@ -186,7 +201,7 @@ describe('attestation header: version gate', () => {
 
   test('v === 1 (pre-attestation wire format) rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":1}`,
+      `{"bnd":"sis:1:x","fph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":1}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_VERSION_MISMATCH');
@@ -197,7 +212,7 @@ describe('attestation header: fph byte length', () => {
   test('fph that decodes to fewer than 32 bytes rejects', () => {
     const shortFph = base64UrlNoPad(new Uint8Array(31).fill(0xaa));
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${shortFph}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${shortFph}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_FPH_INVALID');
@@ -206,7 +221,7 @@ describe('attestation header: fph byte length', () => {
   test('fph that decodes to more than 32 bytes rejects', () => {
     const longFph = base64UrlNoPad(new Uint8Array(33).fill(0xaa));
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${longFph}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${longFph}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_FPH_INVALID');
@@ -214,7 +229,7 @@ describe('attestation header: fph byte length', () => {
 
   test('fph with invalid base64url character rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"!!","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"!!","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_FPH_INVALID');
@@ -222,7 +237,7 @@ describe('attestation header: fph byte length', () => {
 
   test('fph with a length 1 mod 4 rejects (base64url cannot terminate there)', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"A","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"A","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_FPH_INVALID');
@@ -231,7 +246,7 @@ describe('attestation header: fph byte length', () => {
   test('fph that contains traditional base64 characters rejects', () => {
     // '+' and '/' are not in the base64url alphabet — must be '-' and '_'.
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"ab+/","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"ab+/","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_FPH_INVALID');
@@ -242,7 +257,7 @@ describe('attestation header: pk byte length', () => {
   test('pk under the minimum rejects', () => {
     const shortPk = filler(MIN_PUBLIC_KEY_BYTES - 1);
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${validFph()}","pk":"${shortPk}","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${validFph()}","pk":"${shortPk}","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_PK_INVALID');
@@ -250,7 +265,7 @@ describe('attestation header: pk byte length', () => {
 
   test('pk with malformed base64 rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${validFph()}","pk":"A!!A","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${validFph()}","pk":"A!!A","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_PK_INVALID');
@@ -258,7 +273,7 @@ describe('attestation header: pk byte length', () => {
 
   test('pk that is empty rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${validFph()}","pk":"","sig":"AAAA","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${validFph()}","pk":"","sig":"AAAA","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_PK_INVALID');
@@ -268,7 +283,7 @@ describe('attestation header: pk byte length', () => {
 describe('attestation header: sig byte length', () => {
   test('sig with malformed base64 rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"A!!A","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"A!!A","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_SIG_INVALID');
@@ -276,7 +291,7 @@ describe('attestation header: sig byte length', () => {
 
   test('sig that is empty rejects', () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"sis:x","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"","v":3}`,
+      `{"bnd":"sis:1:x","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"","v":4}`,
     );
     const err = captureHeaderError(() => decodeAttestationHeader(header));
     expect(err.code).toBe('ATTESTATION_SIG_INVALID');
@@ -286,7 +301,7 @@ describe('attestation header: sig byte length', () => {
 describe('attestation header: binding failure propagates AttestationParseError', () => {
   test("an unknown tag inside 'bnd' surfaces as AttestationParseError", () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"xyz:1","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"xyz:1","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     let caught: unknown;
     try {
@@ -303,7 +318,7 @@ describe('attestation header: binding failure propagates AttestationParseError',
 
   test("a malformed timestamp inside 'bnd' surfaces as AttestationParseError", () => {
     const header = wrapInnerAsBase64(
-      `{"bnd":"req:01","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":3}`,
+      `{"bnd":"req:01","fph":"${validFph()}","pk":"${filler(MIN_PUBLIC_KEY_BYTES)}","sig":"AAAA","v":4}`,
     );
     let caught: unknown;
     try {

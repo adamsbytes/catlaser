@@ -82,6 +82,30 @@ const buildHeader = (opts: HeaderOpts): string =>
     ...opts,
   });
 
+/**
+ * Current wall-clock second as a `bigint`. The social-providers tests
+ * never install a frozen clock on `createAuth`, so `sis:` timestamps
+ * must sit inside the default ±60s skew window to pass the attestation
+ * plugin's freshness enforcement (the v4 contract). A helper keeps the
+ * intent obvious at every call site — any test that wants to exercise
+ * skew failure specifically should build its own out-of-window
+ * timestamp rather than rely on implicit drift here.
+ */
+const freshSocialTimestamp = (): bigint => BigInt(Math.floor(Date.now() / 1000));
+
+/**
+ * Convenience factory for a `social` binding at the current wall clock.
+ * Most tests in this file want "whatever timestamp the plugin will
+ * happily accept right now"; this helper keeps the binding literal
+ * short at those call sites and leaves the explicit timestamp visible
+ * for tests that assert skew behaviour directly.
+ */
+const socialBindingNow = (rawNonce: string): AttestationBinding => ({
+  tag: 'social',
+  timestamp: freshSocialTimestamp(),
+  rawNonce,
+});
+
 interface SendOpts {
   readonly headers?: Record<string, string>;
   readonly body: unknown;
@@ -145,7 +169,7 @@ describe('sign-in/social: attestation structural failure', () => {
 
   test('v != 3 returns 401 ATTESTATION_INVALID', async () => {
     const header = buildHeader({
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: socialBindingNow('raw'),
       overrideVersion: 2,
     });
     const { response, body } = await postSocial({
@@ -168,7 +192,7 @@ describe('sign-in/social: attestation structural failure', () => {
       .replaceAll('=', '');
     const pk = Buffer.from(device.publicKeySPKI).toString('base64');
     const sig = Buffer.from(new Uint8Array([0x01])).toString('base64');
-    const inner = `{"bnd":"req:01","fph":"${fph}","pk":"${pk}","sig":"${sig}","v":3}`;
+    const inner = `{"bnd":"req:01","fph":"${fph}","pk":"${pk}","sig":"${sig}","v":4}`;
     const header = Buffer.from(inner, 'utf8').toString('base64');
     const { response, body } = await postSocial({
       headers: { [ATTESTATION_HEADER_NAME]: header },
@@ -224,7 +248,7 @@ describe('sign-in/social: binding mismatch', () => {
 describe('sign-in/social: nonce three-way match', () => {
   test('missing body.idToken.nonce returns 401 ID_TOKEN_NONCE_REQUIRED', async () => {
     const header = buildHeader({
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: socialBindingNow('raw'),
     });
     const { response, body } = await postSocial({
       headers: { [ATTESTATION_HEADER_NAME]: header },
@@ -237,7 +261,7 @@ describe('sign-in/social: nonce three-way match', () => {
 
   test('empty body.idToken.nonce returns 401 ID_TOKEN_NONCE_REQUIRED', async () => {
     const header = buildHeader({
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: socialBindingNow('raw'),
     });
     const { response, body } = await postSocial({
       headers: { [ATTESTATION_HEADER_NAME]: header },
@@ -250,7 +274,7 @@ describe('sign-in/social: nonce three-way match', () => {
 
   test('sis: raw nonce != body.idToken.nonce returns 401 ATTESTATION_NONCE_MISMATCH', async () => {
     const header = buildHeader({
-      binding: { tag: 'social', rawNonce: 'attestation-nonce' },
+      binding: socialBindingNow('attestation-nonce'),
     });
     const { response, body } = await postSocial({
       headers: { [ATTESTATION_HEADER_NAME]: header },
@@ -266,7 +290,7 @@ describe('sign-in/social: nonce three-way match', () => {
 
   test('missing body entirely returns 401 ID_TOKEN_NONCE_REQUIRED after binding + signature ok', async () => {
     const header = buildHeader({
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: socialBindingNow('raw'),
     });
     const auth = createAuth();
     const init: RequestInit = {
@@ -289,7 +313,7 @@ describe('sign-in/social: nonce three-way match', () => {
 
 describe('sign-in/social: attestation crypto enforcement', () => {
   test('tampered signature returns 401 ATTESTATION_SIGNATURE_INVALID', async () => {
-    const valid = buildHeader({ binding: { tag: 'social', rawNonce: 'raw' } });
+    const valid = buildHeader({ binding: socialBindingNow('raw') });
     // Mutate a byte near the signature inside the payload without touching
     // the outer envelope. The quickest way to produce a well-formed envelope
     // with a bad signature is to rebuild the header using a different device
@@ -297,7 +321,7 @@ describe('sign-in/social: attestation crypto enforcement', () => {
     const impostor = createTestDeviceKey();
     const tampered = buildSignedAttestationHeader({
       deviceKey: impostor,
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: socialBindingNow('raw'),
       overridePublicKeySPKI: device.publicKeySPKI,
     });
     expect(tampered).not.toBe(valid);
@@ -312,7 +336,7 @@ describe('sign-in/social: attestation crypto enforcement', () => {
 
   test('malformed SPKI returns 401 ATTESTATION_SPKI_INVALID', async () => {
     const header = buildHeader({
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: socialBindingNow('raw'),
       overridePublicKeySPKI: new Uint8Array(30),
     });
     const { response, body } = await postSocial({
@@ -331,7 +355,7 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
     // request then reaches better-auth, which rejects an unregistered
     // provider with NOT_FOUND / PROVIDER_NOT_FOUND. This proves the plugin's
     // happy path lets the request through rather than short-circuiting.
-    const header = buildHeader({ binding: { tag: 'social', rawNonce: 'raw' } });
+    const header = buildHeader({ binding: socialBindingNow('raw') });
     const { response, body } = await postSocial({
       headers: { [ATTESTATION_HEADER_NAME]: header },
       body: {
@@ -353,7 +377,7 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
     // Plugin passes; better-auth invokes our Apple verifier; verifier fails
     // because the token is not a real JWT. Response is 401 but NOT one of
     // the attestation codes.
-    const header = buildHeader({ binding: { tag: 'social', rawNonce: 'raw' } });
+    const header = buildHeader({ binding: socialBindingNow('raw') });
     const { response, body } = await postSocial({
       headers: { [ATTESTATION_HEADER_NAME]: header },
       body: {
@@ -393,7 +417,7 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
     // All three agree → better-auth issues a session.
     const rawNonce = 'e2e-nonce-01';
     const token = await signAppleToken(rawNonce);
-    const header = buildHeader({ binding: { tag: 'social', rawNonce } });
+    const header = buildHeader({ binding: socialBindingNow(rawNonce) });
     const auth = createAuth(buildAppleJWKSOverride());
     const init: RequestInit = {
       method: 'POST',
@@ -435,7 +459,7 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
       .setAudience(env.APPLE_APP_BUNDLE_IDENTIFIER)
       .setSubject('apple-user-456')
       .sign(appleFixture.privateKey);
-    const header = buildHeader({ binding: { tag: 'social', rawNonce } });
+    const header = buildHeader({ binding: socialBindingNow(rawNonce) });
     const auth = createAuth(buildAppleJWKSOverride());
     const init: RequestInit = {
       method: 'POST',

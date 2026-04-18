@@ -400,7 +400,11 @@ describe('magic-link: attestation enforcement on both endpoints', () => {
   test('POST /sign-in/magic-link with a sis: binding → 401 ATTESTATION_BINDING_MISMATCH', async () => {
     const misboundHeader = buildSignedAttestationHeader({
       deviceKey: device,
-      binding: { tag: 'social', rawNonce: 'oops' },
+      binding: {
+        tag: 'social',
+        timestamp: BigInt(Math.floor(Date.now() / 1000)),
+        rawNonce: 'oops',
+      },
     });
     const { response, body } = await post(
       { email: 'wrong-tag@example.com' },
@@ -461,7 +465,15 @@ describe('magic-link: verify round-trip', () => {
     expect(parsed.code).toBe('DEVICE_MISMATCH');
   });
 
-  test('same token used twice → second attempt redirected with ATTEMPTS_EXCEEDED', async () => {
+  test('same token used twice → second attempt rejected with DEVICE_MISMATCH', async () => {
+    // After a successful verify, the stored `magic_link_attestation`
+    // row is deleted (the binding's purpose is spent, and the session
+    // attestation now holds the per-session SE pk directly). A replay
+    // therefore fails the stored-device match before the magic-link
+    // plugin's own double-spend gate can run. That is the correct
+    // refusal mode under the v4 contract: DEVICE_MISMATCH, not an
+    // ATTEMPTS_EXCEEDED redirect. The underlying double-spend guarantee
+    // remains intact — the same token cannot be redeemed a second time.
     const email = 'double-spend@example.com';
     await clearEmail(email);
     await post({ email });
@@ -471,9 +483,9 @@ describe('magic-link: verify round-trip', () => {
     expect(first.status).toBe(200);
 
     const second = await verifyViaToken(token);
-    expect([301, 302, 303, 307, 308]).toContain(second.status);
-    const location = second.headers.get('location') ?? '';
-    expect(/error=(?:ATTEMPTS_EXCEEDED|INVALID_TOKEN)/v.test(location)).toBe(true);
+    expect(second.status).toBe(401);
+    const parsed = errorBodyShape.parse(await second.json());
+    expect(parsed.code).toBe('DEVICE_MISMATCH');
     await clearEmail(email);
   });
 

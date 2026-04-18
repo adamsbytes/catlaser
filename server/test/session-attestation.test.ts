@@ -228,7 +228,11 @@ describe('session attestation: captured at /sign-in/social', () => {
     const token = await signAppleToken(rawNonce, email);
     const header = buildSignedAttestationHeader({
       deviceKey: device,
-      binding: { tag: 'social', rawNonce },
+      binding: {
+        tag: 'social',
+        timestamp: BigInt(Math.floor(Date.now() / 1000)),
+        rawNonce,
+      },
     });
 
     const response = await auth.handler(

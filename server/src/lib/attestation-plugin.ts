@@ -12,13 +12,17 @@ import {
   enforceTimestampSkew,
 } from '~/lib/attestation-skew.ts';
 import { AttestationVerifyError, verifyAttestationSignature } from '~/lib/attestation-verify.ts';
-import { deriveTokenIdentifier, lookupMagicLinkAttestation } from '~/lib/magic-link-attestation.ts';
+import {
+  deleteMagicLinkAttestation,
+  deriveTokenIdentifier,
+  lookupMagicLinkAttestation,
+} from '~/lib/magic-link-attestation.ts';
 import { storeSessionAttestation } from '~/lib/session-attestation.ts';
 
 /**
  * Device-attestation plugin.
  *
- * Gates every attestation-carrying auth endpoint with the v3 wire
+ * Gates every attestation-carrying auth endpoint with the v4 wire
  * contract described in ADR-006:
  *
  * - `POST /sign-in/magic-link`   — binding tag `req:<unix_seconds>`,
@@ -31,14 +35,28 @@ import { storeSessionAttestation } from '~/lib/session-attestation.ts';
  *                                  into the freshly-minted session's
  *                                  `session_attestation` row so every
  *                                  protected `api:` call that follows
- *                                  verifies under that exact key.
- * - `POST /sign-in/social`       — binding tag `sis:<raw_nonce>`, plus
- *                                  a three-way match between the
- *                                  binding, the request body's
+ *                                  verifies under that exact key, and
+ *                                  the consumed `magic_link_attestation`
+ *                                  row is deleted so the per-token
+ *                                  binding cannot outlive its purpose.
+ * - `POST /sign-in/social`       — binding tag
+ *                                  `sis:<unix_seconds>:<raw_nonce>`,
+ *                                  ±60s skew enforced, plus a three-way
+ *                                  match between the binding's raw
+ *                                  nonce, the request body's
  *                                  `idToken.nonce`, and the provider's
  *                                  own ID-token `nonce` claim (the
  *                                  third leg is enforced by the Apple /
- *                                  Google verifier configuration). On
+ *                                  Google verifier configuration). The
+ *                                  timestamp pins the replay window to
+ *                                  ±60s — a captured `(body,
+ *                                  attestation)` pair cannot be
+ *                                  resubmitted once the window elapses,
+ *                                  which closes the capture-then-replay
+ *                                  vector the v3 nonce-only binding
+ *                                  left open (the ID token's `exp`
+ *                                  alone was ~10 minutes wide for Apple
+ *                                  and up to an hour for Google). On
  *                                  success, the attestation pk is
  *                                  captured against the new session in
  *                                  `session_attestation`, same as the
@@ -60,7 +78,7 @@ import { storeSessionAttestation } from '~/lib/session-attestation.ts';
  * 5. For `/sign-in/social` only: the `sis:` nonce must byte-equal
  *    `body.idToken.nonce` (`ATTESTATION_NONCE_MISMATCH` /
  *    `ID_TOKEN_NONCE_REQUIRED`).
- * 6. For timestamped bindings (`req:`, `out:`, and `api:` on
+ * 6. For timestamped bindings (`req:`, `sis:`, `out:`, and `api:` on
  *    protected routes): enforce ±60s skew against the server clock
  *    (`ATTESTATION_SKEW_EXCEEDED`).
  * 7. For `ver:` only: look up the `(fph, pk)` captured at
@@ -138,7 +156,7 @@ const PATH_SPECS: ReadonlyMap<string, PathSpec> = new Map<string, PathSpec>([
     {
       expectedTag: 'social',
       requiresBodyNonceMatch: true,
-      enforcesSkew: false,
+      enforcesSkew: true,
       enforcesStoredDeviceMatch: false,
     },
   ],
@@ -265,9 +283,13 @@ const assertBodyNonceMatches = (parsed: ParsedAttestation, body: unknown): void 
 };
 
 /**
- * Resolve the signed timestamp carried by a timestamped binding. Only
- * `req:`, `out:`, and `api:` bindings carry timestamps; `ver:` and `sis:`
- * do not. Returns `undefined` for the non-timestamped arms so callers
+ * Resolve the signed timestamp carried by a timestamped binding. All
+ * bindings except `ver:` carry a timestamp — `req:`, `sis:`, `out:`,
+ * and `api:` each sign a wall-clock second into their `bnd` so the
+ * server can enforce the ±60s skew window. `ver:` binds to the
+ * server-issued magic-link token (itself single-use and 5-minute
+ * expiring), which plays the same freshness role without needing a
+ * client-signed timestamp. Returns `undefined` for `ver:` so callers
  * can treat "this binding cannot be skew-checked" as a no-op without a
  * type cast.
  */
@@ -275,11 +297,11 @@ const bindingTimestamp = (parsed: ParsedAttestation): bigint | undefined => {
   const { binding } = parsed;
   switch (binding.tag) {
     case 'request':
+    case 'social':
     case 'signOut':
     case 'api':
       return binding.timestamp;
     case 'verify':
-    case 'social':
       return undefined;
     default: {
       const exhaustive: never = binding;
@@ -427,6 +449,61 @@ const SESSION_CAPTURE_PATHS: ReadonlySet<string> = new Set([
  * attestation rows would 401 every protected call afterwards, which is
  * a worse failure mode than an explicit 500 here.
  */
+/**
+ * Re-parse the attestation header inside the after-hook. The before-hook
+ * already validated it but does not pass the parsed object down; a
+ * re-parse here is cheap. A re-parse failure at this stage would mean
+ * the hook pipeline regressed (the before-hook accepted a payload it
+ * should have rejected, or the header mutated between hooks); that is
+ * an invariant violation the server must refuse the sign-in over rather
+ * than silently skip. Missing attestation rows would 401 every
+ * protected call afterwards, which is a worse failure mode than an
+ * explicit 500 here.
+ */
+const reparseHeaderOrThrow = (path: string, headerValue: string): ParsedAttestation => {
+  try {
+    return decodeAttestationHeader(headerValue);
+  } catch (error) {
+    if (error instanceof AttestationHeaderParseError || error instanceof AttestationParseError) {
+      throw new Error(
+        `${path} re-parse of '${ATTESTATION_HEADER_NAME}' failed (${error.code}: ${error.message}) — the before-hook should have rejected this upstream`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+};
+
+/**
+ * Delete the `magic_link_attestation` row that backed a just-completed
+ * verify. The stored `(fph, pk)` has done its job: the session was
+ * minted, `session_attestation` now holds the per-session SE pubkey,
+ * and the verification row itself was consumed by the magic-link plugin
+ * (`allowedAttempts: 1`). Dropping the per-token row as soon as the
+ * sign-in completes prevents a future plugin regression from relying on
+ * stored fph/pk as a fallback gate and bounds the row's lifetime to the
+ * actually-useful window rather than the natural 5-minute TTL.
+ *
+ * Best-effort: a delete failure here does not undo the successful
+ * verify — the row expires naturally within the token lifetime and the
+ * plugin's `allowedAttempts: 1` already blocks replay — so storage
+ * errors are swallowed. Propagating would surface as 500 to the client
+ * even though the sign-in has already completed server-side, leaving
+ * the user in a worse state than a stale row.
+ */
+const purgeConsumedMagicLinkAttestation = async (parsed: ParsedAttestation): Promise<void> => {
+  if (parsed.binding.tag !== 'verify') {
+    // Unreachable on the verify path; defensive typing so the switch
+    // stays narrow here.
+    return;
+  }
+  try {
+    await deleteMagicLinkAttestation(deriveTokenIdentifier(parsed.binding.token));
+  } catch {
+    // Swallow: see contract comment above.
+  }
+};
+
 const captureSessionAttestation = async (
   path: string,
   headers: Headers | undefined,
@@ -444,23 +521,15 @@ const captureSessionAttestation = async (
       `${path} reached the attestation after-hook without an '${ATTESTATION_HEADER_NAME}' header — the before-hook should have rejected this request`,
     );
   }
-  let parsed: ParsedAttestation;
-  try {
-    parsed = decodeAttestationHeader(headerValue);
-  } catch (error) {
-    if (error instanceof AttestationHeaderParseError || error instanceof AttestationParseError) {
-      throw new Error(
-        `${path} re-parse of '${ATTESTATION_HEADER_NAME}' failed (${error.code}: ${error.message}) — the before-hook should have rejected this upstream`,
-        { cause: error },
-      );
-    }
-    throw error;
-  }
+  const parsed = reparseHeaderOrThrow(path, headerValue);
   await storeSessionAttestation({
     sessionId: newSession.session.id,
     fingerprintHash: parsed.fingerprintHash,
     publicKeySPKI: parsed.publicKeySPKI,
   });
+  if (path === '/magic-link/verify') {
+    await purgeConsumedMagicLinkAttestation(parsed);
+  }
 };
 
 /**

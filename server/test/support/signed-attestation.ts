@@ -48,7 +48,7 @@ const bindingWireValue = (binding: AttestationBinding): string => {
     case 'verify':
       return `ver:${binding.token}`;
     case 'social':
-      return `sis:${binding.rawNonce}`;
+      return `sis:${binding.timestamp.toString()}:${binding.rawNonce}`;
     case 'signOut':
       return `out:${binding.timestamp.toString()}`;
     case 'api':

@@ -36,12 +36,13 @@ describe('attestation binding: tag routing', () => {
     expect(binding.token).toBe('abc.def.ghi-jkl');
   });
 
-  test('sis: decodes to a social binding with the raw nonce payload', () => {
-    const binding = decodeAttestationBinding('sis:abc123_-');
+  test('sis: decodes to a social binding with the timestamp and raw nonce payload', () => {
+    const binding = decodeAttestationBinding('sis:1734489600:abc123_-');
     expect(binding.tag).toBe('social');
     if (binding.tag !== 'social') {
       throw new Error('narrowing guard');
     }
+    expect(binding.timestamp).toBe(1_734_489_600n);
     expect(binding.rawNonce).toBe('abc123_-');
   });
 
@@ -200,9 +201,45 @@ describe('attestation binding: opaque token/nonce correctness', () => {
     expect(err.code).toBe('ATTESTATION_BND_EMPTY_TOKEN');
   });
 
-  test('empty social raw nonce rejects', () => {
-    const err = captureError(() => decodeAttestationBinding('sis:'));
+  test('empty social raw nonce rejects (timestamp present, nonce empty)', () => {
+    const err = captureError(() => decodeAttestationBinding('sis:1734489600:'));
     expect(err.code).toBe('ATTESTATION_BND_EMPTY_TOKEN');
+  });
+
+  test('sis: binding with no timestamp suffix rejects', () => {
+    // `sis:` with a nonce but no timestamp separator. The parser looks for
+    // the first `:` inside the payload; its absence surfaces as a bad
+    // timestamp so a forgotten-timestamp client regression fails loudly.
+    const err = captureError(() => decodeAttestationBinding('sis:abc123_-'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('sis: binding with an empty timestamp rejects', () => {
+    const err = captureError(() => decodeAttestationBinding('sis::abc123_-'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('sis: binding with a leading-zero timestamp rejects', () => {
+    const err = captureError(() => decodeAttestationBinding('sis:01:abc'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('sis: binding with a non-numeric timestamp rejects', () => {
+    const err = captureError(() => decodeAttestationBinding('sis:notanumber:abc'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('sis: binding with a negative timestamp rejects', () => {
+    const err = captureError(() => decodeAttestationBinding('sis:-1:abc'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('sis: binding rejects a raw `sis:` with no payload at all', () => {
+    // Previously (v3) this was rejected as empty-token. Under v4 it must
+    // surface as missing-timestamp because the leading field is now the
+    // timestamp, not the nonce.
+    const err = captureError(() => decodeAttestationBinding('sis:'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
   });
 
   test.each([
@@ -218,9 +255,11 @@ describe('attestation binding: opaque token/nonce correctness', () => {
     ['verify: U+2028 line separator', 'ver:abc\u2028'],
     ['verify: U+2029 paragraph separator', 'ver:abc\u2029'],
     ['verify: ZWNBSP', 'ver:abc\uFEFF'],
-    ['social: embedded tab', 'sis:abc\tdef'],
-    ['social: embedded newline', 'sis:abc\ndef'],
-    ['social: leading space', 'sis: abc'],
+    ['social: embedded tab in nonce', 'sis:1734489600:abc\tdef'],
+    ['social: embedded newline in nonce', 'sis:1734489600:abc\ndef'],
+    ['social: leading space in nonce', 'sis:1734489600: abc'],
+    ['social: trailing space in nonce', 'sis:1734489600:abc '],
+    ['social: NUL byte in nonce', 'sis:1734489600:abc\u0000'],
   ])('%s rejects', (_label, input) => {
     const err = captureError(() => decodeAttestationBinding(input));
     expect(err.code).toBe('ATTESTATION_BND_CONTROL_CHARS');
@@ -231,36 +270,56 @@ describe('attestation binding: opaque token/nonce correctness', () => {
     // should round-trip through the parser untouched. The iOS client's
     // `rawNonce` is base64url-no-pad in practice, so this path is defence-
     // in-depth — but the parser contract is "any non-control text".
-    const binding = decodeAttestationBinding('sis:naïve-café-猫-🐈');
+    const binding = decodeAttestationBinding('sis:1734489600:naïve-café-猫-🐈');
     if (binding.tag !== 'social') {
       throw new Error('narrowing guard');
     }
+    expect(binding.timestamp).toBe(1_734_489_600n);
     expect(binding.rawNonce).toBe('naïve-café-猫-🐈');
+  });
+
+  test('sis: nonce containing a colon survives by splitting on the first colon', () => {
+    // The parser splits on the FIRST `:` after the `sis:` tag so any
+    // subsequent `:` bytes remain in the rawNonce. Real iOS nonces never
+    // contain a colon (base64url alphabet is `[A-Za-z0-9_-]` per
+    // `NonceGenerator`), so this is only defence-in-depth against a
+    // hypothetical future client that widens the nonce charset — the
+    // server-side parser must not silently lose the tail.
+    const binding = decodeAttestationBinding('sis:1734489600:abc:def:ghi');
+    if (binding.tag !== 'social') {
+      throw new Error('narrowing guard');
+    }
+    expect(binding.timestamp).toBe(1_734_489_600n);
+    expect(binding.rawNonce).toBe('abc:def:ghi');
   });
 });
 
 describe('attestation binding: length cap', () => {
   test('wire value exactly at the cap is accepted', () => {
-    // `sis:` is 4 bytes, so payload can be MAX_BND_WIRE_BYTES - 4 bytes.
-    const payload = 'A'.repeat(MAX_BND_WIRE_BYTES - 4);
-    const binding = decodeAttestationBinding(`sis:${payload}`);
+    // `sis:<ts>:` is 4 + ts.length + 1 bytes (tag + digits + separator).
+    // Using `1` as the timestamp keeps the overhead minimal (6 bytes);
+    // the nonce can therefore grow to MAX_BND_WIRE_BYTES - 6.
+    const prefix = 'sis:1:';
+    const payload = 'A'.repeat(MAX_BND_WIRE_BYTES - prefix.length);
+    const binding = decodeAttestationBinding(`${prefix}${payload}`);
     if (binding.tag !== 'social') {
       throw new Error('narrowing guard');
     }
-    expect(binding.rawNonce.length).toBe(MAX_BND_WIRE_BYTES - 4);
+    expect(binding.rawNonce.length).toBe(MAX_BND_WIRE_BYTES - prefix.length);
   });
 
   test('wire value one byte over the cap rejects', () => {
-    const payload = 'A'.repeat(MAX_BND_WIRE_BYTES - 3);
-    const err = captureError(() => decodeAttestationBinding(`sis:${payload}`));
+    const prefix = 'sis:1:';
+    const payload = 'A'.repeat(MAX_BND_WIRE_BYTES - prefix.length + 1);
+    const err = captureError(() => decodeAttestationBinding(`${prefix}${payload}`));
     expect(err.code).toBe('ATTESTATION_BND_TOO_LARGE');
   });
 
   test('multi-byte UTF-8 still enforces the byte-level cap', () => {
-    // '🐈' is 4 bytes UTF-8. `sis:` prefix is 4 bytes. 256 cats occupy
-    // 4 + 256*4 = 1028 bytes which overshoots 1024.
+    // '🐈' is 4 bytes UTF-8. `sis:1:` prefix is 6 bytes. 256 cats occupy
+    // 6 + 256*4 = 1030 bytes which overshoots 1024.
     const emoji = '🐈'.repeat(256);
-    const err = captureError(() => decodeAttestationBinding(`sis:${emoji}`));
+    const err = captureError(() => decodeAttestationBinding(`sis:1:${emoji}`));
     expect(err.code).toBe('ATTESTATION_BND_TOO_LARGE');
   });
 });

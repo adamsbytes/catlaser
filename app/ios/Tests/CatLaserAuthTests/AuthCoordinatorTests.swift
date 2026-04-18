@@ -161,18 +161,21 @@ struct AuthCoordinatorTests {
 
     @Test
     func appleSignInSendsAttestationHeaderBoundToRawNonce() async throws {
-        // Social sign-in carries a v3 device attestation whose `bnd`
-        // encodes `"sis:<rawNonce>"`. Verify the header is on the wire,
-        // its signed message ties to the same raw nonce we post in the
-        // request body, and the cryptographic pieces (fph/pk) were
-        // produced by the SE identity we handed the provider.
+        // Social sign-in carries a v4 device attestation whose `bnd`
+        // encodes `"sis:<unix_seconds>:<rawNonce>"`. Verify the header
+        // is on the wire, its signed message ties to both the clock
+        // second (matching the coordinator's clock injection) and the
+        // raw nonce we post in the request body, and the cryptographic
+        // pieces (fph/pk) were produced by the SE identity we handed
+        // the provider.
+        let fixedSeconds: Int64 = 1_700_000_000
         let http = MockHTTPClient(outcomes: [
             .response(.json(["user": ["id": "u"]], token: "b")),
         ])
         let client = AuthClient(
             config: try makeConfig(),
             http: http,
-            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
         )
         let apple = MockAppleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
         let identity = SoftwareIdentityStore()
@@ -183,6 +186,7 @@ struct AuthCoordinatorTests {
             appleProvider: apple,
             googleProvider: nil,
             attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
         )
 
         _ = try await coord.signInWithApple(context: makeContext())
@@ -194,8 +198,10 @@ struct AuthCoordinatorTests {
         let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         let idToken = parsed?["idToken"] as? [String: Any]
         let rawNonceInBody = try #require(idToken?["nonce"] as? String)
-        #expect(decoded.binding == .social(rawNonce: rawNonceInBody),
-                "bnd must bind the attestation to the raw nonce echoed in the request body")
+        #expect(
+            decoded.binding == .social(timestamp: fixedSeconds, rawNonce: rawNonceInBody),
+            "bnd must bind the attestation to the current wall-clock second AND to the raw nonce echoed in the request body",
+        )
         #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
         #expect(decoded.fingerprintHash.count == 32)
     }
@@ -272,13 +278,14 @@ struct AuthCoordinatorTests {
 
     @Test
     func googleSignInSendsAttestationHeaderBoundToRawNonce() async throws {
+        let fixedSeconds: Int64 = 1_700_000_000
         let http = MockHTTPClient(outcomes: [
             .response(.json(["user": ["id": "u"]], token: "b")),
         ])
         let client = AuthClient(
             config: try makeConfig(),
             http: http,
-            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
         )
         let google = MockGoogleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
         let identity = SoftwareIdentityStore()
@@ -289,6 +296,7 @@ struct AuthCoordinatorTests {
             appleProvider: nil,
             googleProvider: google,
             attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
         )
 
         _ = try await coord.signInWithGoogle(context: makeContext())
@@ -297,8 +305,10 @@ struct AuthCoordinatorTests {
         let header = try #require(req.header(DeviceAttestationEncoder.headerName))
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
         let rawNonceSent = try #require((await google.receivedNonces).first)
-        #expect(decoded.binding == .social(rawNonce: rawNonceSent),
-                "bnd must bind the attestation to the raw nonce sent to Google")
+        #expect(
+            decoded.binding == .social(timestamp: fixedSeconds, rawNonce: rawNonceSent),
+            "bnd must bind the attestation to the current wall-clock second AND to the raw nonce sent to Google",
+        )
         #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
     }
 
@@ -638,11 +648,16 @@ struct AuthCoordinatorTests {
 
     @Test
     func googleRawNonceDiffersAcrossCalls() async throws {
+        let fixedSeconds: Int64 = 1_700_000_000
         let http = MockHTTPClient(outcomes: [
             .response(.json(["user": ["id": "u"]], token: "b1")),
             .response(.json(["user": ["id": "u"]], token: "b2")),
         ])
-        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
+        )
         let google = MockGoogleProvider(outcomes: [
             .token(ProviderIDToken(token: "idt1", rawNonce: nil, accessToken: nil)),
             .token(ProviderIDToken(token: "idt2", rawNonce: nil, accessToken: nil)),
@@ -656,6 +671,7 @@ struct AuthCoordinatorTests {
             appleProvider: nil,
             googleProvider: google,
             attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
         )
         _ = try await coord.signInWithGoogle(context: makeContext())
         _ = try await coord.signInWithGoogle(context: makeContext())
@@ -678,24 +694,29 @@ struct AuthCoordinatorTests {
         #expect(nonces[0] == received[0])
         #expect(nonces[1] == received[1])
 
-        // Each attestation must bind to its own raw nonce — swapping a
-        // captured first-sign-in header into the second request would
-        // fail server-side because the bnd would not match the nonce in
-        // the body.
+        // Each attestation must bind to its own (timestamp, rawNonce)
+        // pair — swapping a captured first-sign-in header into the
+        // second request would fail server-side because the nonce would
+        // not match the body (even though the timestamp would).
         let bindings = await attestation.bindingCalls
         #expect(bindings == [
-            .social(rawNonce: received[0]),
-            .social(rawNonce: received[1]),
+            .social(timestamp: fixedSeconds, rawNonce: received[0]),
+            .social(timestamp: fixedSeconds, rawNonce: received[1]),
         ])
     }
 
     @Test
     func appleRawNonceDiffersAcrossCalls() async throws {
+        let fixedSeconds: Int64 = 1_700_000_000
         let http = MockHTTPClient(outcomes: [
             .response(.json(["user": ["id": "u"]], token: "b1")),
             .response(.json(["user": ["id": "u"]], token: "b2")),
         ])
-        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
+        )
         let apple = MockAppleProvider(outcomes: [
             .token(ProviderIDToken(token: "idt1")),
             .token(ProviderIDToken(token: "idt2")),
@@ -709,6 +730,7 @@ struct AuthCoordinatorTests {
             appleProvider: apple,
             googleProvider: nil,
             attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: TimeInterval(fixedSeconds)) },
         )
         _ = try await coord.signInWithApple(context: makeContext())
         _ = try await coord.signInWithApple(context: makeContext())
@@ -729,8 +751,72 @@ struct AuthCoordinatorTests {
 
         let bindings = await attestation.bindingCalls
         #expect(bindings == [
-            .social(rawNonce: nonces[0]),
-            .social(rawNonce: nonces[1]),
+            .social(timestamp: fixedSeconds, rawNonce: nonces[0]),
+            .social(timestamp: fixedSeconds, rawNonce: nonces[1]),
         ])
+    }
+
+    @Test
+    func appleSignInRejectsImplausibleClockBeforeBuildingAttestation() async throws {
+        // A device with a broken clock (boots before first NTP sync, RTC
+        // failure, deliberate tamper) must not silently sign a `sis:`
+        // header against a bogus wall-clock second — the server would
+        // either reject for skew (best case) or, if the attacker drove
+        // the clock into the skew window artificially, accept a
+        // replay-friendly timestamp (worst case). The coordinator's
+        // clock-plausibility gate refuses to build the attestation at
+        // all. Mirrors the magic-link path's clock validation.
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let apple = MockAppleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: apple,
+            googleProvider: nil,
+            attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: 0) },
+        )
+        do {
+            _ = try await coord.signInWithApple(context: makeContext())
+            Issue.record("expected attestationFailed for implausible clock")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.lowercased().contains("clock"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil)
+    }
+
+    @Test
+    func googleSignInRejectsImplausibleClockBeforeBuildingAttestation() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let google = MockGoogleProvider(outcomes: [.token(ProviderIDToken(token: "idt"))])
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let store = InMemoryBearerTokenStore()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: google,
+            attestationProvider: attestation,
+            clock: { Date(timeIntervalSince1970: 0) },
+        )
+        do {
+            _ = try await coord.signInWithGoogle(context: makeContext())
+            Issue.record("expected attestationFailed for implausible clock")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.lowercased().contains("clock"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(try await store.load() == nil)
     }
 }

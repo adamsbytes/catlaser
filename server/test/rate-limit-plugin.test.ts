@@ -348,7 +348,11 @@ describe('rate-limit plugin: ordering with the attestation gate', () => {
 
     const misboundHeader = buildSignedAttestationHeader({
       deviceKey: device,
-      binding: { tag: 'social', rawNonce: 'raw' },
+      binding: {
+        tag: 'social',
+        timestamp: BigInt(Math.floor(Date.now() / 1000)),
+        rawNonce: 'raw',
+      },
     });
     const { response, body } = await postSignIn({
       email,

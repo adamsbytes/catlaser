@@ -261,6 +261,109 @@ describe('binding enforcement: out: ±60s skew on /sign-out', () => {
   });
 });
 
+describe('binding enforcement: sis: ±60s skew on /sign-in/social', () => {
+  // Mirrors the `req:` / `out:` skew coverage. The social binding
+  // carries the raw nonce for the three-way match AND a freshness
+  // timestamp; the plugin enforces the same ±60s window as the other
+  // timestamped bindings. The test drives the skew clock with a
+  // deterministic override, posts an otherwise-valid social sign-in,
+  // and asserts ATTESTATION_SKEW_EXCEEDED fires before better-auth's
+  // own provider verification runs. Without this gate, a captured
+  // (body, attestation) pair from a legitimate sign-in could be
+  // resubmitted for the full ID-token validity window (~10 minutes on
+  // Apple, up to an hour on Google), yielding full account takeover.
+  const fixedNow = 1_800_000_000n;
+  const nowSeconds: NowSecondsFn = () => fixedNow;
+  let device: TestDeviceKey;
+  let auth: ReturnType<typeof createAuth>;
+
+  beforeAll(() => {
+    auth = createAuth({ attestationNowSeconds: nowSeconds });
+    device = createTestDeviceKey();
+  });
+
+  const SOCIAL_URL = `http://localhost${AUTH_BASE_PATH}/sign-in/social`;
+
+  const postSocial = async (timestamp: bigint): Promise<Response> => {
+    const rawNonce = `social-skew-${randomBytes(6).toString('hex')}`;
+    const header = buildSignedAttestationHeader({
+      deviceKey: device,
+      binding: { tag: 'social', timestamp, rawNonce },
+    });
+    return await auth.handler(
+      new Request(SOCIAL_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: trustedOrigin,
+          [ATTESTATION_HEADER_NAME]: header,
+          ...uniqueClientIpHeader(),
+        },
+        body: JSON.stringify({
+          provider: 'apple',
+          idToken: { token: 'not-a-real-jwt', nonce: rawNonce },
+        }),
+      }),
+    );
+  };
+
+  test('now accepts — response falls through to provider-level rejection, NOT skew', async () => {
+    // In-window attestation passes the plugin; the garbage JWT body then
+    // gets rejected downstream. The asserted invariant is just that the
+    // response code is NOT the attestation skew code.
+    const response = await postSocial(fixedNow);
+    if (response.status === 401) {
+      expect(await extractCode(response)).not.toBe('ATTESTATION_SKEW_EXCEEDED');
+    }
+  });
+
+  test('now + 60s (inclusive upper bound) accepts the attestation', async () => {
+    const response = await postSocial(fixedNow + ATTESTATION_SKEW_SECONDS);
+    if (response.status === 401) {
+      expect(await extractCode(response)).not.toBe('ATTESTATION_SKEW_EXCEEDED');
+    }
+  });
+
+  test('now - 60s (inclusive lower bound) accepts the attestation', async () => {
+    const response = await postSocial(fixedNow - ATTESTATION_SKEW_SECONDS);
+    if (response.status === 401) {
+      expect(await extractCode(response)).not.toBe('ATTESTATION_SKEW_EXCEEDED');
+    }
+  });
+
+  test('now + 61s rejects with ATTESTATION_SKEW_EXCEEDED before provider verification', async () => {
+    const response = await postSocial(fixedNow + ATTESTATION_SKEW_SECONDS + 1n);
+    expect(response.status).toBe(401);
+    expect(await extractCode(response)).toBe('ATTESTATION_SKEW_EXCEEDED');
+  });
+
+  test('now - 61s rejects with ATTESTATION_SKEW_EXCEEDED before provider verification', async () => {
+    const response = await postSocial(fixedNow - ATTESTATION_SKEW_SECONDS - 1n);
+    expect(response.status).toBe(401);
+    expect(await extractCode(response)).toBe('ATTESTATION_SKEW_EXCEEDED');
+  });
+
+  test('very-far-past (captured-body replay) rejects — this is the v4 replay defence', async () => {
+    // The concrete attack v4 closes: a (body, attestation) pair captured
+    // mid-session is resubmitted outside the skew window by an attacker
+    // who lacks the SE private key. Under v3 (nonce-only `sis:`) this
+    // would have verified fine and issued a session for the victim
+    // account for as long as the Apple/Google ID-token itself remained
+    // valid. Under v4 the skew fires first and the request is refused.
+    const ancient = fixedNow - ATTESTATION_SKEW_SECONDS * 1_000_000n;
+    const response = await postSocial(ancient);
+    expect(response.status).toBe(401);
+    expect(await extractCode(response)).toBe('ATTESTATION_SKEW_EXCEEDED');
+  });
+
+  test('far-future (fabricated / clock-tampered) rejects', async () => {
+    const farFuture = fixedNow + ATTESTATION_SKEW_SECONDS * 1_000_000n;
+    const response = await postSocial(farFuture);
+    expect(response.status).toBe(401);
+    expect(await extractCode(response)).toBe('ATTESTATION_SKEW_EXCEEDED');
+  });
+});
+
 describe('binding enforcement: ver: stored (fph, pk) byte-equal on /magic-link/verify', () => {
   const fixedNow = 1_800_000_000n;
   const nowSeconds: NowSecondsFn = () => fixedNow;
@@ -432,6 +535,72 @@ describe('binding enforcement: ver: stored (fph, pk) byte-equal on /magic-link/v
     expect(row.fingerprintHash.length).toBeGreaterThan(0);
     expect(row.publicKeySpki.length).toBeGreaterThan(0);
     expect(row.expiresAt.getTime()).toBeGreaterThan(row.createdAt.getTime());
+    await clearEmail(email);
+  });
+
+  test('stored row is deleted after a successful /magic-link/verify', async () => {
+    // Regression guard for the magic-link attestation lifecycle. The row
+    // is written when the link is requested and must be removed once the
+    // verify completes successfully — leaving it in place would make the
+    // stored `(fph, pk)` available for the full token TTL (5 minutes) as
+    // the sole device-binding gate against a replay, even though
+    // better-auth already consumed the verification row. Absence of the
+    // row is a positive signal that the cleanup hook fired.
+    const email = randomEmail('ver-cleanup');
+    await clearEmail(email);
+    const device = createTestDeviceKey();
+    const token = await requestLink(email, device);
+
+    // Sanity: row exists immediately after the request.
+    const identifier = deriveTokenIdentifier(token);
+    const before = await db
+      .select({ id: magicLinkAttestation.id })
+      .from(magicLinkAttestation)
+      .where(eq(magicLinkAttestation.tokenIdentifier, identifier));
+    expect(before.length).toBe(1);
+
+    const verHeader = buildSignedAttestationHeader({
+      deviceKey: device,
+      binding: { tag: 'verify', token },
+    });
+    const response = await verify(token, verHeader);
+    expect(response.status).toBe(200);
+
+    const after = await db
+      .select({ id: magicLinkAttestation.id })
+      .from(magicLinkAttestation)
+      .where(eq(magicLinkAttestation.tokenIdentifier, identifier));
+    expect(after.length).toBe(0);
+    await clearEmail(email);
+  });
+
+  test('a failed verify (device mismatch) does NOT delete the stored row', async () => {
+    // The cleanup must only fire on a fully-successful verify — a
+    // rejected attempt must not destroy the binding. Otherwise an
+    // attacker who manages to produce any verify request (even one that
+    // fails DEVICE_MISMATCH) could DoS a legitimate user out of
+    // completing their sign-in before the natural TTL elapses.
+    const email = randomEmail('ver-cleanup-fail');
+    await clearEmail(email);
+    const requesting = createTestDeviceKey();
+    const attacker = createTestDeviceKey();
+    const token = await requestLink(email, requesting);
+
+    const identifier = deriveTokenIdentifier(token);
+
+    const attackerHeader = buildSignedAttestationHeader({
+      deviceKey: attacker,
+      binding: { tag: 'verify', token },
+    });
+    const response = await verify(token, attackerHeader);
+    expect(response.status).toBe(401);
+    expect(await extractCode(response)).toBe('DEVICE_MISMATCH');
+
+    const after = await db
+      .select({ id: magicLinkAttestation.id })
+      .from(magicLinkAttestation)
+      .where(eq(magicLinkAttestation.tokenIdentifier, identifier));
+    expect(after.length).toBe(1);
     await clearEmail(email);
   });
 });

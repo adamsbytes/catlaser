@@ -111,7 +111,7 @@ describe('attestation verify: signature over fph || bnd', () => {
     const bindings: readonly AttestationBinding[] = [
       { tag: 'request', timestamp: 1_734_489_600n },
       { tag: 'verify', token: 'abc.def.ghi' },
-      { tag: 'social', rawNonce: 'fresh-nonce' },
+      { tag: 'social', timestamp: 1_734_489_600n, rawNonce: 'fresh-nonce' },
       { tag: 'signOut', timestamp: 2n },
       { tag: 'api', timestamp: 1_800_000_000n },
     ];
@@ -171,7 +171,7 @@ describe('attestation verify: signature over fph || bnd', () => {
 
   test('signature produced by a different key rejects', () => {
     const victim = signedAttestation({
-      binding: { tag: 'social', rawNonce: 'victim-nonce' },
+      binding: { tag: 'social', timestamp: 1_734_489_600n, rawNonce: 'victim-nonce' },
     });
     const attacker = createTestDeviceKey();
     const attackerAttestation: ParsedAttestation = {
@@ -364,7 +364,7 @@ describe('attestation verify: signed-message reconstruction', () => {
     const cases: readonly [AttestationBinding, string][] = [
       [{ tag: 'request', timestamp: 1n }, 'req:1'],
       [{ tag: 'verify', token: 'the-token' }, 'ver:the-token'],
-      [{ tag: 'social', rawNonce: 'a-nonce' }, 'sis:a-nonce'],
+      [{ tag: 'social', timestamp: 1_800_000_000n, rawNonce: 'a-nonce' }, 'sis:1800000000:a-nonce'],
       [{ tag: 'signOut', timestamp: 9_999_999_999n }, 'out:9999999999'],
       [{ tag: 'api', timestamp: 1_800_000_000n }, 'api:1800000000'],
     ];

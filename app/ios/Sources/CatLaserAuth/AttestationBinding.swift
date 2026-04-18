@@ -8,7 +8,7 @@ import Foundation
 /// pinning hook). Binding each signature to a context-specific value
 /// collapses that window to a single request.
 ///
-/// Four variants, one per authenticated endpoint:
+/// Five variants, one per authenticated endpoint:
 ///
 /// * `.request(timestamp:)` — placed on the outbound `requestMagicLink`
 ///   call. Timestamp is Unix seconds at the moment the attestation is
@@ -22,16 +22,22 @@ import Foundation
 ///   a different token. Request and verify signatures are disjoint by
 ///   construction even when every other input is identical.
 ///
-/// * `.social(rawNonce:)` — placed on the `exchangeSocial` call for
-///   Apple / Google ID-token sign-in. The raw nonce is client-generated
-///   per sign-in and also echoed in the provider ID token's `nonce`
-///   claim (hashed for Apple, verbatim for Google); server compares the
-///   claim against the `bnd` payload and the request-body `idToken.nonce`
-///   for a three-way match. Binding to the nonce means a captured
-///   attestation for a spent nonce can never satisfy a fresh sign-in,
-///   and a captured (idToken, nonce, attestation) triple cannot be
-///   replayed from a different device because the SE private key never
-///   leaves the device that signed the nonce in the first place.
+/// * `.social(timestamp:rawNonce:)` — placed on the `exchangeSocial`
+///   call for Apple / Google ID-token sign-in. Binds TWO freshness
+///   inputs: the per-sign-in raw nonce (client-generated and also
+///   echoed in the provider ID token's `nonce` claim — hashed for
+///   Apple, verbatim for Google — so the server can three-way-match the
+///   binding against the body and the provider claim), AND a wall-clock
+///   Unix-seconds timestamp under the same ±60s skew contract as
+///   `.request` / `.signOut`.
+///
+///   The timestamp is the v4 addition — without it a captured
+///   `(body, attestation)` pair could be replayed for the full ID-token
+///   lifetime (~10 minutes on Apple, up to an hour on Google) because
+///   replay does not require the non-extractable Secure-Enclave private
+///   key: the attacker re-submits the original bytes verbatim.
+///   Enforcing the timestamp pins the replay window to ±60s, matching
+///   the rest of the attestation surface.
 ///
 /// * `.signOut(timestamp:)` — placed on the `signOut` call. Same
 ///   timestamp + skew contract as `.request`; distinct tag prevents a
@@ -40,9 +46,18 @@ import Foundation
 ///   bearer token alone cannot invalidate a session without also
 ///   forging a signature under the original Secure-Enclave key.
 ///
+/// * `.api(timestamp:)` — placed on every authenticated API call after
+///   sign-in. Same timestamp + skew contract as the other timestamped
+///   bindings. Distinct tag prevents a captured sign-in-time attestation
+///   from being replayed against a protected route, and vice versa. The
+///   server-side protected-route middleware verifies every `api:`
+///   binding under the pk captured at sign-in, so a leaked bearer alone
+///   cannot act — a fresh SE signature is also required. ADR-006
+///   documents the full contract.
+///
 /// Wire format: the binding renders to a tagged UTF-8 string
-/// (`"req:<ts>"`, `"ver:<token>"`, `"sis:<rawNonce>"`, or
-/// `"out:<ts>"`) that is both:
+/// (`"req:<ts>"`, `"ver:<token>"`, `"sis:<ts>:<rawNonce>"`,
+/// `"out:<ts>"`, or `"api:<ts>"`) that is both:
 ///
 /// 1. Placed on the wire under the `bnd` key of the attestation payload.
 /// 2. Appended to the 32-byte `fph` hash and fed as the ECDSA message —
@@ -55,8 +70,9 @@ import Foundation
 public enum AttestationBinding: Sendable, Equatable {
     case request(timestamp: Int64)
     case verify(token: String)
-    case social(rawNonce: String)
+    case social(timestamp: Int64, rawNonce: String)
     case signOut(timestamp: Int64)
+    case api(timestamp: Int64)
 
     /// Upper bound on the UTF-8 size of `wireBytes`. Magic-link tokens and
     /// raw nonces are small (tens of bytes); this bound exists so a
@@ -71,8 +87,9 @@ public enum AttestationBinding: Sendable, Equatable {
         switch self {
         case let .request(timestamp): "req:\(timestamp)"
         case let .verify(token): "ver:\(token)"
-        case let .social(rawNonce): "sis:\(rawNonce)"
+        case let .social(timestamp, rawNonce): "sis:\(timestamp):\(rawNonce)"
         case let .signOut(timestamp): "out:\(timestamp)"
+        case let .api(timestamp): "api:\(timestamp)"
         }
     }
 
@@ -106,7 +123,22 @@ public enum AttestationBinding: Sendable, Equatable {
             }
             return .verify(token: token)
         }
-        if let rawNonce = wireValue.prefixStrippedIfMatches("sis:") {
+        if let payload = wireValue.prefixStrippedIfMatches("sis:") {
+            // `sis:` carries `<timestamp>:<rawNonce>`. Split on the FIRST
+            // `:` so a future widening of the nonce charset that happened
+            // to contain `:` still round-trips — iOS `NonceGenerator`
+            // currently emits base64url-no-pad (no `:` possible), so this
+            // is strictly forward-compatibility insurance.
+            guard let sep = payload.firstIndex(of: ":") else {
+                throw .attestationFailed(
+                    "bnd sis: missing ':<rawNonce>' suffix (expected 'sis:<unix_seconds>:<raw_nonce>')",
+                )
+            }
+            let tsString = String(payload[..<sep])
+            let rawNonce = String(payload[payload.index(after: sep)...])
+            guard let parsed = Int64(tsString), parsed > 0, String(parsed) == tsString else {
+                throw .attestationFailed("bnd sis: timestamp is not a positive decimal Int64")
+            }
             guard !rawNonce.isEmpty else {
                 throw .attestationFailed("bnd social raw nonce is empty")
             }
@@ -114,7 +146,7 @@ public enum AttestationBinding: Sendable, Equatable {
             if rawNonce.unicodeScalars.contains(where: disallowed.contains) {
                 throw .attestationFailed("bnd social raw nonce contains control characters")
             }
-            return .social(rawNonce: rawNonce)
+            return .social(timestamp: parsed, rawNonce: rawNonce)
         }
         if let ts = wireValue.prefixStrippedIfMatches("out:") {
             guard let parsed = Int64(ts), parsed > 0, String(parsed) == ts else {
@@ -122,7 +154,15 @@ public enum AttestationBinding: Sendable, Equatable {
             }
             return .signOut(timestamp: parsed)
         }
-        throw .attestationFailed("bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', or 'out:')")
+        if let ts = wireValue.prefixStrippedIfMatches("api:") {
+            guard let parsed = Int64(ts), parsed > 0, String(parsed) == ts else {
+                throw .attestationFailed("bnd api timestamp is not a positive decimal Int64")
+            }
+            return .api(timestamp: parsed)
+        }
+        throw .attestationFailed(
+            "bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', 'out:', or 'api:')",
+        )
     }
 }
 

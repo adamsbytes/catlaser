@@ -70,10 +70,11 @@ public actor AuthCoordinator {
     /// authorization request, receives an ID token whose `nonce` claim
     /// must match that hash, and posts the raw nonce to the server so it
     /// can re-hash and re-verify. A SE-backed attestation binds the
-    /// token exchange to the device: its `bnd` is `"sis:<rawNonce>"` and
-    /// the signed ECDSA message spans `fph_raw || bnd_utf8`. A captured
-    /// attestation cannot be replayed — the server treats the nonce as
-    /// single-use and the SE private key never leaves the device.
+    /// token exchange to the device: its `bnd` is
+    /// `"sis:<unix_seconds>:<rawNonce>"` and the signed ECDSA message
+    /// spans `fph_raw || bnd_utf8`. A captured `(body, attestation)`
+    /// pair cannot be replayed outside the server's ±60s skew window
+    /// even within the Apple ID-token's own validity period.
     public func signInWithApple(context: ProviderPresentationContext) async throws -> AuthSession {
         guard let provider = appleProvider else {
             throw AuthError.providerUnavailable("Apple provider not configured")
@@ -93,8 +94,9 @@ public actor AuthCoordinator {
             rawNonce: nonce.raw,
             accessToken: providerToken.accessToken,
         )
+        let timestamp = try plausibleRequestTimestamp()
         let header = try await attestationProvider.currentAttestationHeader(
-            binding: .social(rawNonce: nonce.raw),
+            binding: .social(timestamp: timestamp, rawNonce: nonce.raw),
         )
         let session = try await client.exchangeSocial(
             provider: .apple,
@@ -108,9 +110,10 @@ public actor AuthCoordinator {
     /// Google sign-in. The Authorization Code + PKCE flow pre-commits a
     /// raw nonce (echoed verbatim in the ID token's `nonce` claim), and
     /// the subsequent token exchange carries a SE-backed attestation
-    /// whose `bnd` is `"sis:<rawNonce>"`. Server-side binding + single-use
-    /// nonce handling make both replay-from-elsewhere and
-    /// replay-on-same-device structurally impossible.
+    /// whose `bnd` is `"sis:<unix_seconds>:<rawNonce>"`. Server-side
+    /// binding + ±60s skew on the timestamp + nonce/body three-way match
+    /// make replay-from-elsewhere, replay-on-same-device, and
+    /// capture-then-delay replay all structurally blocked.
     public func signInWithGoogle(context: ProviderPresentationContext) async throws -> AuthSession {
         guard let provider = googleProvider else {
             throw AuthError.providerUnavailable("Google provider not configured")
@@ -130,8 +133,9 @@ public actor AuthCoordinator {
             rawNonce: nonce.raw,
             accessToken: providerToken.accessToken,
         )
+        let timestamp = try plausibleRequestTimestamp()
         let header = try await attestationProvider.currentAttestationHeader(
-            binding: .social(rawNonce: nonce.raw),
+            binding: .social(timestamp: timestamp, rawNonce: nonce.raw),
         )
         let session = try await client.exchangeSocial(
             provider: .google,

@@ -78,8 +78,14 @@ struct AttestationBindingTests {
     }
 
     @Test
-    func socialRendersTaggedRawNonce() {
-        #expect(AttestationBinding.social(rawNonce: "raw-nonce-abc").wireValue == "sis:raw-nonce-abc")
+    func socialRendersTaggedTimestampAndRawNonce() {
+        #expect(
+            AttestationBinding.social(timestamp: 1_700_000_000, rawNonce: "raw-nonce-abc").wireValue
+                == "sis:1700000000:raw-nonce-abc",
+        )
+        #expect(
+            AttestationBinding.social(timestamp: 1, rawNonce: "n").wireValue == "sis:1:n",
+        )
     }
 
     @Test
@@ -89,13 +95,21 @@ struct AttestationBindingTests {
     }
 
     @Test
+    func apiRendersTaggedUnixSeconds() {
+        #expect(AttestationBinding.api(timestamp: 1_700_000_000).wireValue == "api:1700000000")
+        #expect(AttestationBinding.api(timestamp: 1).wireValue == "api:1")
+    }
+
+    @Test
     func wireBytesIsUtf8OfWireValue() {
         let binding = AttestationBinding.verify(token: "abc")
         #expect(binding.wireBytes == Data("ver:abc".utf8))
-        let social = AttestationBinding.social(rawNonce: "xyz")
-        #expect(social.wireBytes == Data("sis:xyz".utf8))
+        let social = AttestationBinding.social(timestamp: 42, rawNonce: "xyz")
+        #expect(social.wireBytes == Data("sis:42:xyz".utf8))
         let signOut = AttestationBinding.signOut(timestamp: 42)
         #expect(signOut.wireBytes == Data("out:42".utf8))
+        let api = AttestationBinding.api(timestamp: 42)
+        #expect(api.wireBytes == Data("api:42".utf8))
     }
 
     @Test
@@ -112,14 +126,20 @@ struct AttestationBindingTests {
 
     @Test
     func decodeRoundTripsSocial() throws {
-        let decoded = try AttestationBinding.decode(wireValue: "sis:raw-nonce-abc")
-        #expect(decoded == .social(rawNonce: "raw-nonce-abc"))
+        let decoded = try AttestationBinding.decode(wireValue: "sis:1700000000:raw-nonce-abc")
+        #expect(decoded == .social(timestamp: 1_700_000_000, rawNonce: "raw-nonce-abc"))
     }
 
     @Test
     func decodeRoundTripsSignOut() throws {
         let decoded = try AttestationBinding.decode(wireValue: "out:1700000000")
         #expect(decoded == .signOut(timestamp: 1_700_000_000))
+    }
+
+    @Test
+    func decodeRoundTripsApi() throws {
+        let decoded = try AttestationBinding.decode(wireValue: "api:1700000000")
+        #expect(decoded == .api(timestamp: 1_700_000_000))
     }
 
     @Test
@@ -175,20 +195,67 @@ struct AttestationBindingTests {
 
     @Test
     func decodeRejectsEmptySocialNonce() {
-        expectDecodeFailure("sis:", matching: "empty")
+        // Timestamp present, nonce empty.
+        expectDecodeFailure("sis:1700000000:", matching: "empty")
+    }
+
+    @Test
+    func decodeRejectsSocialWithoutTimestampSuffix() {
+        // A client that omits the `:<rawNonce>` half leaves no separator
+        // after the tag payload. The decoder must surface this as a
+        // timestamp-shape failure so a forgotten-timestamp client bug
+        // doesn't silently fall through.
+        expectDecodeFailure("sis:raw-nonce-abc", matching: "sis:")
+    }
+
+    @Test
+    func decodeRejectsSocialWithEmptyTimestamp() {
+        expectDecodeFailure("sis::raw-nonce-abc", matching: "timestamp")
+    }
+
+    @Test
+    func decodeRejectsSocialWithLeadingZeroTimestamp() {
+        expectDecodeFailure("sis:01:raw-nonce-abc", matching: "timestamp")
+    }
+
+    @Test
+    func decodeRejectsSocialWithNonNumericTimestamp() {
+        expectDecodeFailure("sis:notanumber:raw-nonce-abc", matching: "timestamp")
+    }
+
+    @Test
+    func decodeRejectsSocialWithZeroTimestamp() {
+        expectDecodeFailure("sis:0:raw-nonce-abc", matching: "timestamp")
+    }
+
+    @Test
+    func decodeRejectsSocialWithNegativeTimestamp() {
+        expectDecodeFailure("sis:-1:raw-nonce-abc", matching: "timestamp")
     }
 
     @Test
     func decodeRejectsControlCharsInSocialNonce() {
-        expectDecodeFailure("sis:abc\ndef", matching: "control")
-        expectDecodeFailure("sis:abc def", matching: "control")
+        expectDecodeFailure("sis:1700000000:abc\ndef", matching: "control")
+        expectDecodeFailure("sis:1700000000:abc def", matching: "control")
+    }
+
+    @Test
+    func decodeRejectsNonNumericApiTimestamp() {
+        expectDecodeFailure("api:notanumber", matching: "timestamp")
+        expectDecodeFailure("api:", matching: "timestamp")
+        expectDecodeFailure("api:-5", matching: "timestamp")
+        expectDecodeFailure("api:012345", matching: "timestamp")
+        expectDecodeFailure("api:1.5", matching: "timestamp")
+        expectDecodeFailure("api:0", matching: "timestamp")
     }
 
     @Test
     func decodeRejectsOversizedInput() {
         let big = String(repeating: "a", count: AttestationBinding.maxWireBytes + 1)
         expectDecodeFailure("ver:\(big)", matching: "exceeds")
-        expectDecodeFailure("sis:\(big)", matching: "exceeds")
+        // Shape is `sis:<ts>:<nonce>` — overflow the nonce half so the
+        // total wire value exceeds the cap.
+        expectDecodeFailure("sis:1:\(big)", matching: "exceeds")
     }
 
     @Test
@@ -197,10 +264,13 @@ struct AttestationBindingTests {
         // with different bindings must produce different signed bytes.
         // This is the crux of the replay defence — for every pair of
         // distinct binding tags, a signature for one must NOT verify
-        // against the other's signed bytes. Critically, `req:<ts>` and
-        // `out:<ts>` use the SAME timestamp format but distinct tags,
-        // so a captured magic-link-request header cannot be replayed
-        // against the sign-out endpoint and vice versa.
+        // against the other's signed bytes. Critically, `req:<ts>`,
+        // `sis:<ts>:<nonce>`, `out:<ts>`, and `api:<ts>` all carry a
+        // timestamp in their wire value — the tag alone must separate
+        // them, so a captured magic-link-request header cannot be
+        // replayed against the sign-out endpoint / api route, and a
+        // captured social header cannot be replayed against the
+        // protected route (and vice versa for every pair).
         let identity = SoftwareIdentityStore()
         let fingerprint = makeFingerprint(installID: try await identity.installID())
         let reqAttestation = try await DeviceAttestationBuilder.build(
@@ -216,7 +286,9 @@ struct AttestationBindingTests {
         let sisAttestation = try await DeviceAttestationBuilder.build(
             fingerprint: fingerprint,
             identity: identity,
-            binding: .social(rawNonce: "n"),
+            // Same numeric timestamp as `reqAttestation` — the tag +
+            // nonce field must separate the signed bytes.
+            binding: .social(timestamp: 1_700_000_000, rawNonce: "n"),
         )
         let outAttestation = try await DeviceAttestationBuilder.build(
             fingerprint: fingerprint,
@@ -225,48 +297,52 @@ struct AttestationBindingTests {
             // must separate the signed bytes.
             binding: .signOut(timestamp: 1_700_000_000),
         )
+        let apiAttestation = try await DeviceAttestationBuilder.build(
+            fingerprint: fingerprint,
+            identity: identity,
+            binding: .api(timestamp: 1_700_000_000),
+        )
         let reqSigned = reqAttestation.fingerprintHash + reqAttestation.binding.wireBytes
         let verSigned = verAttestation.fingerprintHash + verAttestation.binding.wireBytes
         let sisSigned = sisAttestation.fingerprintHash + sisAttestation.binding.wireBytes
         let outSigned = outAttestation.fingerprintHash + outAttestation.binding.wireBytes
-        #expect(reqSigned != verSigned, "request and verify bindings must produce distinct signed bytes")
-        #expect(reqSigned != sisSigned, "request and social bindings must produce distinct signed bytes")
-        #expect(reqSigned != outSigned, "request and sign-out bindings must produce distinct signed bytes even at identical timestamps")
-        #expect(verSigned != sisSigned, "verify and social bindings must produce distinct signed bytes")
-        #expect(verSigned != outSigned, "verify and sign-out bindings must produce distinct signed bytes")
-        #expect(sisSigned != outSigned, "social and sign-out bindings must produce distinct signed bytes")
+        let apiSigned = apiAttestation.fingerprintHash + apiAttestation.binding.wireBytes
+        let allSigned: [(String, Data)] = [
+            ("request", reqSigned),
+            ("verify", verSigned),
+            ("social", sisSigned),
+            ("signOut", outSigned),
+            ("api", apiSigned),
+        ]
+        for outer in allSigned.indices {
+            for inner in allSigned.indices where inner != outer {
+                let lhs = allSigned[outer]
+                let rhs = allSigned[inner]
+                #expect(
+                    lhs.1 != rhs.1,
+                    "\(lhs.0) and \(rhs.0) bindings must produce distinct signed bytes even at identical timestamps",
+                )
+            }
+        }
 
         // Every pair of distinct-context signatures must fail to
         // verify against another context's signed bytes.
         let key = try P256.Signing.PublicKey(derRepresentation: reqAttestation.publicKeySPKI)
-        let reqSig = try P256.Signing.ECDSASignature(derRepresentation: reqAttestation.signature)
-        let verSig = try P256.Signing.ECDSASignature(derRepresentation: verAttestation.signature)
-        let sisSig = try P256.Signing.ECDSASignature(derRepresentation: sisAttestation.signature)
-        let outSig = try P256.Signing.ECDSASignature(derRepresentation: outAttestation.signature)
-        #expect(!key.isValidSignature(reqSig, for: verSigned),
-                "request-time signature must not verify against verify-time signed bytes")
-        #expect(!key.isValidSignature(reqSig, for: sisSigned),
-                "request-time signature must not verify against social-signed bytes")
-        #expect(!key.isValidSignature(reqSig, for: outSigned),
-                "request-time signature must not verify against sign-out signed bytes")
-        #expect(!key.isValidSignature(verSig, for: reqSigned),
-                "verify-time signature must not verify against request-time signed bytes")
-        #expect(!key.isValidSignature(verSig, for: sisSigned),
-                "verify-time signature must not verify against social-signed bytes")
-        #expect(!key.isValidSignature(verSig, for: outSigned),
-                "verify-time signature must not verify against sign-out signed bytes")
-        #expect(!key.isValidSignature(sisSig, for: reqSigned),
-                "social signature must not verify against request-time signed bytes")
-        #expect(!key.isValidSignature(sisSig, for: verSigned),
-                "social signature must not verify against verify-time signed bytes")
-        #expect(!key.isValidSignature(sisSig, for: outSigned),
-                "social signature must not verify against sign-out signed bytes")
-        #expect(!key.isValidSignature(outSig, for: reqSigned),
-                "sign-out signature must not verify against request-time signed bytes")
-        #expect(!key.isValidSignature(outSig, for: verSigned),
-                "sign-out signature must not verify against verify-time signed bytes")
-        #expect(!key.isValidSignature(outSig, for: sisSigned),
-                "sign-out signature must not verify against social-signed bytes")
+        let signaturesByContext: [(String, P256.Signing.ECDSASignature)] = [
+            ("request", try P256.Signing.ECDSASignature(derRepresentation: reqAttestation.signature)),
+            ("verify", try P256.Signing.ECDSASignature(derRepresentation: verAttestation.signature)),
+            ("social", try P256.Signing.ECDSASignature(derRepresentation: sisAttestation.signature)),
+            ("signOut", try P256.Signing.ECDSASignature(derRepresentation: outAttestation.signature)),
+            ("api", try P256.Signing.ECDSASignature(derRepresentation: apiAttestation.signature)),
+        ]
+        for sigEntry in signaturesByContext {
+            for msgEntry in allSigned where msgEntry.0 != sigEntry.0 {
+                #expect(
+                    !key.isValidSignature(sigEntry.1, for: msgEntry.1),
+                    "\(sigEntry.0) signature must not verify against \(msgEntry.0) signed bytes",
+                )
+            }
+        }
     }
 
     private func expectDecodeFailure(
@@ -322,11 +398,13 @@ struct DeviceAttestationEncoderTests {
 
     @Test
     func roundTripsSocialBinding() throws {
-        let attestation = sample(binding: .social(rawNonce: "raw-nonce-xyz"))
+        let attestation = sample(
+            binding: .social(timestamp: 1_700_000_000, rawNonce: "raw-nonce-xyz"),
+        )
         let encoded = try DeviceAttestationEncoder.encodeHeaderValue(attestation)
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
         #expect(decoded == attestation)
-        #expect(decoded.binding == .social(rawNonce: "raw-nonce-xyz"))
+        #expect(decoded.binding == .social(timestamp: 1_700_000_000, rawNonce: "raw-nonce-xyz"))
     }
 
     @Test
@@ -336,6 +414,15 @@ struct DeviceAttestationEncoderTests {
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
         #expect(decoded == attestation)
         #expect(decoded.binding == .signOut(timestamp: 1_700_000_000))
+    }
+
+    @Test
+    func roundTripsApiBinding() throws {
+        let attestation = sample(binding: .api(timestamp: 1_700_000_000))
+        let encoded = try DeviceAttestationEncoder.encodeHeaderValue(attestation)
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(encoded)
+        #expect(decoded == attestation)
+        #expect(decoded.binding == .api(timestamp: 1_700_000_000))
     }
 
     @Test
@@ -363,7 +450,7 @@ struct DeviceAttestationEncoderTests {
         let object = try #require(try JSONSerialization.jsonObject(with: outer) as? [String: Any])
         #expect(Set(object.keys) == ["bnd", "fph", "pk", "sig", "v"])
         #expect(object["bnd"] as? String == "req:1700000000")
-        #expect(object["v"] as? Int == 3)
+        #expect(object["v"] as? Int == DeviceAttestation.currentVersion)
     }
 
     @Test
