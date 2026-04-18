@@ -80,7 +80,8 @@
   - [X] Sign in with email magic link (Universal Links target, SE-signed attestation bound to each request and verify call)
   - [X] Sign in screen
   - [X] Signed HTTP client wrapper (SE-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
-  - [ ] Live view (LiveKit iOS SDK, WebRTC)
+  - [X] Live view (LiveKit iOS SDK, WebRTC)
+  - [ ] Device pairing + endpoint persistence (QR pair flow, coordination-server-brokered Tailscale endpoint lookup, Keychain-persisted endpoint, auto-reconnect on network change, connection heartbeat, signed-out → endpoint wipe)
   - [ ] History + cat profiles (stats, naming, management)
   - [ ] Schedule setup (auto-play times, quiet hours)
   - [ ] Push notifications (APNs: play summaries, session alerts, hopper empty)

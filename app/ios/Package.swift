@@ -18,6 +18,14 @@ let package = Package(
             targets: ["CatLaserAuth"],
         ),
         .library(
+            name: "CatLaserDevice",
+            targets: ["CatLaserDevice"],
+        ),
+        .library(
+            name: "CatLaserLive",
+            targets: ["CatLaserLive"],
+        ),
+        .library(
             name: "CatLaserApp",
             targets: ["CatLaserApp"],
         ),
@@ -92,10 +100,72 @@ let package = Package(
             ],
             path: "Tests/CatLaserAuthTests",
         ),
+        // App-to-device TCP wire transport. Speaks the length-prefixed
+        // protobuf framing defined in `python/catlaser_brain/network/wire.py`.
+        // Cross-platform: the Network.framework-backed concrete transport
+        // is `#if canImport(Network)`-gated so the library and all of its
+        // pure logic (frame codec, request correlation actor) build and
+        // test on Linux SPM runners.
+        .target(
+            name: "CatLaserDevice",
+            dependencies: [
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserDevice",
+        ),
+        // Test-only. In-memory bidirectional transport + scripted-server
+        // helpers that let `DeviceClient` behavior be exercised without a
+        // real TCP socket. Excluded from `products:` so shipping code
+        // cannot accidentally wire a mock into a release build.
+        .target(
+            name: "CatLaserDeviceTestSupport",
+            dependencies: [
+                "CatLaserDevice",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserDeviceTestSupport",
+        ),
+        .testTarget(
+            name: "CatLaserDeviceTests",
+            dependencies: [
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Tests/CatLaserDeviceTests",
+        ),
+        // Live-view stack. Orchestrates `StartStreamRequest` / `StopStreamRequest`
+        // on a `CatLaserDevice.DeviceClient`, then routes the returned
+        // `StreamOffer` into a `LiveStreamSession` (LiveKit-backed on Apple
+        // platforms; mockable anywhere). The SwiftUI `LiveView` is
+        // `#if canImport(SwiftUI)`-gated; the LiveKit concrete session
+        // is `#if canImport(LiveKit)`-gated and activates once the host
+        // Xcode target adds the `client-sdk-swift` package — same
+        // integration pattern the repo already uses for UIKit/AppKit.
+        .target(
+            name: "CatLaserLive",
+            dependencies: [
+                "CatLaserDevice",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserLive",
+        ),
+        .testTarget(
+            name: "CatLaserLiveTests",
+            dependencies: [
+                "CatLaserLive",
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Tests/CatLaserLiveTests",
+        ),
         .target(
             name: "CatLaserApp",
             dependencies: [
                 "CatLaserAuth",
+                "CatLaserDevice",
+                "CatLaserLive",
             ],
             path: "Sources/CatLaserApp",
         ),
