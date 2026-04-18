@@ -14,6 +14,15 @@ CREATE TABLE "account" (
 	"updated_at" timestamp NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "email_rate_limit" (
+	"id" text PRIMARY KEY NOT NULL,
+	"email_hash" text NOT NULL,
+	"window_started_at" timestamp NOT NULL,
+	"request_count" integer NOT NULL,
+	"updated_at" timestamp NOT NULL,
+	CONSTRAINT "email_rate_limit_email_hash_unique" UNIQUE("email_hash")
+);
+--> statement-breakpoint
 CREATE TABLE "idempotency_record" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
@@ -35,6 +44,14 @@ CREATE TABLE "magic_link_attestation" (
 	"expires_at" timestamp NOT NULL,
 	"created_at" timestamp NOT NULL,
 	CONSTRAINT "magic_link_attestation_token_identifier_unique" UNIQUE("token_identifier")
+);
+--> statement-breakpoint
+CREATE TABLE "rate_limit" (
+	"id" text PRIMARY KEY NOT NULL,
+	"key" text NOT NULL,
+	"count" integer NOT NULL,
+	"last_request" bigint NOT NULL,
+	CONSTRAINT "rate_limit_key_unique" UNIQUE("key")
 );
 --> statement-breakpoint
 CREATE TABLE "session" (
@@ -83,6 +100,7 @@ ALTER TABLE "idempotency_record" ADD CONSTRAINT "idempotency_record_session_id_s
 ALTER TABLE "session" ADD CONSTRAINT "session_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "session_attestation" ADD CONSTRAINT "session_attestation_session_id_session_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."session"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "account_userId_idx" ON "account" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "email_rate_limit_window_started_at_idx" ON "email_rate_limit" USING btree ("window_started_at");--> statement-breakpoint
 CREATE INDEX "idempotency_record_session_id_idx" ON "idempotency_record" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "idempotency_record_expires_at_idx" ON "idempotency_record" USING btree ("expires_at");--> statement-breakpoint
 CREATE INDEX "magic_link_attestation_expires_at_idx" ON "magic_link_attestation" USING btree ("expires_at");--> statement-breakpoint

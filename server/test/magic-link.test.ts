@@ -9,6 +9,7 @@ import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery, MagicLinkEmailPayload } from '~/lib/magic-link.ts';
 import { resolveAllowedCallbackUrl } from '~/lib/magic-link.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -131,6 +132,7 @@ const post = async (
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Origin: trustedOrigin,
+    ...uniqueClientIpHeader(),
     ...extraHeaders,
   };
   if (options.skipAttestation !== true) {
@@ -150,7 +152,10 @@ const post = async (
 const verifyViaToken = async (token: string): Promise<Response> => {
   const url = new URL(VERIFY_URL_BASE);
   url.searchParams.set('token', token);
-  const headers: Record<string, string> = { [ATTESTATION_HEADER_NAME]: verAttestation(token) };
+  const headers: Record<string, string> = {
+    [ATTESTATION_HEADER_NAME]: verAttestation(token),
+    ...uniqueClientIpHeader(),
+  };
   return await auth.handler(new Request(url.toString(), { method: 'GET', headers }));
 };
 
@@ -160,7 +165,8 @@ const verifyRaw = async (
 ): Promise<Response> => {
   const url = new URL(VERIFY_URL_BASE);
   url.searchParams.set('token', token);
-  return await auth.handler(new Request(url.toString(), { method: 'GET', headers }));
+  const fullHeaders: Record<string, string> = { ...uniqueClientIpHeader(), ...headers };
+  return await auth.handler(new Request(url.toString(), { method: 'GET', headers: fullHeaders }));
 };
 
 const base64UrlNoPadSha256 = (input: string): string =>
@@ -509,7 +515,7 @@ describe('magic-link: verify round-trip', () => {
     const response = await auth.handler(
       new Request(url.toString(), {
         method: 'GET',
-        headers: { [ATTESTATION_HEADER_NAME]: verAttestation(token) },
+        headers: { [ATTESTATION_HEADER_NAME]: verAttestation(token), ...uniqueClientIpHeader() },
       }),
     );
     expect(response.status).toBe(403);
@@ -578,7 +584,11 @@ describe('magic-link: plugin scope isolation', () => {
     const response = await auth.handler(
       new Request(socialURL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Origin: trustedOrigin },
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: trustedOrigin,
+          ...uniqueClientIpHeader(),
+        },
         body: JSON.stringify({ provider: 'apple', idToken: { token: 'x', nonce: 'n' } }),
       }),
     );

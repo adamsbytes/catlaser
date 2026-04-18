@@ -11,6 +11,7 @@ import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery, MagicLinkEmailPayload } from '~/lib/magic-link.ts';
 import { deriveTokenIdentifier } from '~/lib/magic-link-attestation.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -128,6 +129,7 @@ describe('binding enforcement: req: ±60s skew on /sign-in/magic-link', () => {
           'Content-Type': 'application/json',
           Origin: trustedOrigin,
           [ATTESTATION_HEADER_NAME]: header,
+          ...uniqueClientIpHeader(),
         },
         body: JSON.stringify({ email }),
       }),
@@ -227,6 +229,7 @@ describe('binding enforcement: out: ±60s skew on /sign-out', () => {
           'Content-Type': 'application/json',
           Origin: trustedOrigin,
           [ATTESTATION_HEADER_NAME]: header,
+          ...uniqueClientIpHeader(),
         },
         body: JSON.stringify({}),
       }),
@@ -286,6 +289,7 @@ describe('binding enforcement: ver: stored (fph, pk) byte-equal on /magic-link/v
           'Content-Type': 'application/json',
           Origin: trustedOrigin,
           [ATTESTATION_HEADER_NAME]: header,
+          ...uniqueClientIpHeader(),
         },
         body: JSON.stringify({ email }),
       }),
@@ -300,7 +304,7 @@ describe('binding enforcement: ver: stored (fph, pk) byte-equal on /magic-link/v
     return await auth.handler(
       new Request(url.toString(), {
         method: 'GET',
-        headers: { [ATTESTATION_HEADER_NAME]: attestation },
+        headers: { [ATTESTATION_HEADER_NAME]: attestation, ...uniqueClientIpHeader() },
       }),
     );
   };

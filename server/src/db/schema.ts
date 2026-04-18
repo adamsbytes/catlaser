@@ -1,5 +1,14 @@
 import { relations } from 'drizzle-orm';
-import { pgTable, text, timestamp, boolean, index, integer, unique } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  text,
+  timestamp,
+  boolean,
+  index,
+  integer,
+  unique,
+  bigint,
+} from 'drizzle-orm/pg-core';
 
 export const user = pgTable('user', {
   id: text('id').primaryKey(),
@@ -226,6 +235,81 @@ export const idempotencyRecord = pgTable(
     unique('idempotency_record_session_key_unique').on(table.sessionId, table.idempotencyKey),
   ],
 );
+
+/**
+ * Per-email cooldown ledger — the enumeration-resistant half of the
+ * sign-in rate-limit posture.
+ *
+ * Every `POST /sign-in/magic-link` request runs the email through a
+ * cooldown check before `sendMagicLink` fires. The row stores a sliding
+ * window:
+ *
+ * - `email_hash` is `HMAC-SHA256(normalize(email), BETTER_AUTH_SECRET)`
+ *   base64url-no-pad. The raw email never lands here — a DB read reveals
+ *   only which opaque buckets were hot, not which addresses. The secret
+ *   extends across restart because it's pinned to `BETTER_AUTH_SECRET`,
+ *   which the server already requires be stable across deploys.
+ * - `window_started_at` anchors the active window. `request_count` is
+ *   the number of requests that have landed in it. On each acquire, if
+ *   `now - window_started_at >= EMAIL_RATE_LIMIT_WINDOW_SECONDS` the
+ *   acquire path atomically resets both fields; otherwise it increments
+ *   the count.
+ * - A caller whose post-acquire `request_count` exceeds
+ *   `EMAIL_RATE_LIMIT_MAX` is over-budget. The magic-link before-hook
+ *   short-circuits with the same 200 `{ status: true }` body the plugin
+ *   emits on success — byte-identical to a fresh-email acceptance so an
+ *   attacker cannot distinguish a cooldown from a real send.
+ *
+ * Single unique key on `email_hash`. `ON CONFLICT (email_hash) DO
+ * UPDATE ... RETURNING` collapses the "insert new / increment existing /
+ * reset expired" cases into one round-trip that is race-safe under
+ * concurrent POSTs. `updated_at` tracks the most recent activity so a
+ * cleanup pass (future) can GC buckets that have been cold for longer
+ * than the window.
+ *
+ * This table is orthogonal to the `rate_limit` table better-auth uses
+ * for its per-IP / per-path built-in limiter. Both coexist: per-IP
+ * rejects distributed floods loudly with a 429; per-email silently
+ * swallows repeats to defeat email enumeration.
+ */
+export const emailRateLimit = pgTable(
+  'email_rate_limit',
+  {
+    id: text('id').primaryKey(),
+    emailHash: text('email_hash').notNull().unique(),
+    windowStartedAt: timestamp('window_started_at').notNull(),
+    requestCount: integer('request_count').notNull(),
+    updatedAt: timestamp('updated_at').notNull(),
+  },
+  (table) => [index('email_rate_limit_window_started_at_idx').on(table.windowStartedAt)],
+);
+
+/**
+ * Better-auth's built-in rate-limit storage (per-(IP, path) counters).
+ *
+ * Persisted to Postgres instead of in-memory so a restart does not
+ * reset counters and so multiple server replicas share one ledger —
+ * required once the coordination server runs behind Cloudflare Tunnel
+ * with any horizontal-scale expansion. Schema matches exactly what
+ * `@better-auth/core`'s `getAuthTables` emits for `rateLimit` when
+ * `rateLimit.storage === 'database'`:
+ *
+ * - `key`: `<ip>:<normalized-path>` (compound per request dimension).
+ * - `count`: number of requests in the current window.
+ * - `last_request`: epoch-millis of the most recent request; better-auth
+ *   computes window expiry relative to `Date.now()`.
+ *
+ * The property names `key`, `count`, `lastRequest` match better-auth's
+ * default field names so no `rateLimit.fields` override is needed on
+ * the factory; column names are snake_case for schema consistency
+ * with the rest of this file.
+ */
+export const rateLimit = pgTable('rate_limit', {
+  id: text('id').primaryKey(),
+  key: text('key').notNull().unique(),
+  count: integer('count').notNull(),
+  lastRequest: bigint('last_request', { mode: 'number' }).notNull(),
+});
 
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),

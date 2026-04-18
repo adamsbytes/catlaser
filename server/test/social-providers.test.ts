@@ -7,6 +7,7 @@ import type { AttestationBinding } from '~/lib/attestation-binding.ts';
 import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import { createAuth } from '~/lib/auth.ts';
 import { env } from '~/lib/env.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -96,7 +97,7 @@ const postSocial = async (opts: SendOpts): Promise<{ response: Response; body: u
   const auth = opts.useAuth ?? createAuth();
   const init: RequestInit = {
     method: 'POST',
-    headers: { ...defaultHeaders, ...opts.headers },
+    headers: { ...defaultHeaders, ...uniqueClientIpHeader(), ...opts.headers },
     body: JSON.stringify(opts.body),
   };
   const response = await auth.handler(new Request(socialURL, init));
@@ -270,7 +271,11 @@ describe('sign-in/social: nonce three-way match', () => {
     const auth = createAuth();
     const init: RequestInit = {
       method: 'POST',
-      headers: { ...defaultHeaders, [ATTESTATION_HEADER_NAME]: header },
+      headers: {
+        ...defaultHeaders,
+        [ATTESTATION_HEADER_NAME]: header,
+        ...uniqueClientIpHeader(),
+      },
       // No body at all — better-auth's content-type parser returns an empty
       // object to the plugin; nonce extraction then reports missing.
     };
@@ -371,7 +376,9 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
     // The plugin matches exactly the four attestation paths. A GET to
     // /get-session must not require an attestation header.
     const auth = createAuth();
-    const response = await auth.handler(new Request(`http://localhost${AUTH_BASE}/get-session`));
+    const response = await auth.handler(
+      new Request(`http://localhost${AUTH_BASE}/get-session`, { headers: uniqueClientIpHeader() }),
+    );
     expect(response.status).toBe(200);
   });
 
@@ -390,7 +397,11 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
     const auth = createAuth(buildAppleJWKSOverride());
     const init: RequestInit = {
       method: 'POST',
-      headers: { ...defaultHeaders, [ATTESTATION_HEADER_NAME]: header },
+      headers: {
+        ...defaultHeaders,
+        [ATTESTATION_HEADER_NAME]: header,
+        ...uniqueClientIpHeader(),
+      },
       body: JSON.stringify({
         provider: 'apple',
         idToken: { token, nonce: rawNonce },
@@ -428,7 +439,11 @@ describe('sign-in/social: plugin pass-through to better-auth', () => {
     const auth = createAuth(buildAppleJWKSOverride());
     const init: RequestInit = {
       method: 'POST',
-      headers: { ...defaultHeaders, [ATTESTATION_HEADER_NAME]: header },
+      headers: {
+        ...defaultHeaders,
+        [ATTESTATION_HEADER_NAME]: header,
+        ...uniqueClientIpHeader(),
+      },
       body: JSON.stringify({
         provider: 'apple',
         idToken: { token, nonce: rawNonce },

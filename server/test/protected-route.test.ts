@@ -12,6 +12,7 @@ import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery, MagicLinkEmailPayload } from '~/lib/magic-link.ts';
 import { withAttestedSession } from '~/lib/protected-route.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -145,6 +146,7 @@ const signIn = async (
         'Content-Type': 'application/json',
         Origin: trustedOrigin,
         [ATTESTATION_HEADER_NAME]: reqHeader,
+        ...uniqueClientIpHeader(),
       },
       body: JSON.stringify({ email }),
     }),
@@ -163,7 +165,7 @@ const signIn = async (
   const verifyResponse = await auth.handler(
     new Request(verifyUrl.toString(), {
       method: 'GET',
-      headers: { [ATTESTATION_HEADER_NAME]: verHeader },
+      headers: { [ATTESTATION_HEADER_NAME]: verHeader, ...uniqueClientIpHeader() },
     }),
   );
   if (verifyResponse.status !== 200) {

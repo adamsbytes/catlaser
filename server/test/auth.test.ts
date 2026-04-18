@@ -4,6 +4,7 @@ import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import { handle } from '~/server.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -27,7 +28,15 @@ const callAuth = async (
   init: RequestInit = {},
 ): Promise<{ response: Response; body: unknown }> => {
   const url = `http://localhost${AUTH_BASE}${path}`;
-  const response = await handle(new Request(url, init));
+  const mergedHeaders = new Headers(init.headers);
+  if (!mergedHeaders.has('X-Forwarded-For')) {
+    const ipHeader = uniqueClientIpHeader();
+    const forwardedFor = ipHeader['X-Forwarded-For'];
+    if (forwardedFor !== undefined) {
+      mergedHeaders.set('X-Forwarded-For', forwardedFor);
+    }
+  }
+  const response = await handle(new Request(url, { ...init, headers: mergedHeaders }));
   const text = await response.text();
   const body: unknown = text.length > 0 ? JSON.parse(text) : null;
   return { response, body };

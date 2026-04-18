@@ -11,6 +11,7 @@ import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import { EC_P256_SPKI_PREFIX, EC_P256_SPKI_TOTAL_BYTES } from '~/lib/attestation-verify.ts';
 import { AUTH_BASE_PATH, createAuth } from '~/lib/auth.ts';
 import { env } from '~/lib/env.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -58,7 +59,22 @@ const callAuth = async (
   init: RequestInit,
 ): Promise<{ response: Response; code: string | undefined }> => {
   const auth = createAuth();
-  const response = await auth.handler(new Request(url, init));
+  // Spread a fresh per-call X-Forwarded-For onto the incoming headers
+  // so better-auth's per-(IP, path) limiter (see `~/lib/auth.ts`) sees
+  // a unique client for every test, even when the test file fires
+  // dozens of requests at the same path. The helper is defensive about
+  // not clobbering a header the caller already set — a dedicated
+  // rate-limit suite that wants to pin one IP does that via its own
+  // request construction, not through this shared path.
+  const mergedHeaders = new Headers(init.headers);
+  if (!mergedHeaders.has('X-Forwarded-For')) {
+    const ipHeader = uniqueClientIpHeader();
+    const forwardedFor = ipHeader['X-Forwarded-For'];
+    if (forwardedFor !== undefined) {
+      mergedHeaders.set('X-Forwarded-For', forwardedFor);
+    }
+  }
+  const response = await auth.handler(new Request(url, { ...init, headers: mergedHeaders }));
   const code = await extractCode(response);
   return { response, code };
 };

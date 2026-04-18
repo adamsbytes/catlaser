@@ -11,6 +11,7 @@ import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery, MagicLinkEmailPayload } from '~/lib/magic-link.ts';
 import { lookupSessionAttestation } from '~/lib/session-attestation.ts';
+import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
@@ -119,6 +120,7 @@ describe('session attestation: captured at /magic-link/verify', () => {
           'Content-Type': 'application/json',
           Origin: trustedOrigin,
           [ATTESTATION_HEADER_NAME]: header,
+          ...uniqueClientIpHeader(),
         },
         body: JSON.stringify({ email }),
       }),
@@ -137,7 +139,7 @@ describe('session attestation: captured at /magic-link/verify', () => {
     const response = await auth.handler(
       new Request(url.toString(), {
         method: 'GET',
-        headers: { [ATTESTATION_HEADER_NAME]: header },
+        headers: { [ATTESTATION_HEADER_NAME]: header, ...uniqueClientIpHeader() },
       }),
     );
     expect(response.status).toBe(200);
@@ -236,6 +238,7 @@ describe('session attestation: captured at /sign-in/social', () => {
           'Content-Type': 'application/json',
           Origin: trustedOrigin,
           [ATTESTATION_HEADER_NAME]: header,
+          ...uniqueClientIpHeader(),
         },
         body: JSON.stringify({
           provider: 'apple',
@@ -323,7 +326,7 @@ describe('session attestation: cascade lifecycle', () => {
     const verifyResponse = await auth.handler(
       new Request(verifyUrl.toString(), {
         method: 'GET',
-        headers: { [ATTESTATION_HEADER_NAME]: verHeader },
+        headers: { [ATTESTATION_HEADER_NAME]: verHeader, ...uniqueClientIpHeader() },
       }),
     );
     expect(verifyResponse.status).toBe(200);
@@ -371,7 +374,7 @@ describe('session attestation: cascade lifecycle', () => {
     const verifyResponse = await auth.handler(
       new Request(verifyUrl.toString(), {
         method: 'GET',
-        headers: { [ATTESTATION_HEADER_NAME]: verHeader },
+        headers: { [ATTESTATION_HEADER_NAME]: verHeader, ...uniqueClientIpHeader() },
       }),
     );
     expect(verifyResponse.status).toBe(200);
