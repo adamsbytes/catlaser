@@ -19,7 +19,11 @@ public struct LiveStreamCredentials: Sendable, Equatable {
     /// Short-lived LiveKit access token (JWT) scoped to `canSubscribe`.
     public let token: String
 
-    public init(url: URL, token: String) throws(LiveStreamCredentialsError) {
+    public init(
+        url: URL,
+        token: String,
+        allowlist: LiveKitHostAllowlist,
+    ) throws(LiveStreamCredentialsError) {
         // Signaling must be TLS-encrypted. LiveKit's subscriber JWT grants
         // room-join rights for the duration of the token; on a plaintext
         // `ws://` connection that JWT — and the signaling channel that
@@ -32,8 +36,17 @@ public struct LiveStreamCredentials: Sendable, Equatable {
         guard let scheme = url.scheme?.lowercased(), scheme == "wss" else {
             throw .invalidURLScheme
         }
-        guard url.host?.isEmpty == false else {
+        guard let host = url.host, !host.isEmpty else {
             throw .invalidURL
+        }
+        // The host MUST be in the operator-provisioned allowlist.
+        // Without this check a compromised device could hand the app
+        // an attacker-controlled `wss://` URL; the LiveKit SDK has
+        // no notion of "which hosts are ours" and would dial happily.
+        // The allowlist is an app-target constant, not a `StreamOffer`
+        // field, so the device cannot influence it.
+        guard allowlist.contains(host) else {
+            throw .hostNotAllowed(host)
         }
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -44,11 +57,14 @@ public struct LiveStreamCredentials: Sendable, Equatable {
     }
 
     /// Convenience initializer from the proto envelope.
-    public init(offer: Catlaser_App_V1_StreamOffer) throws(LiveStreamCredentialsError) {
+    public init(
+        offer: Catlaser_App_V1_StreamOffer,
+        allowlist: LiveKitHostAllowlist,
+    ) throws(LiveStreamCredentialsError) {
         guard let url = URL(string: offer.livekitURL), !offer.livekitURL.isEmpty else {
             throw .invalidURL
         }
-        try self.init(url: url, token: offer.subscriberToken)
+        try self.init(url: url, token: offer.subscriberToken, allowlist: allowlist)
     }
 }
 
@@ -56,4 +72,9 @@ public enum LiveStreamCredentialsError: Error, Equatable, Sendable {
     case invalidURL
     case invalidURLScheme
     case missingToken
+    /// The `StreamOffer`'s host is not in the app's LiveKit allowlist.
+    /// Most common cause: a misprovisioned device or a tampered stream
+    /// offer. The carried `String` is the rejected host, for
+    /// diagnostics — never echoed to the user as-is.
+    case hostNotAllowed(String)
 }

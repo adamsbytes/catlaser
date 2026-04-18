@@ -57,7 +57,7 @@ public struct PairingClient: Sendable {
     public static let pairPath = "api/v1/devices/pair"
 
     private let baseURL: URL
-    private let http: any HTTPClient
+    private let http: SignedHTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -65,12 +65,13 @@ public struct PairingClient: Sendable {
     ///   - baseURL: coordination server root. Must match
     ///     `AuthConfig.baseURL` byte-for-byte — using a different
     ///     origin would bypass the pinning posture and is a bug.
-    ///   - http: `SignedHTTPClient` wrapping a pinned
-    ///     `URLSessionHTTPClient`. Must be the signed variant; calling
-    ///     the coordination server with an unsigned client would
-    ///     produce 401 because the `api:` attestation middleware
-    ///     rejects the call.
-    public init(baseURL: URL, http: any HTTPClient) {
+    ///   - http: concrete `SignedHTTPClient`, which itself can only
+    ///     be built (in a release product target) from a
+    ///     `PinnedHTTPClient`. The type signature forces the pinning
+    ///     + attestation + idempotency pipeline onto every pair
+    ///     exchange; a future refactor that threads an unpinned
+    ///     transport into this call site would fail to compile.
+    public init(baseURL: URL, http: SignedHTTPClient) {
         self.baseURL = baseURL
         self.http = http
         let encoder = JSONEncoder()

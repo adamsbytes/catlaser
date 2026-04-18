@@ -14,7 +14,7 @@ struct PairingClientTests {
     }
 
     private func makeClient(http: MockHTTPClient) -> PairingClient {
-        PairingClient(baseURL: baseURL, http: http)
+        PairingClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
     }
 
     // MARK: - Happy path

@@ -162,22 +162,29 @@ public final class PairingViewModel {
         }
     }
 
-    /// Called by the QR scanner on a valid decode. Kicks off the
-    /// pair exchange.
+    /// Called by the QR scanner on a valid decode. Parks the decoded
+    /// code in `.confirming(code)` and waits for an explicit
+    /// `confirmPairing()` tap. The coordination server is NOT
+    /// contacted at this point — the confirmation gate gives the user
+    /// a chance to see which device they are about to claim before
+    /// any network traffic fires, which defeats a class of
+    /// swap-the-QR attacks and turns pairing into an explicit, visible
+    /// action rather than a silent auto-submit on decode.
     public func submitScannedCode(_ code: PairingCode) async {
         guard !phase.isBusy else { return }
         switch phase {
         case .scanning, .manualEntry, .failed:
-            break
+            phase = .confirming(code)
         default:
             return
         }
-        await runExchange(code: code)
     }
 
-    /// Submit a manually-typed pairing code. Returns without
-    /// side-effects if parsing fails; the UI surfaces the failure
-    /// via `phase = .failed(.invalidCode(...))`.
+    /// Submit a manually-typed pairing code. Parses the draft and
+    /// parks the result in `.confirming(code)`; the user must tap
+    /// `confirmPairing()` to actually hit the coordination server.
+    /// Parse failures land on `.failed(.invalidCode(...))` with no
+    /// network side effect.
     public func submitManualCode() async {
         guard case let .manualEntry(draft) = phase else { return }
         let code: PairingCode
@@ -187,7 +194,22 @@ public final class PairingViewModel {
             phase = .failed(.invalidCode(error))
             return
         }
+        phase = .confirming(code)
+    }
+
+    /// Consume the `.confirming(code)` phase and run the pair
+    /// exchange. No-op from any other phase.
+    public func confirmPairing() async {
+        guard case let .confirming(code) = phase else { return }
         await runExchange(code: code)
+    }
+
+    /// Cancel a pending `.confirming(code)` and return to the
+    /// scanner (respecting camera permission). No-op from any
+    /// other phase.
+    public func cancelPairingConfirmation() async {
+        guard case .confirming = phase else { return }
+        await advanceToScanningOrPermission()
     }
 
     /// Update the manual-entry draft buffer. The VM keeps the draft
@@ -304,6 +326,30 @@ public final class PairingViewModel {
 
     private func applyConnectionState(_ next: ConnectionState) {
         connectionState = next
+        // Device-side revocation is terminal — the supervisor has
+        // already given up and the server will reject any retry with
+        // the same SPKI. Wipe the Keychain row and route the user
+        // through the pairing flow automatically; anything else
+        // would leave the app spinning against an endpoint that is
+        // guaranteed to keep kicking it off.
+        if case let .failed(error) = next, case .authRevoked = error {
+            Task { [weak self] in
+                await self?.unpairAfterRevocation()
+            }
+        }
+    }
+
+    /// Wipe local pairing state after the device declared our SPKI
+    /// revoked. Synchronous analogue of `unpair()` but avoids a
+    /// second stop-and-cleanup pass on the supervisor, which has
+    /// already transitioned itself to `.failed(.authRevoked)`.
+    private func unpairAfterRevocation() async {
+        connectionStateTask?.cancel()
+        connectionStateTask = nil
+        manager = nil
+        connectionState = .idle
+        try? await store.delete()
+        await advanceToScanningOrPermission()
     }
 
     private func advanceToScanningOrPermission() async {
@@ -351,7 +397,12 @@ public final class PairingViewModel {
                 return .noLongerOwned
             case .network, .rateLimited, .serverError, .invalidServerResponse,
                  .storage, .attestation, .codeAlreadyUsed, .codeExpired,
-                 .codeNotFound, .invalidCode:
+                 .codeNotFound, .invalidCode, .authRevoked:
+                // `.authRevoked` is a device-side-only signal —
+                // `PairedDevicesClient` cannot synthesise it. If it
+                // ever reaches here that's a library bug; mapping to
+                // `.indeterminate` preserves the cached pairing
+                // instead of double-wiping on a spurious signal.
                 return .indeterminate
             }
         }

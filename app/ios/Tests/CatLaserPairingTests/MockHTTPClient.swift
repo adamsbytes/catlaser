@@ -1,5 +1,7 @@
-import CatLaserAuth
+import CatLaserAuthTestSupport
 import Foundation
+
+@testable import CatLaserAuth
 
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -85,4 +87,49 @@ extension HTTPResponse {
     static func empty(status: Int) -> HTTPResponse {
         HTTPResponse(statusCode: status, headers: [:], body: Data())
     }
+}
+
+// MARK: - SignedHTTPClient test harness
+
+/// Build a `SignedHTTPClient` wrapping the given mock. Pairing tests
+/// deliberately exercise the full signed pipeline — the same wrapper
+/// production uses — rather than construct a `PairingClient` against
+/// a raw mock. The package-private `SignedHTTPClient(underlying:...)`
+/// initializer is reached via `@testable import CatLaserAuth`; that
+/// seam is invisible to release builds of `CatLaserApp` / `CatLaserPairing`.
+///
+/// The stubbed bearer store and attestation provider intentionally
+/// hold deterministic values: pairing-client tests care about status
+/// mapping and wire format, not signing correctness
+/// (`CatLaserAuthTests/SignedHTTPClientTests` owns that coverage).
+func signedTestClient(wrapping mock: MockHTTPClient) -> SignedHTTPClient {
+    let session = AuthSession(
+        bearerToken: "pairing-test-bearer",
+        user: AuthUser(
+            id: "user-test",
+            email: "test@example.com",
+            name: "Test",
+            image: nil,
+            emailVerified: true,
+        ),
+        provider: .magicLink,
+        establishedAt: Date(timeIntervalSince1970: 1_712_000_000),
+    )
+    let store = InMemoryBearerTokenStore(initial: session)
+    let identity = SoftwareIdentityStore()
+    let fingerprint = DeviceFingerprint(
+        platform: "ios",
+        model: "iPhone15,4",
+        systemName: "iOS",
+        bundleID: "com.catlaser.app.tests",
+        installID: "pairing-test-install",
+    )
+    let provider = StubDeviceAttestationProvider(fingerprint: fingerprint, identity: identity)
+    return SignedHTTPClient(
+        underlying: mock,
+        store: store,
+        attestationProvider: provider,
+        clock: { Date(timeIntervalSince1970: 1_712_345_678) },
+        uuidFactory: { UUID(uuidString: "00000000-0000-4000-8000-000000000000")! },
+    )
 }

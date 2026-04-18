@@ -273,6 +273,16 @@ public actor ConnectionManager {
             let client = clientFactory(endpoint)
             do {
                 try await client.connect(handshake: handshakeBuilder)
+            } catch let clientError as DeviceClientError where clientError.isTerminalAuthRevocation {
+                // Device-side revocation: do NOT back off and retry.
+                // The server has removed this user's SPKI from the
+                // ACL; hammering the handshake would only produce
+                // identical failures and deny a legitimate re-pair
+                // flow the CPU it needs. Transition to a terminal
+                // failed state and exit the supervisor; PairingViewModel
+                // observes the transition and calls `unpair()`.
+                transition(to: .failed(.authRevoked(message: clientError.authRevokedMessage)))
+                return
             } catch {
                 if stopped { return }
                 await scheduleBackoff()
@@ -385,10 +395,18 @@ public actor ConnectionManager {
                 try? await Task.sleep(nanoseconds: nanos)
                 if Task.isCancelled { return }
                 guard let self else { return }
-                let ok = await self.performHeartbeat(on: client)
-                if ok {
+                let outcome = await self.performHeartbeat(on: client)
+                switch outcome {
+                case .success:
                     consecutiveFailures = 0
-                } else {
+                case let .authRevoked(message):
+                    // Fast-path the terminal-auth-revocation signal:
+                    // no point waiting for `cap` consecutive failures
+                    // when the first one already tells us we are
+                    // permanently unauthorized.
+                    await self.handleAuthRevoked(client: client, message: message)
+                    return
+                case .transientFailure:
                     consecutiveFailures += 1
                     if consecutiveFailures >= cap {
                         await self.handleHeartbeatExceeded(client: client)
@@ -399,14 +417,27 @@ public actor ConnectionManager {
         }
     }
 
-    private func performHeartbeat(on client: DeviceClient) async -> Bool {
+    /// Outcome of a single heartbeat probe. The three categories drive
+    /// distinct reactions: `success` resets the failure counter,
+    /// `authRevoked` collapses straight to a terminal failed state,
+    /// and `transientFailure` increments toward the cap before
+    /// triggering a reconnect.
+    private enum HeartbeatOutcome: Sendable, Equatable {
+        case success
+        case authRevoked(message: String)
+        case transientFailure
+    }
+
+    private func performHeartbeat(on client: DeviceClient) async -> HeartbeatOutcome {
         var request = Catlaser_App_V1_AppRequest()
         request.getStatus = Catlaser_App_V1_GetStatusRequest()
         do {
             _ = try await client.request(request)
-            return true
+            return .success
+        } catch let clientError as DeviceClientError where clientError.isTerminalAuthRevocation {
+            return .authRevoked(message: clientError.authRevokedMessage)
         } catch {
-            return false
+            return .transientFailure
         }
     }
 
@@ -416,6 +447,24 @@ public actor ConnectionManager {
         // nulled `heartbeatTask` via `teardownConnected`.
         guard case let .connected(active) = state, active === client else { return }
         await teardownConnected(client: client)
+    }
+
+    private func handleAuthRevoked(client: DeviceClient, message: String) async {
+        // Gate on active-client match for the same reason as
+        // `handleHeartbeatExceeded` — a prior teardown may have
+        // already replaced the supervisor's client reference.
+        guard case let .connected(active) = state, active === client else { return }
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        eventsWatcherTask?.cancel()
+        eventsWatcherTask = nil
+        await client.disconnect()
+        // Transition to terminal failed; the supervisor loop will
+        // exit on its next tick via `awaitDisconnect` wake, observe
+        // the state, and return rather than scheduling a backoff.
+        transition(to: .failed(.authRevoked(message: message)))
+        stopped = true
+        wakeCurrentParked()
     }
 
     // MARK: - Events watcher

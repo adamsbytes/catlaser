@@ -32,6 +32,7 @@ public struct PairingView: View {
         case let .needsCameraPermission(status): "needsCameraPermission:\(status)"
         case .scanning: "scanning"
         case .manualEntry: "manualEntry"
+        case .confirming: "confirming"
         case .exchanging: "exchanging"
         case .paired: "paired"
         case .failed: "failed"
@@ -49,6 +50,8 @@ public struct PairingView: View {
             scanningView
         case let .manualEntry(draft):
             manualEntryView(draft: draft)
+        case let .confirming(code):
+            confirmingView(code: code)
         case .exchanging:
             busyView(label: PairingStrings.exchangingLabel)
         case let .paired(device):
@@ -220,6 +223,64 @@ public struct PairingView: View {
         }
         .frame(maxWidth: 420)
         .padding()
+    }
+
+    private func confirmingView(code: PairingCode) -> some View {
+        VStack(spacing: 18) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 48, weight: .regular))
+                .foregroundStyle(.white.opacity(0.85))
+                .accessibilityHidden(true)
+            Text(PairingStrings.confirmTitle)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+            VStack(spacing: 4) {
+                Text(PairingStrings.confirmDeviceIDLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .textCase(.uppercase)
+                Text(code.deviceID)
+                    .font(.title3.weight(.semibold).monospaced())
+                    .foregroundStyle(.white)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            }
+            Text(PairingStrings.confirmSubtitle)
+                .font(.callout)
+                .foregroundStyle(.white.opacity(0.75))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            HStack(spacing: 12) {
+                Button {
+                    Task { await viewModel.cancelPairingConfirmation() }
+                } label: {
+                    Text(PairingStrings.confirmCancelButton)
+                        .font(.body.weight(.semibold))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    Task { await viewModel.confirmPairing() }
+                } label: {
+                    Text(PairingStrings.confirmButton)
+                        .font(.body.weight(.semibold))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: 420)
+        .padding()
+        .accessibilityElement(children: .contain)
     }
 
     private func pairedView(device: PairedDevice) -> some View {

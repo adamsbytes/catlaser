@@ -27,6 +27,13 @@ import Foundation
 /// * `.storage` — keychain or disk write failed; UI prompts to retry.
 /// * `.attestation` — device attestation signing failed; propagates
 ///   from `SignedHTTPClient` (e.g. SE unavailable).
+/// * `.authRevoked` — the device daemon reported that the current
+///   user's SPKI is no longer authorized. The supervisor treats this
+///   as terminal: no reconnect attempts, the pairing row is wiped,
+///   the user is routed back through the pairing flow. Distinct from
+///   `.missingSession` (which indicates the coordination server no
+///   longer has a session for the bearer) because the signal arrives
+///   from the device, not the coord server.
 public enum PairingError: Error, Equatable, Sendable {
     case invalidCode(PairingCodeError)
     case missingSession
@@ -39,6 +46,7 @@ public enum PairingError: Error, Equatable, Sendable {
     case invalidServerResponse(String)
     case storage(String)
     case attestation(String)
+    case authRevoked(message: String)
 
     /// Lift an `AuthError` arising from the signed HTTP client into a
     /// `PairingError`. Centralised so every call site renders the same

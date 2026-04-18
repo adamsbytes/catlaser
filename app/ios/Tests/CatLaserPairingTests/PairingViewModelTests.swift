@@ -24,7 +24,13 @@ struct PairingViewModelTests {
 
     private func makeClient(outcomes: [MockHTTPClient.Outcome]) -> (MockHTTPClient, PairingClient) {
         let http = MockHTTPClient(outcomes: outcomes)
-        return (http, PairingClient(baseURL: URL(string: "https://api.example.com")!, http: http))
+        return (
+            http,
+            PairingClient(
+                baseURL: URL(string: "https://api.example.com")!,
+                http: signedTestClient(wrapping: http),
+            ),
+        )
     }
 
     private func makeFactory() -> @Sendable (PairedDevice) -> ConnectionManager {
@@ -150,7 +156,10 @@ struct PairingViewModelTests {
             "host": "100.64.1.7",
             "port": 9820,
         ])))
-        let client = PairingClient(baseURL: URL(string: "https://api.example.com")!, http: http)
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
         let store = PublicInMemoryEndpointStore()
         let gate = FakeCameraPermissionGate(initial: .authorized)
 
@@ -164,6 +173,15 @@ struct PairingViewModelTests {
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
         await vm.submitScannedCode(code)
+        // The confirmation gate parks the scan; no HTTP has fired yet.
+        if case let .confirming(parked) = vm.phase {
+            #expect(parked == code)
+        } else {
+            Issue.record("expected .confirming after scan, got \(vm.phase)")
+        }
+        #expect(await http.requests().isEmpty)
+
+        await vm.confirmPairing()
 
         if case let .paired(device) = vm.phase {
             #expect(device.id == "cat-001")
@@ -178,11 +196,159 @@ struct PairingViewModelTests {
         }
     }
 
+    // MARK: - Confirmation gate
+
+    /// The scanner's decode must NOT fire the pair exchange: it parks
+    /// the code in `.confirming(code)` and waits for an explicit
+    /// `confirmPairing()` tap. A probe that records HTTP traffic after
+    /// a scan would see nothing.
+    @Test
+    func scannedCodeParksInConfirmingWithoutNetwork() async throws {
+        let http = MockHTTPClient()
+        // Enqueue a response that would fail the test if it were
+        // consumed — every request the mock receives, it pops one
+        // outcome, so an accidental pair exchange would reach this
+        // response and advance the VM silently. Seeing `.confirming`
+        // with no consumed outcomes is the real assertion.
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "host": "100.64.1.7",
+            "port": 9820,
+        ])))
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: client,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
+        await vm.submitScannedCode(code)
+
+        if case let .confirming(parked) = vm.phase {
+            #expect(parked == code)
+            #expect(parked.deviceID == "cat-001")
+        } else {
+            Issue.record("expected .confirming, got \(vm.phase)")
+        }
+        // No HTTP traffic: the coordination server must not hear about
+        // the decoded code until the user taps "Pair".
+        #expect(await http.requests().isEmpty)
+        #expect(await store.snapshot() == nil)
+    }
+
+    /// Cancelling the confirmation returns to the scanner without
+    /// touching the coordination server or the keychain. Regression
+    /// guard for anyone who might add a "preload" call.
+    @Test
+    func cancelPairingConfirmationReturnsToScannerWithoutNetwork() async throws {
+        let http = MockHTTPClient()
+        // A queued response proves the mock would have been called —
+        // the assertion is that it was NOT.
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "host": "100.64.1.7",
+            "port": 9820,
+        ])))
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: client,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
+        await vm.submitScannedCode(code)
+        await vm.cancelPairingConfirmation()
+
+        #expect(vm.phase == .scanning)
+        #expect(await http.requests().isEmpty)
+        #expect(await store.snapshot() == nil)
+    }
+
+    /// `confirmPairing` from a non-`.confirming` phase must be a no-op
+    /// so a stray tap after navigation cannot resurrect a stale code.
+    @Test
+    func confirmPairingNoOpFromNonConfirmingPhase() async throws {
+        let http = MockHTTPClient()
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "host": "100.64.1.7",
+            "port": 9820,
+        ])))
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: client,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        // Skip the confirming hop entirely — we're still in .scanning.
+        await vm.confirmPairing()
+        #expect(vm.phase == .scanning)
+        #expect(await http.requests().isEmpty)
+    }
+
+    /// Manual entry also parks in `.confirming` before hitting the
+    /// coordination server, matching the scanner flow.
+    @Test
+    func manualCodeParksInConfirmingWithoutNetwork() async throws {
+        let http = MockHTTPClient()
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "host": "100.64.1.7",
+            "port": 9820,
+        ])))
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: client,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        vm.switchToManualEntry()
+        vm.setManualDraft("catlaser://pair?code=ABCDEFGHIJKLMNOP&device=cat-001")
+        await vm.submitManualCode()
+        if case let .confirming(parked) = vm.phase {
+            #expect(parked.deviceID == "cat-001")
+        } else {
+            Issue.record("expected .confirming after manual submit, got \(vm.phase)")
+        }
+        #expect(await http.requests().isEmpty)
+    }
+
     @Test
     func scannedCodeServerFailureSurfacesAsFailed() async throws {
         let http = MockHTTPClient()
         await http.enqueue(.response(.json(["message": "already claimed"], status: 409)))
-        let client = PairingClient(baseURL: URL(string: "https://api.example.com")!, http: http)
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
         let store = PublicInMemoryEndpointStore()
         let gate = FakeCameraPermissionGate(initial: .authorized)
 
@@ -195,6 +361,7 @@ struct PairingViewModelTests {
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
         await vm.submitScannedCode(code)
+        await vm.confirmPairing()
 
         if case let .failed(error) = vm.phase {
             if case .codeAlreadyUsed = error {
@@ -216,7 +383,10 @@ struct PairingViewModelTests {
             "host": "100.64.1.7",
             "port": 9820,
         ])))
-        let client = PairingClient(baseURL: URL(string: "https://api.example.com")!, http: http)
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
         let store = PublicInMemoryEndpointStore()
         await store.queueSaveFailure(.storage("disk full"))
         let gate = FakeCameraPermissionGate(initial: .authorized)
@@ -230,6 +400,7 @@ struct PairingViewModelTests {
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
         await vm.submitScannedCode(code)
+        await vm.confirmPairing()
 
         if case .failed = vm.phase {
             // good
@@ -292,7 +463,10 @@ struct PairingViewModelTests {
             "host": "100.64.1.7",
             "port": 9820,
         ])))
-        let client = PairingClient(baseURL: URL(string: "https://api.example.com")!, http: http)
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
         let store = PublicInMemoryEndpointStore()
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -305,6 +479,7 @@ struct PairingViewModelTests {
         vm.switchToManualEntry()
         vm.setManualDraft("catlaser://pair?code=ABCDEFGHIJKLMNOP&device=cat-001")
         await vm.submitManualCode()
+        await vm.confirmPairing()
         if case .paired = vm.phase {
             // good
         } else {
@@ -389,7 +564,10 @@ struct PairingViewModelTests {
     func dismissErrorWithoutStoredDeviceGoesToScanner() async throws {
         let http = MockHTTPClient()
         await http.enqueue(.response(.json(["message": "not found"], status: 404)))
-        let client = PairingClient(baseURL: URL(string: "https://api.example.com")!, http: http)
+        let client = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
         let store = PublicInMemoryEndpointStore()
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -401,6 +579,7 @@ struct PairingViewModelTests {
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
         await vm.submitScannedCode(code)
+        await vm.confirmPairing()
         await vm.dismissError()
         #expect(vm.phase == .scanning)
     }
@@ -482,7 +661,7 @@ struct PairingViewModelTests {
         ])
         let pairedList = PairedDevicesClient(
             baseURL: URL(string: "https://api.example.com")!,
-            http: http,
+            http: signedTestClient(wrapping: http),
         )
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -517,7 +696,7 @@ struct PairingViewModelTests {
         ])
         let pairedList = PairedDevicesClient(
             baseURL: URL(string: "https://api.example.com")!,
-            http: http,
+            http: signedTestClient(wrapping: http),
         )
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -550,7 +729,7 @@ struct PairingViewModelTests {
         ])
         let pairedList = PairedDevicesClient(
             baseURL: URL(string: "https://api.example.com")!,
-            http: http,
+            http: signedTestClient(wrapping: http),
         )
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -584,7 +763,7 @@ struct PairingViewModelTests {
         ])
         let pairedList = PairedDevicesClient(
             baseURL: URL(string: "https://api.example.com")!,
-            http: http,
+            http: signedTestClient(wrapping: http),
         )
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -649,7 +828,7 @@ struct PairingViewModelTests {
         ])
         let pairedList = PairedDevicesClient(
             baseURL: URL(string: "https://api.example.com")!,
-            http: http,
+            http: signedTestClient(wrapping: http),
         )
         let gate = FakeCameraPermissionGate(initial: .authorized)
         let vm = PairingViewModel(
@@ -686,7 +865,7 @@ struct PairingViewModelTests {
         ])
         let pairedList = PairedDevicesClient(
             baseURL: URL(string: "https://api.example.com")!,
-            http: http,
+            http: signedTestClient(wrapping: http),
         )
         let gate = FakeCameraPermissionGate(initial: .authorized)
         // Set a zero interval so the second call is always allowed.

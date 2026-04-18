@@ -514,4 +514,65 @@ struct DeviceClientTests {
         #expect(!(await client.isConnected))
         await server.stop()
     }
+
+    // MARK: - ACL revocation (fix for per-connection auth caching)
+
+    /// An unsolicited `DeviceError { code: AUTH_REVOKED }` sent by the
+    /// device after an ACL snapshot removed the user's SPKI must
+    /// terminate the connection and fail all in-flight requests with
+    /// `.authRevoked(message:)` — NOT `.closedByPeer` — so the
+    /// supervisor can distinguish "re-pair required" from a transport
+    /// drop.
+    @Test
+    func authRevokedUnsolicitedEventFailsPendingWithAuthRevoked() async throws {
+        let (client, transport) = makeClient()
+        try await client.connect()
+
+        var request = Catlaser_App_V1_AppRequest()
+        request.getStatus = Catlaser_App_V1_GetStatusRequest()
+        async let result: Catlaser_App_V1_DeviceEvent = client.request(request)
+
+        // Wait for the client to send the request so its continuation
+        // is registered — otherwise the unsolicited event arrives
+        // before there's anything to fail.
+        _ = try await transport.nextAppRequest(timeout: 2.0)
+
+        var revokeEvent = Catlaser_App_V1_DeviceEvent()
+        var err = Catlaser_App_V1_DeviceError()
+        err.code = DeviceClientError.authRevokedCode
+        err.message = "device access revoked; re-pair to continue"
+        revokeEvent.error = err
+        // request_id=0 ⇒ unsolicited push, matching the Python daemon.
+        try transport.deliver(event: revokeEvent)
+
+        do {
+            _ = try await result
+            Issue.record("expected throw on auth revocation")
+        } catch let DeviceClientError.authRevoked(message) {
+            #expect(message.contains("revoked"))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+        // The client must have closed itself — a subsequent request
+        // returns notConnected rather than hitting the (now torn down)
+        // transport.
+        #expect(await !client.isConnected)
+    }
+
+    /// The terminal-auth classifier must stay in sync with the two
+    /// wire signals that carry the revocation. A regression here would
+    /// let `ConnectionManager` keep reconnecting against an endpoint
+    /// that is guaranteed to reject every future handshake.
+    @Test
+    func isTerminalAuthRevocationClassification() {
+        #expect(DeviceClientError.authRevoked(message: "anything").isTerminalAuthRevocation)
+        #expect(DeviceClientError.handshakeFailed(reason: "DEVICE_AUTH_NOT_AUTHORIZED").isTerminalAuthRevocation)
+        // Transient auth states: ACL not primed yet, clock skew — not
+        // terminal; reconnect-with-backoff is the correct behavior.
+        #expect(!DeviceClientError.handshakeFailed(reason: "DEVICE_AUTH_ACL_NOT_READY").isTerminalAuthRevocation)
+        #expect(!DeviceClientError.handshakeFailed(reason: "DEVICE_AUTH_SKEW_EXCEEDED").isTerminalAuthRevocation)
+        #expect(!DeviceClientError.closedByPeer.isTerminalAuthRevocation)
+        #expect(!DeviceClientError.transport("network down").isTerminalAuthRevocation)
+        #expect(!DeviceClientError.requestTimedOut.isTerminalAuthRevocation)
+    }
 }

@@ -3,6 +3,21 @@ import CatLaserProto
 import Foundation
 import Observation
 
+/// Decision returned by the pre-stream user-presence gate.
+///
+/// The live-view screen calls into a caller-supplied gate before any
+/// stream machinery is touched. The gate reports one of three
+/// outcomes, and `LiveViewModel` maps each to a distinct phase:
+/// `.allowed` advances to `.requestingOffer`; `.cancelled` lands back
+/// on `.disconnected` silently (user said no, don't nag); `.denied`
+/// lands on `.failed(.authenticationRequired)` so the UI surfaces a
+/// retry path and the diagnostic reason.
+public enum LiveAuthGateOutcome: Sendable, Equatable {
+    case allowed
+    case cancelled
+    case denied(String)
+}
+
 /// Observable view model backing the live-view screen.
 ///
 /// Responsibilities:
@@ -13,6 +28,9 @@ import Observation
 /// 3. Own the `LiveStreamSession` that subscribes to LiveKit.
 /// 4. Listen for unsolicited session events (server-side disconnect,
 ///    network drop) and move the phase accordingly.
+/// 5. Gate `start()` behind a caller-supplied user-presence check so
+///    a momentarily-unlocked phone cannot reveal the in-home feed
+///    without an explicit Face ID / passcode confirmation.
 ///
 /// Reentrancy:
 ///
@@ -38,18 +56,32 @@ import Observation
 @MainActor
 @Observable
 public final class LiveViewModel {
+    /// Builder for the pre-stream user-presence gate. Called once at
+    /// the top of `start()`; the VM never proceeds past this hop if
+    /// the outcome is anything but `.allowed`. The closure is
+    /// `@Sendable` so the composition root can thread in the
+    /// auth-module's `GatedBearerTokenStore.requireLiveVideo`
+    /// wrapper directly.
+    public typealias AuthGate = @Sendable () async -> LiveAuthGateOutcome
+
     public private(set) var state: LiveViewState = .disconnected
 
     private let deviceClient: DeviceClient
     private let sessionFactory: @Sendable () -> any LiveStreamSession
+    private let authGate: AuthGate
+    private let liveKitAllowlist: LiveKitHostAllowlist
     private var currentSession: (any LiveStreamSession)?
     private var eventsTask: Task<Void, Never>?
 
     public init(
         deviceClient: DeviceClient,
+        authGate: @escaping AuthGate,
+        liveKitAllowlist: LiveKitHostAllowlist,
         sessionFactory: @escaping @Sendable () -> any LiveStreamSession,
     ) {
         self.deviceClient = deviceClient
+        self.authGate = authGate
+        self.liveKitAllowlist = liveKitAllowlist
         self.sessionFactory = sessionFactory
     }
 
@@ -66,8 +98,30 @@ public final class LiveViewModel {
     /// Start a live stream. No-op if already starting, connecting, or
     /// streaming. Resets a `.failed` phase before retrying so the UI
     /// transitions cleanly.
+    ///
+    /// The very first hop is the pre-stream user-presence gate. A
+    /// `.cancelled` result returns the VM to `.disconnected`; a
+    /// `.denied` result lands on `.failed(.authenticationRequired)`.
+    /// Neither path performs any device round-trip or LiveKit dial,
+    /// so a user who cancels never leaks the fact that the device
+    /// was reachable or that a stream would have been available.
     public func start() async {
         guard state.canStart else { return }
+
+        switch await authGate() {
+        case .allowed:
+            break
+        case .cancelled:
+            // User said no. Don't bounce them through an error banner
+            // that re-prompts on dismiss — that would punish the
+            // explicit decline. Return to the idle entry point.
+            state = .disconnected
+            return
+        case let .denied(reason):
+            state = .failed(.authenticationRequired(reason))
+            return
+        }
+
         state = .requestingOffer
 
         let offer: Catlaser_App_V1_StreamOffer
@@ -86,7 +140,7 @@ public final class LiveViewModel {
 
         let credentials: LiveStreamCredentials
         do {
-            credentials = try LiveStreamCredentials(offer: offer)
+            credentials = try LiveStreamCredentials(offer: offer, allowlist: liveKitAllowlist)
         } catch {
             state = .failed(.streamOfferInvalid(error))
             await rollbackDeviceStream()

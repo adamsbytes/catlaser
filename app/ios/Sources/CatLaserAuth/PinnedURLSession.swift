@@ -155,19 +155,4 @@ public extension URLSession {
     }
 }
 
-public extension URLSessionHTTPClient {
-    /// Build a pinned `URLSessionHTTPClient` wrapping
-    /// `URLSession.pinned(pinning:onRejection:)`. The underlying session
-    /// is ephemeral, has cookies / caching disabled, and enforces
-    /// SPKI-SHA256 pinning on every connection.
-    static func pinned(
-        pinning: TLSPinning,
-        onRejection: (@Sendable (_ reason: String) -> Void)? = nil,
-    ) -> URLSessionHTTPClient {
-        URLSessionHTTPClient(
-            session: URLSession.pinned(pinning: pinning, onRejection: onRejection),
-        )
-    }
-}
-
 #endif

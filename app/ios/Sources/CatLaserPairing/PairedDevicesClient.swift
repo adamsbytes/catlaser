@@ -65,17 +65,19 @@ public struct PairedDevicesClient: Sendable {
     public static let pairedPath = "api/v1/devices/paired"
 
     private let baseURL: URL
-    private let http: any HTTPClient
+    private let http: SignedHTTPClient
     private let decoder: JSONDecoder
 
     /// - Parameters:
     ///   - baseURL: coordination server root. Must match
     ///     `AuthConfig.baseURL` byte-for-byte.
-    ///   - http: `SignedHTTPClient` wrapping a pinned
-    ///     `URLSessionHTTPClient`. Must be the signed variant; calling
-    ///     the coordination server with an unsigned client produces
-    ///     401 because the `api:` attestation middleware rejects it.
-    public init(baseURL: URL, http: any HTTPClient) {
+    ///   - http: concrete `SignedHTTPClient`, which itself can only
+    ///     be built (in a release product target) from a
+    ///     `PinnedHTTPClient`. The type signature forces the pinning
+    ///     + attestation pipeline onto every ownership re-check; a
+    ///     future refactor that threads an unpinned transport here
+    ///     would fail to compile.
+    public init(baseURL: URL, http: SignedHTTPClient) {
         self.baseURL = baseURL
         self.http = http
         let decoder = JSONDecoder()

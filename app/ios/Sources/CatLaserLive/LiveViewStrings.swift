@@ -127,6 +127,12 @@ public enum LiveViewStrings {
                 value: "Your network connection dropped during the stream.",
                 comment: "Error shown when the network failed mid-stream.",
             )
+        case .authenticationRequired:
+            return NSLocalizedString(
+                "live.error.authentication_required",
+                value: "Confirm with Face ID or your passcode to watch live video.",
+                comment: "Error shown when the pre-stream biometric gate refused.",
+            )
         case .internalFailure:
             return deviceGenericMessage
         }

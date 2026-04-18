@@ -16,8 +16,17 @@ import Foundation
 ///   for a valid QR.
 /// * `.manualEntry(code)` — fallback when the camera path is not
 ///   viable; the user is typing the code in by hand.
-/// * `.exchanging(code)` — we have a code; the HTTP exchange with
-///   the coordination server is in flight. UI shows a spinner.
+/// * `.confirming(PairingCode)` — a code has been decoded (from a
+///   scanned QR or manual entry) but the pair-exchange has NOT
+///   yet been sent to the coordination server. The UI renders a
+///   confirmation sheet showing the decoded `deviceID` so the user
+///   can verify they are pairing with their own device before any
+///   network traffic fires. A subsequent tap on "Pair" advances to
+///   `.exchanging`; "Cancel" returns to the scanner / manual-entry
+///   surface the user was on before.
+/// * `.exchanging(code)` — we have a confirmed code; the HTTP
+///   exchange with the coordination server is in flight. UI shows
+///   a spinner.
 /// * `.paired(device)` — exchange succeeded AND the result was
 ///   persisted. Connection manager may still be dialling; a
 ///   separate `ConnectionState` observer in the UI shows its
@@ -30,6 +39,7 @@ public enum PairingPhase: Sendable, Equatable {
     case needsCameraPermission(CameraPermissionStatus)
     case scanning
     case manualEntry(draft: String)
+    case confirming(PairingCode)
     case exchanging(PairingCode)
     case paired(PairedDevice)
     case failed(PairingError)
@@ -37,7 +47,8 @@ public enum PairingPhase: Sendable, Equatable {
     public var isBusy: Bool {
         switch self {
         case .checkingExisting, .exchanging: true
-        case .needsCameraPermission, .scanning, .manualEntry, .paired, .failed: false
+        case .needsCameraPermission, .scanning, .manualEntry,
+             .confirming, .paired, .failed: false
         }
     }
 

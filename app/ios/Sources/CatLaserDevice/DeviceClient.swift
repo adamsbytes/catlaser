@@ -353,6 +353,20 @@ public actor DeviceClient {
             await closeWithError(.malformedFrame(error.localizedDescription))
             return
         }
+        // Intercept the device daemon's ACL-revocation sentinel
+        // BEFORE the ordinary request-id routing. The daemon emits
+        // a `DeviceError(AUTH_REVOKED, ...)` with request_id == 0 on
+        // the way to closing the socket; treating it as a terminal
+        // error here lets `ConnectionManager` see the typed reason
+        // rather than a bare `.closedByPeer`, which would trigger
+        // an endless reconnect loop against the now-unauthorized
+        // endpoint.
+        if case let .error(remote) = event.event,
+           remote.code == DeviceClientError.authRevokedCode
+        {
+            await closeWithError(.authRevoked(message: remote.message))
+            return
+        }
         let id = event.requestID
         if id == 0 {
             eventContinuation.yield(event)

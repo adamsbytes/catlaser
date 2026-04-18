@@ -15,19 +15,20 @@ struct PairedDevicesClientTests {
         let http = MockHTTPClient(outcomes: [
             .response(HTTPResponse.json(["ok": true, "data": ["devices": []]])),
         ])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         let devices = try await client.list()
         #expect(devices.isEmpty)
 
         let recorded = await http.requests()
         #expect(recorded.count == 1)
         #expect(recorded.first?.method == "GET")
-        // The client MUST NOT invent `Authorization`, `x-device-
-        // attestation`, or `Idempotency-Key` — those are
-        // `SignedHTTPClient`'s job and tests pin that header is absent
-        // here so a future refactor cannot duplicate them on the wire.
-        #expect(recorded.first?.header("Authorization") == nil)
-        #expect(recorded.first?.header("x-device-attestation") == nil)
+        // End-to-end: the test wraps the mock in a real `SignedHTTPClient`
+        // via `signedTestClient(wrapping:)`, so the mock observes the
+        // same wire the coordination server would see. `Authorization`
+        // and `x-device-attestation` MUST be present (attached by the
+        // signer); `Idempotency-Key` MUST be absent on a read.
+        #expect(recorded.first?.header("Authorization") == "Bearer pairing-test-bearer")
+        #expect(recorded.first?.header("x-device-attestation") != nil)
         #expect(recorded.first?.header("Idempotency-Key") == nil)
         let expectedURL = baseURL.appendingPathComponent(PairedDevicesClient.pairedPath)
         #expect(recorded.first?.url == expectedURL)
@@ -50,7 +51,7 @@ struct PairedDevicesClientTests {
             ],
         ]
         let http = MockHTTPClient(outcomes: [.response(HTTPResponse.json(body))])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         let devices = try await client.list()
         #expect(devices.count == 1)
         let device = try #require(devices.first)
@@ -80,7 +81,7 @@ struct PairedDevicesClientTests {
             ],
         ]
         let http = MockHTTPClient(outcomes: [.response(HTTPResponse.json(body))])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         let devices = try await client.list()
         #expect(devices.first?.name == "")
     }
@@ -95,7 +96,7 @@ struct PairedDevicesClientTests {
                 status: 401,
             )),
         ])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -112,7 +113,7 @@ struct PairedDevicesClientTests {
                 status: 429,
             )),
         ])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -133,7 +134,7 @@ struct PairedDevicesClientTests {
                 status: 503,
             )),
         ])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -152,7 +153,7 @@ struct PairedDevicesClientTests {
         let http = MockHTTPClient(outcomes: [
             .response(HTTPResponse.empty(status: 418)),
         ])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -182,7 +183,7 @@ struct PairedDevicesClientTests {
             ],
         ]
         let http = MockHTTPClient(outcomes: [.response(HTTPResponse.json(body))])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -218,7 +219,7 @@ struct PairedDevicesClientTests {
             ],
         ]
         let http = MockHTTPClient(outcomes: [.response(HTTPResponse.json(body))])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -238,7 +239,7 @@ struct PairedDevicesClientTests {
         // failure so ownership-recheck callers don't mistake a
         // server-side regression for "user owns nothing."
         let http = MockHTTPClient(outcomes: [.response(HTTPResponse.json(["unexpected": 1]))])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")
@@ -257,7 +258,7 @@ struct PairedDevicesClientTests {
             var errorDescription: String? { "hung up" }
         }
         let http = MockHTTPClient(outcomes: [.failure(ContrivedError())])
-        let client = PairedDevicesClient(baseURL: baseURL, http: http)
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         do {
             _ = try await client.list()
             Issue.record("expected throw")

@@ -43,6 +43,12 @@ public enum LiveViewError: Error, Equatable, Sendable {
     /// The network underneath LiveKit failed mid-stream.
     case networkFailure(String?)
 
+    /// The pre-stream user-presence gate refused the stream (biometric
+    /// unavailable, lockout, repeated failures — anything other than a
+    /// plain user cancellation, which returns silently to `.disconnected`
+    /// rather than landing on a `.failed` banner).
+    case authenticationRequired(String)
+
     /// Catch-all for errors outside the device or LiveKit layers.
     case internalFailure(String)
 
@@ -77,6 +83,16 @@ public enum LiveViewError: Error, Equatable, Sendable {
             // a failed handshake is not load-bearing — both mean
             // "can't talk to the device right now."
             .transportFailure("device-auth handshake rejected: \(reason)")
+        case let .authRevoked(message):
+            // Terminal revocation at the live-view layer surfaces as
+            // a transport failure for the VM's error banner. The
+            // actual unpair + re-pair flow is owned by
+            // `PairingViewModel`, which observes the connection
+            // manager's terminal `.failed(.authRevoked)` state and
+            // handles keychain wipe and routing automatically — by
+            // the time the live-view sees this error the pairing
+            // flow has already started.
+            .transportFailure("access revoked: \(message)")
         }
     }
 }

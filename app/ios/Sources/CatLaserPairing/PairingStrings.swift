@@ -18,6 +18,12 @@ public enum PairingStrings {
     public static let retryButton = "Try again"
     public static let dismissButton = "Dismiss"
 
+    public static let confirmTitle = "Pair with this device?"
+    public static let confirmSubtitle = "We'll link this Catlaser to your account and wipe any previous owner's link."
+    public static let confirmDeviceIDLabel = "Device"
+    public static let confirmButton = "Pair this Catlaser"
+    public static let confirmCancelButton = "Cancel"
+
     public static let connectionStateIdle = "Idle"
     public static let connectionStateWaitingForNetwork = "Waiting for network"
     public static let connectionStateConnected = "Connected"
@@ -76,6 +82,8 @@ public enum PairingStrings {
             return "Couldn't save pairing: \(message)"
         case let .attestation(message):
             return "Device attestation failed: \(message)"
+        case .authRevoked:
+            return "Your access to this Catlaser was revoked. Pair again to reconnect."
         }
     }
 

@@ -53,12 +53,21 @@ import FoundationNetworking
 /// semantics are opposite: preserve caller input (with format validation)
 /// so retry-with-dedup is an explicit caller decision.
 ///
-/// `SignedHTTPClient` itself conforms to `HTTPClient` so it composes: a
-/// pinned `URLSessionHTTPClient` is wrapped by a `SignedHTTPClient`, and
-/// downstream API clients can take `any HTTPClient` without knowing
-/// whether their dependency is pinned-plus-signed or a raw mock. This is
-/// the seam that makes forgetting to attach attestation a compile-
-/// reviewable failure (protected-route 401 in CI), not a silent success.
+/// `SignedHTTPClient` itself conforms to `HTTPClient` so it composes,
+/// but the composition boundary is intentionally narrow: the ONLY
+/// public initializer takes a concrete `PinnedHTTPClient`, which can
+/// itself only be constructed from a `TLSPinning` set (see
+/// `PinnedHTTPClient`). A future refactor that wired an unpinned
+/// `URLSession` into the protected call path would therefore fail to
+/// compile against this file's public surface — pinning becomes a
+/// type-system invariant rather than a convention.
+///
+/// Tests (`CatLaserAuthTests`, `CatLaserPairingTests`) reach the
+/// package-private `init(underlying: any HTTPClient, ...)` through
+/// `@testable import CatLaserAuth` to swap in a `MockHTTPClient` for
+/// full-stack signing assertions. That seam is invisible to the
+/// product target — `CatLaserApp` / `CatLaserPairing` build without
+/// `@testable` and therefore cannot reach it.
 public struct SignedHTTPClient: HTTPClient {
     public static let authorizationHeaderName = "Authorization"
     public static let idempotencyHeaderName = "Idempotency-Key"
@@ -86,24 +95,15 @@ public struct SignedHTTPClient: HTTPClient {
     private let clock: @Sendable () -> Date
     private let uuidFactory: @Sendable () -> UUID
 
-    public init(
-        underlying: any HTTPClient,
-        store: any BearerTokenStore,
-        attestationProvider: any DeviceAttestationProviding,
-    ) {
-        self.init(
-            underlying: underlying,
-            store: store,
-            attestationProvider: attestationProvider,
-            clock: { Date() },
-            uuidFactory: { UUID() },
-        )
-    }
-
     /// Package-private designated initializer. Tests inject a fixed clock
     /// so they can assert the exact `api:<ts>` timestamp threaded into
     /// each attestation, and a seeded UUID factory so they can assert
-    /// the exact `Idempotency-Key` without relying on the OS RNG.
+    /// the exact `Idempotency-Key` without relying on the OS RNG. Also
+    /// used by tests that want to intercept the post-sign wire bytes
+    /// with a `MockHTTPClient`; the test target reaches this initializer
+    /// via `@testable import CatLaserAuth`. Not public so a release
+    /// build of `CatLaserApp` / `CatLaserPairing` cannot accidentally
+    /// wire an unpinned transport into the protected call path.
     init(
         underlying: any HTTPClient,
         store: any BearerTokenStore,
@@ -231,3 +231,27 @@ public struct SignedHTTPClient: HTTPClient {
         return regex.firstMatch(in: candidate, options: [], range: range) != nil
     }
 }
+
+#if canImport(Security) && canImport(Darwin)
+public extension SignedHTTPClient {
+    /// Production-facing public initializer. Requires a concrete
+    /// `PinnedHTTPClient` — SPKI-SHA256 pinning is a type-system
+    /// invariant on this path. A caller that wants to wrap an unpinned
+    /// `URLSession` or a test mock must instead reach the
+    /// package-private `init(underlying:...)` via `@testable import
+    /// CatLaserAuth`, which the product target cannot do.
+    init(
+        transport: PinnedHTTPClient,
+        store: any BearerTokenStore,
+        attestationProvider: any DeviceAttestationProviding,
+    ) {
+        self.init(
+            underlying: transport,
+            store: store,
+            attestationProvider: attestationProvider,
+            clock: { Date() },
+            uuidFactory: { UUID() },
+        )
+    }
+}
+#endif
