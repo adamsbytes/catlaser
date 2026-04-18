@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from catlaser_brain.auth.acl import AclStore
 from catlaser_brain.auth.coord_client import AclGrant, AclSnapshot
 from catlaser_brain.network.handler import DeviceState, RequestHandler
-from catlaser_brain.network.server import MAX_CLIENTS, AppServer
+from catlaser_brain.network.server import ERR_AUTH_REVOKED, MAX_CLIENTS, AppServer
 from catlaser_brain.network.wire import (
     HEADER_SIZE,
     MAX_MESSAGE_SIZE,
@@ -744,6 +744,34 @@ class TestServerConnection:
         with pytest.raises(RuntimeError, match="not started"):
             _ = srv.address
 
+    def test_bind_addr_is_required_kwarg(self, handler: RequestHandler, acl: AclStore):
+        # Regression guard for the security fix that removed the
+        # `bind_addr="0.0.0.0"` default. A forgotten kwarg must be a
+        # compile-time / construction-time error — not a silent
+        # bind-to-everyone.
+        with pytest.raises(TypeError):
+            AppServer(handler, acl=acl, port=0)  # type: ignore[call-arg]
+
+    def test_bind_to_interface_rejects_unknown_iface(
+        self,
+        handler: RequestHandler,
+        acl: AclStore,
+    ) -> None:
+        # SO_BINDTODEVICE with a made-up interface name fails with
+        # either ENODEV (Linux) or ENOPROTOOPT (non-Linux). Either
+        # way the server must raise rather than fall back to a
+        # best-effort bind — silent fallback would defeat the whole
+        # point of pinning to the tailscale0 interface.
+        srv = AppServer(
+            handler,
+            acl=acl,
+            bind_addr="127.0.0.1",
+            port=0,
+            bind_interface="this-interface-does-not-exist",
+        )
+        with pytest.raises((OSError, PermissionError)):
+            srv.start()
+
 
 class TestServerRequestResponse:
     def test_get_status(self, server: AppServer, client_auth: ClientAuth):
@@ -1139,3 +1167,139 @@ class TestServerHandshake:
         assert event.auth_response.ok is False
         assert event.auth_response.reason == "DEVICE_AUTH_ALREADY_AUTHORIZED"
         sock.close()
+
+
+class TestServerAclRevocation:
+    """Eviction of authorized sessions when the ACL removes their SPKI.
+
+    Fix for the per-connection authorization cache bug: ``Client.authorized_spki``
+    is set once at handshake time and never re-validated, so a revoked user
+    retained their TCP session until the socket naturally closed. The fix
+    wires the ACL poller's "these SPKIs are gone" signal into the AppServer
+    so the socket is force-closed with a typed error the moment the server
+    sees the revocation.
+    """
+
+    def test_notify_evicts_matching_client_and_emits_error(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ) -> None:
+        sock = _connect_authenticated(server, client_auth)
+
+        # Simulate the ACL poller telling the server this client's
+        # SPKI is no longer authorized.
+        server.notify_spkis_revoked(frozenset({client_auth.spki_b64}))
+        server.poll()
+
+        # The app receives a DeviceError(ERR_AUTH_REVOKED, ...) frame
+        # before the close — which is what lets the app distinguish
+        # revocation from a network drop and trigger unpair rather
+        # than reconnect.
+        event = _recv_event(sock)
+        assert event.HasField("error")
+        assert event.error.code == ERR_AUTH_REVOKED
+        assert "revoked" in event.error.message.lower()
+
+        # Socket is closed server-side; recv returns b"" on clean close.
+        sock.settimeout(1.0)
+        assert sock.recv(4) == b""
+        assert server.client_count == 0
+        sock.close()
+
+    def test_notify_does_not_evict_unrelated_clients(
+        self,
+        handler: RequestHandler,
+    ) -> None:
+        # Two clients authorize with DIFFERENT SPKIs. Revoking one
+        # must leave the other fully connected and functional.
+        alice = _make_client_auth()
+        bob = _make_client_auth()
+        acl = _primed_acl(grants=(alice.spki_b64, bob.spki_b64))
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            alice_sock = _connect_authenticated(srv, alice)
+            bob_sock = _connect_authenticated(srv, bob)
+            assert srv.client_count == 2
+
+            srv.notify_spkis_revoked(frozenset({alice.spki_b64}))
+            srv.poll()
+
+            # Alice is kicked off with a typed error.
+            alice_event = _recv_event(alice_sock)
+            assert alice_event.HasField("error")
+            assert alice_event.error.code == ERR_AUTH_REVOKED
+
+            # Bob is unharmed — a status request still works.
+            _send_request(
+                bob_sock,
+                pb.AppRequest(request_id=42, get_status=pb.GetStatusRequest()),
+            )
+            srv.poll()
+            bob_reply = _recv_event(bob_sock)
+            assert bob_reply.request_id == 42
+            assert bob_reply.HasField("status_update")
+            assert srv.client_count == 1
+
+            alice_sock.close()
+            bob_sock.close()
+        finally:
+            srv.close()
+
+    def test_notify_on_unauthorized_client_is_noop(
+        self,
+        server: AppServer,
+    ) -> None:
+        # A pre-handshake client has `authorized_spki is None`.
+        # Revoking any SPKI — including a made-up one — must not
+        # disturb it, because the eviction matcher is SPKI-keyed
+        # and a None sentinel cannot match anything.
+        sock = _connect(server)
+        server.poll()
+        assert server.client_count == 1
+        server.notify_spkis_revoked(frozenset({"made-up-spki"}))
+        server.poll()
+        assert server.client_count == 1
+        sock.close()
+
+    def test_notify_is_idempotent_across_polls(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ) -> None:
+        # A repeated notify must not double-evict or crash when the
+        # client is already gone.
+        sock = _connect_authenticated(server, client_auth)
+        server.notify_spkis_revoked(frozenset({client_auth.spki_b64}))
+        server.poll()
+        # Drain the error frame so the socket close is clean.
+        _ = _recv_event(sock)
+        server.notify_spkis_revoked(frozenset({client_auth.spki_b64}))
+        server.poll()  # no-op, no exception
+        assert server.client_count == 0
+        sock.close()
+
+    def test_acl_diff_produces_revocation_set(self) -> None:
+        # Regression guard on AclStore.apply: the return value is the
+        # set of SPKIs that were in the previous snapshot but are not
+        # in the new one. Empty priming returns empty diff.
+        store = AclStore()
+        granted_at = "2026-01-01T00:00:00Z"
+        first = AclSnapshot(
+            device_id="cat-test",
+            revision=1,
+            grants=(
+                AclGrant(user_spki_b64="spki-alice", revision=1, granted_at_iso=granted_at),
+                AclGrant(user_spki_b64="spki-bob", revision=2, granted_at_iso=granted_at),
+            ),
+        )
+        second = AclSnapshot(
+            device_id="cat-test",
+            revision=2,
+            grants=(AclGrant(user_spki_b64="spki-alice", revision=3, granted_at_iso=granted_at),),
+        )
+        first_diff = store.apply(first)
+        assert first_diff == frozenset()  # priming: nothing revoked
+        second_diff = store.apply(second)
+        assert second_diff == frozenset({"spki-bob"})

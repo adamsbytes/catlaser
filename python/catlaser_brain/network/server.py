@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import select
 import socket
+import threading
 from typing import TYPE_CHECKING, Final, Self
 
 from google.protobuf.message import DecodeError
@@ -56,6 +57,18 @@ _SEND_TIMEOUT: Final[float] = 1.0
 """Send timeout in seconds. Prevents a stalled client from blocking
 the main loop. Clients that cannot receive within this window are
 disconnected.
+"""
+
+ERR_AUTH_REVOKED: Final[int] = 1001
+"""``DeviceError.code`` value sent to an authorized client just
+before its TCP session is force-closed because its SPKI was removed
+from the device ACL.
+
+The code is shared with the iOS :class:`DeviceClientError` mapping so
+the app can distinguish "device says you are no longer authorized —
+stop reconnecting, re-verify ownership" from transient transport
+failures. A value in the 1000-range is deliberately outside the
+``_ERR_*`` handler codes (1-4) so the two spaces cannot collide.
 """
 
 
@@ -106,39 +119,110 @@ class AppServer:
 
     Args:
         handler: Request dispatcher for incoming ``AppRequest`` messages.
-        bind_addr: IP address to bind to.
+        acl: Authorization set consulted on every handshake.
+        bind_addr: IP address to bind to. **No default** — production
+            callers MUST pass the tailnet address resolved by
+            :func:`catlaser_brain.network.bind.resolve_tailscale_bind_address`;
+            tests pass ``"127.0.0.1"`` explicitly. A prior iteration
+            defaulted this to ``0.0.0.0`` and a forgotten override would
+            have opened the handshake path to every peer on the device's
+            LAN. The required kwarg closes that gap at compile-review
+            time.
+        bind_interface: Optional Linux interface name (e.g. ``"tailscale0"``)
+            to pin the socket to via ``SO_BINDTODEVICE``. This is a
+            kernel-level belt-and-suspenders on top of ``bind_addr``:
+            even if a misconfiguration placed a tailnet-looking IP on a
+            non-tailnet interface, the kernel refuses to route packets
+            in or out via any other NIC. Requires ``CAP_NET_RAW`` in
+            the process capability set; silently skipped on non-Linux
+            platforms where the option is unavailable. Tests pass
+            ``None`` because ``127.0.0.1`` sits on ``lo``.
         port: TCP port to listen on. Use ``0`` for OS-assigned (tests).
     """
 
-    __slots__ = ("_acl", "_bind_addr", "_clients", "_handler", "_listen_sock", "_port")
+    __slots__ = (
+        "_acl",
+        "_bind_addr",
+        "_bind_interface",
+        "_clients",
+        "_handler",
+        "_listen_sock",
+        "_pending_revocations",
+        "_pending_revocations_lock",
+        "_port",
+    )
 
     def __init__(
         self,
         handler: RequestHandler,
         *,
         acl: AclStore,
-        bind_addr: str = "0.0.0.0",  # noqa: S104
+        bind_addr: str,
         port: int = 9820,
+        bind_interface: str | None = None,
     ) -> None:
         self._handler = handler
         self._acl = acl
         self._bind_addr = bind_addr
+        self._bind_interface = bind_interface
         self._port = port
         self._listen_sock: socket.socket | None = None
         self._clients: dict[int, _Client] = {}
+        # Set of SPKIs the ACL poller has flagged as revoked since the
+        # last :meth:`poll` tick. The poller runs on its own thread;
+        # the queue + lock pair lets it notify us asynchronously while
+        # the actual socket work happens on the daemon's event loop.
+        # A set (not a deque) is correct here: each SPKI need only be
+        # evicted once; duplicate notifications collapse safely.
+        self._pending_revocations: set[str] = set()
+        self._pending_revocations_lock = threading.Lock()
 
     # -------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------
 
     def start(self) -> None:
-        """Bind and begin listening for connections."""
+        """Bind and begin listening for connections.
+
+        If ``bind_interface`` was provided, pins the listening socket
+        to that Linux network interface via ``SO_BINDTODEVICE`` BEFORE
+        the ``bind()`` call. The kernel then refuses to accept packets
+        arriving on any other NIC regardless of destination address —
+        a physical-layer constraint on top of the IP-level
+        ``bind_addr``.
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if self._bind_interface is not None:
+            self._bind_to_interface(sock, self._bind_interface)
         sock.settimeout(0)
         sock.bind((self._bind_addr, self._port))
         sock.listen(MAX_CLIENTS)
         self._listen_sock = sock
+
+    @staticmethod
+    def _bind_to_interface(sock: socket.socket, interface: str) -> None:
+        """Pin ``sock`` to a Linux interface name via ``SO_BINDTODEVICE``.
+
+        Fails closed: if the option is not available (non-Linux, missing
+        capability, unknown interface), the caller is notified via
+        :class:`OSError`. The daemon's supervisor must then restart —
+        a partially-bound socket that is not actually constrained to
+        the tailnet interface is worse than a crash, because the
+        misconfiguration would be invisible until a MITM appeared.
+        """
+        # `SO_BINDTODEVICE` is Linux-specific; the constant is present
+        # on Python 3.11+ across all platforms as a compile-time stub,
+        # but setsockopt fails with ``ENOPROTOOPT`` on Darwin/BSD. The
+        # deliberate choice: let the error surface rather than silently
+        # skip. Tests set ``bind_interface=None`` for the loopback
+        # path; production callers on Darwin dev machines can do the
+        # same while running integration tests against a local daemon.
+        option_name = getattr(socket, "SO_BINDTODEVICE", None)
+        if option_name is None:
+            msg = "SO_BINDTODEVICE is not available on this platform"
+            raise OSError(msg)
+        sock.setsockopt(socket.SOL_SOCKET, option_name, interface.encode("ascii"))
 
     @property
     def address(self) -> tuple[str, int]:
@@ -178,14 +262,75 @@ class AppServer:
     def poll(self) -> None:
         """Process all pending network events.
 
-        Accepts new connections, reads from all clients, dispatches
-        incoming requests to the handler, and sends responses. Call
-        this periodically from the main event loop. Non-blocking.
+        The tick order is:
+
+        1. Evict any sessions whose SPKIs have been flagged as revoked
+           by the ACL poller since the last poll. This runs FIRST so
+           a just-revoked client cannot get one more request-response
+           round-trip before being kicked off.
+        2. Accept new connections.
+        3. Read from all clients, dispatch, respond.
+
+        Call this periodically from the main event loop. Non-blocking.
         """
         if self._listen_sock is None:
             return
+        self._evict_pending_revocations()
         self._accept_pending()
         self._read_clients()
+
+    def notify_spkis_revoked(self, spkis: frozenset[str]) -> None:
+        """Enqueue a set of SPKIs for eviction at the next :meth:`poll` tick.
+
+        Called from the ACL poller's thread whenever a snapshot
+        removes at least one user from the allowed set. Thread-safe:
+        writes are guarded by a mutex the poll loop drains under the
+        same mutex. The poller and event loop never touch sockets
+        concurrently — the event loop performs the evictions itself.
+        """
+        if not spkis:
+            return
+        with self._pending_revocations_lock:
+            self._pending_revocations.update(spkis)
+
+    def _evict_pending_revocations(self) -> None:
+        """Drain the revocation queue and force-close matching clients.
+
+        Each evicted client is sent a single final :class:`DeviceError`
+        frame with :data:`ERR_AUTH_REVOKED` before the socket is
+        closed so the app can distinguish "your access was pulled"
+        from a transport drop. Best-effort — a send failure still
+        tears the client down.
+        """
+        with self._pending_revocations_lock:
+            if not self._pending_revocations:
+                return
+            to_evict = self._pending_revocations
+            self._pending_revocations = set()
+        # Snapshot the clients under the event-loop thread so we can
+        # iterate and mutate without racing with the accept path.
+        for fd, client in list(self._clients.items()):
+            if client.authorized_spki is None:
+                continue
+            if client.authorized_spki not in to_evict:
+                continue
+            _logger.info(
+                "evicting client %s after ACL revocation",
+                client.addr,
+            )
+            self._send_auth_revoked(client)
+            self._disconnect(fd)
+
+    def _send_auth_revoked(self, client: _Client) -> None:
+        """Emit a terminal ``DeviceError(ERR_AUTH_REVOKED, ...)`` frame."""
+        event = pb.DeviceEvent()
+        event.error.code = ERR_AUTH_REVOKED
+        event.error.message = "device access revoked; re-pair to continue"
+        frame = encode_frame(event.SerializeToString())
+        # Intentionally swallow send failure: the socket is about to
+        # close regardless, and a blocked peer must not hold up the
+        # other evictions queued behind this one.
+        self._send_to(client, frame)
 
     def broadcast(self, event: pb.DeviceEvent) -> None:
         """Send an event to all authorized clients.
@@ -304,7 +449,11 @@ class AppServer:
             )
             self._disconnect(fd)
             return
-        event = self._handler.handle(request)
+        # Thread the authenticated SPKI through to the handler so
+        # ``start_stream`` can bind the subscriber LiveKit token's
+        # identity to THIS user. No other dispatch branch uses the
+        # kwarg today; the handler's `_dispatch` routes accordingly.
+        event = self._handler.handle(request, authorized_spki=client.authorized_spki)
         frame = encode_frame(event.SerializeToString())
         if not self._send_to(client, frame):
             self._disconnect(fd)

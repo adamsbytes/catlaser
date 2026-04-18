@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from catlaser_brain.auth.coord_client import AclSnapshot, CoordClient
 
 _logger = logging.getLogger(__name__)
@@ -78,7 +80,7 @@ class AclStore:
         self._is_primed: bool = False
         self._last_success: float | None = None
 
-    def apply(self, snapshot: AclSnapshot) -> None:
+    def apply(self, snapshot: AclSnapshot) -> frozenset[str]:
         """Install ``snapshot`` as the current ACL.
 
         Every call is authoritative: the new allowed-set entirely
@@ -86,17 +88,37 @@ class AclStore:
         "return the full active set" contract rather than a diff, so
         a revoked user disappears from the cache the next time the
         poller runs.
+
+        Returns the set of SPKIs that appeared in the PREVIOUS snapshot
+        but are NOT in this one — the users whose access was just
+        revoked. The caller (typically :class:`AclPoller`) forwards
+        this set to the :class:`AppServer`, which force-closes any
+        currently-authenticated TCP session whose SPKI matches.
+        Without the eviction hook a revoked user would keep their
+        already-open session alive indefinitely (heartbeats are just
+        ordinary requests; the SPKI is only checked at handshake
+        time). Returning the diff from :meth:`apply` keeps the
+        compute-and-notify step atomic under the store's lock.
         """
         allowed = frozenset(grant.user_spki_b64 for grant in snapshot.grants)
         with self._lock:
             # Only record "primed" and "last success" when the
             # poller ACTUALLY wrote — a polling error path that
             # squirreled away a stale snapshot would otherwise be
-            # indistinguishable from a real success.
+            # indistinguishable from a real success. The set of
+            # revoked SPKIs is computed against the OLD cache under
+            # the same lock so a concurrent handshake can't observe
+            # a half-swapped state.
+            revoked = self._allowed - allowed
+            # On the first successful poll ``self._allowed`` was an
+            # empty frozenset, so ``revoked`` is empty — there's no
+            # one to evict at priming. Only prior-snapshot SPKIs
+            # that disappeared count as revocations.
             self._allowed = allowed
             self._revision = snapshot.revision
             self._is_primed = True
             self._last_success = time.monotonic()
+            return revoked
 
     def is_authorized(self, user_spki_b64: str) -> bool:
         """Return True iff the cache is primed AND ``user_spki_b64`` is active."""
@@ -143,6 +165,7 @@ class AclPoller:
         *,
         interval_seconds: float = 60.0,
         first_poll_deadline_seconds: float = 30.0,
+        on_revoked: Callable[[frozenset[str]], None] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             msg = "interval_seconds must be positive"
@@ -154,6 +177,13 @@ class AclPoller:
         # doesn't sit in "unprimed, rejecting everyone" for a full
         # regular interval when the server is immediately reachable.
         self._first_deadline = first_poll_deadline_seconds
+        # Optional hook fired whenever a snapshot *removes* SPKIs.
+        # The poller forwards the diff to the wired-up :class:`AppServer`,
+        # which force-closes any currently-authenticated session whose
+        # SPKI was revoked. The callback runs on the poller's thread;
+        # the receiver (AppServer) must enqueue and drain on its own
+        # event loop rather than touching sockets directly.
+        self._on_revoked = on_revoked
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -198,7 +228,15 @@ class AclPoller:
             # transient TLS hiccup to take the whole daemon down.
             _logger.warning("ACL poll failed", exc_info=True)
             return False
-        self._store.apply(snapshot)
+        revoked = self._store.apply(snapshot)
+        if revoked and self._on_revoked is not None:
+            # Swallow callback errors: the poller's job is to keep
+            # the cache fresh. A misbehaving subscriber must not
+            # stop future snapshots from landing.
+            try:
+                self._on_revoked(revoked)
+            except Exception:
+                _logger.exception("ACL revocation callback raised")
         return True
 
     def _run(self) -> None:

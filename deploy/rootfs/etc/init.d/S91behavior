@@ -1,12 +1,21 @@
 #!/bin/sh
 # S91behavior - Start catlaser Python behavior sidecar.
 #
-# Waits for the vision daemon's IPC socket before launching.
-# The sidecar connects to the Unix socket created by catlaser-visiond.
+# Waits for two preconditions before launching the daemon:
+#
+# 1. The vision daemon's IPC socket (S90visiond owns). The sidecar
+#    connects to this Unix socket to deliver servo commands.
+# 2. The tailscale0 interface coming up and receiving a CGNAT /
+#    MagicDNS-routed IPv4. The daemon binds its app-to-device TCP
+#    listener to this interface only (bind_addr + SO_BINDTODEVICE);
+#    starting before the interface exists would either crash the
+#    daemon at startup or — if a fallback ever slipped in —
+#    silently expose the listen port on every other NIC.
 
 DAEMON="/usr/bin/catlaser-brain"
 PIDFILE="/var/run/catlaser-brain.pid"
 IPC_SOCKET="/var/run/catlaser.sock"
+TAILNET_IFACE="tailscale0"
 
 wait_for_socket() {
     retries=0
@@ -20,10 +29,31 @@ wait_for_socket() {
     fi
 }
 
+wait_for_tailnet() {
+    # Treat "interface exists AND has a v4 address" as the ready
+    # signal. On a freshly-joined tailnet the interface appears
+    # within ~2s of tailscaled starting, but on a brand-new device
+    # the user may not have finished the onboarding pair yet — so
+    # wait up to 60s and fail loudly if the timeout elapses. The
+    # supervisor is expected to restart; the daemon has no useful
+    # work without a tailnet address.
+    retries=0
+    while [ "$retries" -lt 600 ]; do
+        if ip -4 addr show dev "$TAILNET_IFACE" 2>/dev/null | grep -q "inet "; then
+            return 0
+        fi
+        sleep 0.1
+        retries=$((retries + 1))
+    done
+    echo "ERROR: $TAILNET_IFACE has no IPv4 after 60s" >&2
+    return 1
+}
+
 case "$1" in
     start)
         echo "Starting catlaser-brain..."
         wait_for_socket || exit 1
+        wait_for_tailnet || exit 1
         start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON"
         ;;
     stop)

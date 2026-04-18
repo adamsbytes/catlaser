@@ -172,6 +172,12 @@ class RequestHandler:
         self._session_control = session_control
         self._stream_manager = stream_manager
         self._stream_notify = stream_notify
+        # `start_stream` is deliberately NOT in this table — it needs
+        # the authenticated SPKI from the socket layer and is routed
+        # via a dedicated branch in :meth:`_dispatch`. Keeping the
+        # table homogeneous (``(AppRequest) -> DeviceEvent``) means
+        # the type checker rejects any attempt to add a handler that
+        # needs extra context without surfacing it in the signature.
         self._dispatch_table: dict[str, Callable[[pb.AppRequest], pb.DeviceEvent]] = {
             "get_status": self._on_get_status,
             "get_cat_profiles": self._on_get_cat_profiles,
@@ -183,20 +189,35 @@ class RequestHandler:
             "identify_new_cat": self._on_identify_new_cat,
             "start_session": self._on_start_session,
             "stop_session": self._on_stop_session,
-            "start_stream": self._on_start_stream,
             "stop_stream": self._on_stop_stream,
             "run_diagnostic": self._on_run_diagnostic,
             "register_push_token": self._on_register_push_token,
             "unregister_push_token": self._on_unregister_push_token,
         }
 
-    def handle(self, request: pb.AppRequest) -> pb.DeviceEvent:
+    def handle(
+        self,
+        request: pb.AppRequest,
+        *,
+        authorized_spki: str | None = None,
+    ) -> pb.DeviceEvent:
         """Dispatch a request and return the corresponding event.
 
         The response's ``request_id`` is set to match the request's,
         allowing the app to correlate responses to in-flight requests.
+
+        Args:
+            request: the parsed ``AppRequest``.
+            authorized_spki: standard-base64 DER SPKI of the
+                authenticated client whose socket sent this frame.
+                Optional — most dispatch branches don't need it and
+                tests construct handlers without a connected socket.
+                Load-bearing for ``start_stream``: the subscriber
+                LiveKit token's ``identity`` grant is bound to this
+                SPKI so a leaked token still fails the identity check
+                the iOS app performs on every subscribed participant.
         """
-        event = self._dispatch(request)
+        event = self._dispatch(request, authorized_spki=authorized_spki)
         event.request_id = request.request_id
         return event
 
@@ -204,10 +225,22 @@ class RequestHandler:
     # Dispatch
     # -------------------------------------------------------------------
 
-    def _dispatch(self, request: pb.AppRequest) -> pb.DeviceEvent:
+    def _dispatch(
+        self,
+        request: pb.AppRequest,
+        *,
+        authorized_spki: str | None,
+    ) -> pb.DeviceEvent:
         variant = request.WhichOneof("request")
         if variant is None:
             return _error(_ERR_EMPTY_REQUEST, "empty request")
+        # `start_stream` is the one dispatch that depends on the
+        # caller's authorized SPKI (the LiveKit subscriber token is
+        # bound to it). Routing the lookup through a dedicated branch
+        # keeps the other handlers in the dispatch table from having
+        # to accept a keyword they don't use.
+        if variant == "start_stream":
+            return self._on_start_stream(request, authorized_spki=authorized_spki)
         handler = self._dispatch_table.get(variant)
         if handler is None:
             return _error(_ERR_UNKNOWN_REQUEST, f"unknown request: {variant}")
@@ -365,14 +398,27 @@ class RequestHandler:
     # Streaming
     # -------------------------------------------------------------------
 
-    def _on_start_stream(self, _request: pb.AppRequest) -> pb.DeviceEvent:
+    def _on_start_stream(
+        self,
+        _request: pb.AppRequest,
+        *,
+        authorized_spki: str | None,
+    ) -> pb.DeviceEvent:
         if self._stream_manager is None:
             return _error(_ERR_NOT_AVAILABLE, "streaming not configured")
 
         if self._stream_manager.is_streaming:
             return _error(_ERR_NOT_AVAILABLE, "stream already active")
 
-        credentials = self._stream_manager.start()
+        # Defence in depth: the server normally rejects unauthorized
+        # clients before dispatch, but if a future refactor ever let
+        # a `start_stream` through without an SPKI we would mint a
+        # subscriber token without an identity binding. Refuse to
+        # stream in that case so the narrow invariant is visible here.
+        if not authorized_spki:
+            return _error(_ERR_NOT_AVAILABLE, "start_stream requires an authorized session")
+
+        credentials = self._stream_manager.start(user_spki_b64=authorized_spki)
 
         if self._stream_notify is not None:
             self._stream_notify.on_stream_start(credentials)
