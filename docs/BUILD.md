@@ -79,7 +79,7 @@
   - [X] Sign in with Apple + Google (AuthenticationServices + GoogleSignIn SDK, ID token exchanged for better-auth bearer)
   - [X] Sign in with email magic link (Universal Links target, SE-signed attestation bound to each request and verify call)
   - [X] Sign in screen
-  - [ ] Signed HTTP client wrapper (SE-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
+  - [X] Signed HTTP client wrapper (SE-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
   - [ ] Live view (LiveKit iOS SDK, WebRTC)
   - [ ] History + cat profiles (stats, naming, management)
   - [ ] Schedule setup (auto-play times, quiet hours)

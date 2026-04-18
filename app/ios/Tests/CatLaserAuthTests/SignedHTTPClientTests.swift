@@ -1,0 +1,744 @@
+import CatLaserAuthTestSupport
+import Foundation
+import Testing
+
+@testable import CatLaserAuth
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+private func makeFingerprint(installID: String = "test-install") -> DeviceFingerprint {
+    DeviceFingerprint(
+        platform: "ios",
+        model: "iPhone15,4",
+        systemName: "iOS",
+        bundleID: "com.catlaser.app",
+        installID: installID,
+    )
+}
+
+/// Provider that rejects every call. Used to assert the wrapper's
+/// short-circuit paths (no session, broken clock) never touch the
+/// attestation machinery — otherwise a correctness bug in the short
+/// circuit would still produce a valid header and silently hit the wire.
+private struct RejectingAttestationProvider: DeviceAttestationProviding {
+    struct Refused: Error {}
+
+    func currentFingerprint() async throws -> DeviceFingerprint {
+        throw Refused()
+    }
+
+    func currentAttestation(binding _: AttestationBinding) async throws -> DeviceAttestation {
+        throw Refused()
+    }
+
+    func currentAttestationHeader(binding _: AttestationBinding) async throws -> String {
+        throw Refused()
+    }
+}
+
+private struct ThrowingAttestationProvider: DeviceAttestationProviding {
+    let error: AuthError
+
+    func currentFingerprint() async throws -> DeviceFingerprint {
+        throw error
+    }
+
+    func currentAttestation(binding _: AttestationBinding) async throws -> DeviceAttestation {
+        throw error
+    }
+
+    func currentAttestationHeader(binding _: AttestationBinding) async throws -> String {
+        throw error
+    }
+}
+
+/// Thread-safe mutable state for tests that need a fixed clock /
+/// fixed-UUID factory to advance across two sends on the same
+/// `SignedHTTPClient` instance. A plain `var` captured into an
+/// `@Sendable` closure violates Swift 6 concurrency; an actor works
+/// but forces every callsite to be `async`, which these factories
+/// intentionally are not.
+private final class CallIndex: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = value
+        value += 1
+        return current
+    }
+}
+
+/// Bearer-token store that throws on load. Used to assert the wrapper
+/// surfaces store failures without attempting an unauthenticated send.
+private actor ThrowingStore: BearerTokenStore {
+    let error: any Error
+
+    init(error: any Error) {
+        self.error = error
+    }
+
+    func save(_: AuthSession) async throws {
+        throw error
+    }
+
+    func load() async throws -> AuthSession? {
+        throw error
+    }
+
+    func delete() async throws {
+        throw error
+    }
+}
+
+private func makeSession(bearer: String = "bearer-xyz") -> AuthSession {
+    AuthSession(
+        bearerToken: bearer,
+        user: AuthUser(
+            id: "user-1",
+            email: "u@example.com",
+            name: "User",
+            image: nil,
+            emailVerified: true,
+        ),
+        provider: .magicLink,
+        establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+    )
+}
+
+private func makeWrapper(
+    http: MockHTTPClient,
+    store: any BearerTokenStore,
+    identity: any DeviceIdentityStoring,
+    clock: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_700_000_000) },
+    uuidFactory: @escaping @Sendable () -> UUID = { UUID() },
+) -> SignedHTTPClient {
+    let provider = StubDeviceAttestationProvider(
+        fingerprint: makeFingerprint(),
+        identity: identity,
+    )
+    return SignedHTTPClient(
+        underlying: http,
+        store: store,
+        attestationProvider: provider,
+        clock: clock,
+        uuidFactory: uuidFactory,
+    )
+}
+
+private func successResponse() -> HTTPResponse {
+    HTTPResponse(
+        statusCode: 200,
+        headers: ["Content-Type": "application/json"],
+        body: Data("{}".utf8),
+    )
+}
+
+@Suite("SignedHTTPClient")
+struct SignedHTTPClientTests {
+    // MARK: - Header attachment
+
+    @Test
+    func getRequestAttachesBearerAndAttestationButNoIdempotencyKey() async throws {
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession(bearer: "tok-1"))
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+
+        let request = URLRequest(url: URL(string: "https://api.example/api/v1/me")!)
+        _ = try await signed.send(request)
+
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.authorizationHeaderName) == "Bearer tok-1")
+        #expect(recorded.header(DeviceAttestationEncoder.headerName) != nil)
+        #expect(recorded.header(SignedHTTPClient.idempotencyHeaderName) == nil,
+                "read methods must never carry an Idempotency-Key")
+    }
+
+    @Test
+    func mutatingMethodsReceiveAutoGeneratedIdempotencyKey() async throws {
+        let methods = ["POST", "PUT", "PATCH", "DELETE"]
+        let fixedUUID = try #require(UUID(uuidString: "11111111-2222-3333-4444-555566667777"))
+        for method in methods {
+            let http = MockHTTPClient(outcomes: [.response(successResponse())])
+            let store = InMemoryBearerTokenStore(initial: makeSession())
+            let signed = makeWrapper(
+                http: http,
+                store: store,
+                identity: SoftwareIdentityStore(),
+                uuidFactory: { fixedUUID },
+            )
+            var request = URLRequest(url: URL(string: "https://api.example/api/v1/things")!)
+            request.httpMethod = method
+            _ = try await signed.send(request)
+            let recorded = try #require(await http.lastRequest())
+            #expect(recorded.method == method)
+            #expect(recorded.header(SignedHTTPClient.idempotencyHeaderName)
+                == "11111111-2222-3333-4444-555566667777",
+                "\(method) must auto-generate a lowercase UUID idempotency key")
+        }
+    }
+
+    @Test
+    func methodDetectionIsCaseInsensitive() async throws {
+        // Foundation's `URLRequest.httpMethod` preserves whatever casing
+        // the caller wrote; a `request.httpMethod = "post"` must still
+        // be treated as a mutating verb.
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            uuidFactory: { UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")! },
+        )
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/things")!)
+        request.httpMethod = "post"
+        _ = try await signed.send(request)
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.idempotencyHeaderName)
+            == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    }
+
+    @Test
+    func readMethodsNeverGetAnIdempotencyKeyEvenIfTheCallerSuppliedOne() async throws {
+        // A stray `Idempotency-Key` on a read would be a 400 server-side.
+        // The wrapper strips it on the read path so a refactor that
+        // starts attaching keys indiscriminately cannot change the
+        // wire contract.
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/me")!)
+        request.httpMethod = "GET"
+        request.setValue(
+            "00000000-0000-0000-0000-000000000000",
+            forHTTPHeaderField: SignedHTTPClient.idempotencyHeaderName,
+        )
+        _ = try await signed.send(request)
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.idempotencyHeaderName) == nil)
+    }
+
+    @Test
+    func callerSuppliedIdempotencyKeyIsPreservedVerbatim() async throws {
+        // Client-side retry semantics hinge on this: a caller that
+        // pre-assigns a UUID and reuses it across retries must see the
+        // server's (session, key) dedup fire.
+        let key = "deadbeef-0000-4000-8000-feedfacecafe"
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            uuidFactory: { Issue.record("uuid factory must not run when caller supplied a key"); return UUID() },
+        )
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/things")!)
+        request.httpMethod = "POST"
+        request.setValue(key, forHTTPHeaderField: SignedHTTPClient.idempotencyHeaderName)
+        _ = try await signed.send(request)
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.idempotencyHeaderName) == key)
+    }
+
+    @Test
+    func callerSuppliedIdempotencyKeyMustMatchRFC4122() async throws {
+        // Malformed keys must fail locally. If the wrapper let a bad
+        // key through, the server would reject with 400
+        // IDEMPOTENCY_KEY_INVALID — the local rejection is faster AND
+        // doesn't burn a Secure-Enclave signing operation for a request
+        // the server is guaranteed to refuse.
+        let bad: [String] = [
+            "",                                                // empty
+            "   ",                                             // all whitespace
+            "not-a-uuid",                                      // wrong shape
+            "deadbeef-0000-4000-8000-feedfacecaf",             // too short
+            "deadbeef-0000-4000-8000-feedfacecafef",           // too long
+            "ZZZZZZZZ-0000-4000-8000-feedfacecafe",            // non-hex
+            "deadbeef00004000800feedfacecafe",                 // missing hyphens
+            "{deadbeef-0000-4000-8000-feedfacecafe}",          // GUID-style braces
+            "deadbeef 0000 4000 8000 feedfacecafe",            // spaces for hyphens
+        ]
+        for candidate in bad {
+            let http = MockHTTPClient(outcomes: [])
+            let store = InMemoryBearerTokenStore(initial: makeSession())
+            let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+            var request = URLRequest(url: URL(string: "https://api.example/api/v1/things")!)
+            request.httpMethod = "POST"
+            request.setValue(candidate, forHTTPHeaderField: SignedHTTPClient.idempotencyHeaderName)
+            do {
+                _ = try await signed.send(request)
+                Issue.record("\(candidate.debugDescription) must be rejected locally")
+            } catch let AuthError.attestationFailed(msg) {
+                #expect(
+                    msg.contains("Idempotency-Key") || msg.contains("empty"),
+                    "\(candidate.debugDescription): \(msg)",
+                )
+            } catch {
+                Issue.record("\(candidate.debugDescription): unexpected error \(error)")
+            }
+            #expect(await http.sendCount() == 0,
+                    "\(candidate.debugDescription) must short-circuit before the wire")
+        }
+    }
+
+    @Test
+    func callerSuppliedIdempotencyKeyTrimmedAndAcceptedWhenSurroundedByWhitespace() async throws {
+        // A carefully-trimmed UUID-looking string should still
+        // structurally resolve — URLRequest header values can pick up
+        // surrounding whitespace during refactors, and the server's
+        // regex is applied post-trim. Match that contract here.
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/things")!)
+        request.httpMethod = "POST"
+        let key = "deadbeef-0000-4000-8000-feedfacecafe"
+        request.setValue("  \(key)  ", forHTTPHeaderField: SignedHTTPClient.idempotencyHeaderName)
+        _ = try await signed.send(request)
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.idempotencyHeaderName) == key)
+    }
+
+    @Test
+    func preExistingAuthorizationHeaderIsOverwritten() async throws {
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession(bearer: "real-bearer"))
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/me")!)
+        request.setValue("Bearer attacker-token",
+                         forHTTPHeaderField: SignedHTTPClient.authorizationHeaderName)
+        _ = try await signed.send(request)
+
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.authorizationHeaderName) == "Bearer real-bearer",
+                "wrapper must own Authorization; caller input must not leak through")
+    }
+
+    @Test
+    func preExistingAttestationHeaderIsOverwritten() async throws {
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/me")!)
+        request.setValue("attacker-forged-attestation",
+                         forHTTPHeaderField: DeviceAttestationEncoder.headerName)
+        _ = try await signed.send(request)
+
+        let recorded = try #require(await http.lastRequest())
+        let produced = try #require(recorded.header(DeviceAttestationEncoder.headerName))
+        #expect(produced != "attacker-forged-attestation")
+        // And the produced header must actually decode as a well-formed v4 api: attestation.
+        let attestation = try DeviceAttestationEncoder.decodeHeaderValue(produced)
+        #expect(attestation.version == DeviceAttestation.currentVersion)
+        if case .api = attestation.binding {
+            // ok
+        } else {
+            Issue.record("expected .api binding, got \(attestation.binding)")
+        }
+    }
+
+    @Test
+    func requestBodyAndURLArePreserved() async throws {
+        // The wrapper only touches headers. Method, URL, body, and any
+        // non-signed headers must arrive byte-identical on the wire.
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+
+        let body = Data(#"{"cat_id":"abc"}"#.utf8)
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/cats/abc/stats?window=7d")!)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("catlaser-ios/1.0", forHTTPHeaderField: "User-Agent")
+        _ = try await signed.send(request)
+
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.method == "POST")
+        #expect(recorded.url?.absoluteString
+            == "https://api.example/api/v1/cats/abc/stats?window=7d")
+        #expect(recorded.body == body)
+        #expect(recorded.header("Content-Type") == "application/json")
+        #expect(recorded.header("User-Agent") == "catlaser-ios/1.0")
+    }
+
+    // MARK: - Attestation binding correctness
+
+    @Test
+    func attestationHeaderEncodesApiBindingWithInjectedTimestamp() async throws {
+        // The server's protected-route gate pulls `api:<timestamp>` off
+        // the wire and enforces ±60s skew against its own clock. Verify
+        // the timestamp we sign is exactly the clock value we injected
+        // — a drift between the wrapper's clock-read and the signed
+        // binding would look like a random 401 in the field.
+        let expectedSeconds: Int64 = 1_707_000_123
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+            clock: { Date(timeIntervalSince1970: TimeInterval(expectedSeconds)) },
+        )
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+
+        let recorded = try #require(await http.lastRequest())
+        let header = try #require(recorded.header(DeviceAttestationEncoder.headerName))
+        let attestation = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        guard case let .api(ts) = attestation.binding else {
+            Issue.record("expected .api binding, got \(attestation.binding)")
+            return
+        }
+        #expect(ts == expectedSeconds)
+    }
+
+    @Test
+    func successiveSendsProduceIncreasingTimestampsAndDistinctUUIDs() async throws {
+        // Two calls with an advancing clock must emit two distinct
+        // timestamps on the wire (otherwise the server's skew check
+        // would deem replay indistinguishable from normal traffic).
+        // Separately: two auto-generated Idempotency-Key values must
+        // not collide — a coincidental duplicate would cause the
+        // second mutation to be silently elided as a cache hit.
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let identity = SoftwareIdentityStore()
+        let http = MockHTTPClient(outcomes: [
+            .response(successResponse()),
+            .response(successResponse()),
+        ])
+        let timestamps: [Int64] = [1_700_000_000, 1_700_000_010]
+        let uuids: [UUID] = [
+            UUID(uuidString: "11111111-0000-4000-8000-000000000001")!,
+            UUID(uuidString: "22222222-0000-4000-8000-000000000002")!,
+        ]
+        let clockIndex = CallIndex()
+        let uuidIndex = CallIndex()
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: StubDeviceAttestationProvider(
+                fingerprint: makeFingerprint(),
+                identity: identity,
+            ),
+            clock: { Date(timeIntervalSince1970: TimeInterval(timestamps[clockIndex.next()])) },
+            uuidFactory: { uuids[uuidIndex.next()] },
+        )
+
+        var request = URLRequest(url: URL(string: "https://api.example/api/v1/things")!)
+        request.httpMethod = "POST"
+        _ = try await signed.send(request)
+        _ = try await signed.send(request)
+
+        let requests = await http.requests()
+        #expect(requests.count == 2)
+        let first = try DeviceAttestationEncoder.decodeHeaderValue(
+            try #require(requests[0].header(DeviceAttestationEncoder.headerName)),
+        )
+        let last = try DeviceAttestationEncoder.decodeHeaderValue(
+            try #require(requests[1].header(DeviceAttestationEncoder.headerName)),
+        )
+        if case let .api(a) = first.binding, case let .api(b) = last.binding {
+            #expect(a == 1_700_000_000)
+            #expect(b == 1_700_000_010)
+        } else {
+            Issue.record("expected .api bindings, got \(first.binding), \(last.binding)")
+        }
+        #expect(requests[0].header(SignedHTTPClient.idempotencyHeaderName)
+            == "11111111-0000-4000-8000-000000000001")
+        #expect(requests[1].header(SignedHTTPClient.idempotencyHeaderName)
+            == "22222222-0000-4000-8000-000000000002")
+    }
+
+    @Test
+    func attestationHeaderSignsFreshlyPerCall() async throws {
+        // ECDSA signatures are non-deterministic. Even with identical
+        // fingerprint bytes and identical clock, two attestations must
+        // produce different `sig` values — otherwise a replay of the
+        // first header would be indistinguishable from the second. This
+        // also verifies the wrapper really re-invokes the provider per
+        // send rather than caching an attestation across sends.
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let identity = SoftwareIdentityStore()
+        let http = MockHTTPClient(outcomes: [
+            .response(successResponse()),
+            .response(successResponse()),
+        ])
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: StubDeviceAttestationProvider(
+                fingerprint: makeFingerprint(),
+                identity: identity,
+            ),
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            uuidFactory: { UUID() },
+        )
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        let requests = await http.requests()
+        #expect(requests.count == 2)
+        let a = try DeviceAttestationEncoder.decodeHeaderValue(
+            try #require(requests[0].header(DeviceAttestationEncoder.headerName)),
+        )
+        let b = try DeviceAttestationEncoder.decodeHeaderValue(
+            try #require(requests[1].header(DeviceAttestationEncoder.headerName)),
+        )
+        #expect(a.fingerprintHash == b.fingerprintHash)
+        #expect(a.publicKeySPKI == b.publicKeySPKI)
+        #expect(a.signature != b.signature,
+                "ECDSA P-256 signatures must be non-deterministic per call")
+    }
+
+    // MARK: - Short circuits
+
+    @Test
+    func missingSessionShortCircuitsBeforeWireCall() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let store = InMemoryBearerTokenStore()
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: RejectingAttestationProvider(),
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            uuidFactory: { UUID() },
+        )
+        await #expect(throws: AuthError.missingBearerToken) {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func emptyBearerTokenInStoredSessionShortCircuits() async throws {
+        // A structurally broken stored session (empty bearer after
+        // trim) must fail closed. The server would 401 anyway; failing
+        // here keeps diagnostics pointed at the identity layer rather
+        // than the wire.
+        let http = MockHTTPClient(outcomes: [])
+        let store = InMemoryBearerTokenStore(initial: makeSession(bearer: "   "))
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: RejectingAttestationProvider(),
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            uuidFactory: { UUID() },
+        )
+        await #expect(throws: AuthError.missingBearerToken) {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func clockBeforeMinPlausibleTimestampShortCircuits() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let belowFloor = TimeInterval(AuthCoordinator.minPlausibleRequestTimestamp - 1)
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: RejectingAttestationProvider(),
+            clock: { Date(timeIntervalSince1970: belowFloor) },
+            uuidFactory: { UUID() },
+        )
+        do {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.contains("implausible"))
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func clockAfterMaxPlausibleTimestampShortCircuits() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let aboveCeiling = TimeInterval(AuthCoordinator.maxPlausibleRequestTimestamp + 1)
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: RejectingAttestationProvider(),
+            clock: { Date(timeIntervalSince1970: aboveCeiling) },
+            uuidFactory: { UUID() },
+        )
+        do {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.contains("implausible"))
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func clockBoundaryValuesAreAcceptedInclusively() async throws {
+        // The plausible band is inclusive at both ends (matches the
+        // AuthCoordinator guard). A request at exactly the floor or
+        // ceiling must be signed, not rejected.
+        for seconds in [
+            AuthCoordinator.minPlausibleRequestTimestamp,
+            AuthCoordinator.maxPlausibleRequestTimestamp,
+        ] {
+            let http = MockHTTPClient(outcomes: [.response(successResponse())])
+            let store = InMemoryBearerTokenStore(initial: makeSession())
+            let signed = makeWrapper(
+                http: http,
+                store: store,
+                identity: SoftwareIdentityStore(),
+                clock: { Date(timeIntervalSince1970: TimeInterval(seconds)) },
+            )
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+            let recorded = try #require(await http.lastRequest())
+            let header = try #require(recorded.header(DeviceAttestationEncoder.headerName))
+            let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+            if case let .api(ts) = decoded.binding {
+                #expect(ts == seconds)
+            } else {
+                Issue.record("expected .api binding, got \(decoded.binding)")
+            }
+        }
+    }
+
+    // MARK: - Error propagation
+
+    @Test
+    func storeErrorPropagatesWithoutWireCall() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        struct Fake: Error {}
+        let store = ThrowingStore(error: Fake())
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: RejectingAttestationProvider(),
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            uuidFactory: { UUID() },
+        )
+        await #expect(throws: (any Error).self) {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func authErrorsFromStorePropagateUnchanged() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let original = AuthError.biometricFailed(status: -128)
+        let store = ThrowingStore(error: original)
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: RejectingAttestationProvider(),
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            uuidFactory: { UUID() },
+        )
+        await #expect(throws: original) {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func attestationProviderErrorPropagates() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = SignedHTTPClient(
+            underlying: http,
+            store: store,
+            attestationProvider: ThrowingAttestationProvider(
+                error: .secureEnclaveUnavailable("test"),
+            ),
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+            uuidFactory: { UUID() },
+        )
+        await #expect(throws: AuthError.secureEnclaveUnavailable("test")) {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        }
+        #expect(await http.sendCount() == 0)
+    }
+
+    @Test
+    func underlyingTransportErrorPropagates() async throws {
+        struct Transport: Error {}
+        let http = MockHTTPClient(outcomes: [.failure(Transport())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed = makeWrapper(http: http, store: store, identity: SoftwareIdentityStore())
+        await #expect(throws: (any Error).self) {
+            _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        }
+        // The transport DID get called — the failure is downstream.
+        #expect(await http.sendCount() == 1)
+    }
+
+    // MARK: - Composition
+
+    @Test
+    func signedClientUsableThroughHTTPClientProtocol() async throws {
+        // The whole point of conforming to HTTPClient: downstream API
+        // clients take `any HTTPClient` and don't know (or care) that
+        // their dependency happens to sign every request. Verify that
+        // calling through the protocol type exercises the same
+        // machinery as calling the struct directly.
+        let http = MockHTTPClient(outcomes: [.response(successResponse())])
+        let store = InMemoryBearerTokenStore(initial: makeSession())
+        let signed: any HTTPClient = makeWrapper(
+            http: http,
+            store: store,
+            identity: SoftwareIdentityStore(),
+        )
+        _ = try await signed.send(URLRequest(url: URL(string: "https://api.example/api/v1/me")!))
+        let recorded = try #require(await http.lastRequest())
+        #expect(recorded.header(SignedHTTPClient.authorizationHeaderName) != nil)
+        #expect(recorded.header(DeviceAttestationEncoder.headerName) != nil)
+    }
+
+    // MARK: - Unit-level helpers
+
+    @Test
+    func resolveIdempotencyKeyGeneratesWhenNoneSupplied() throws {
+        let fixed = UUID(uuidString: "00000000-0000-4000-8000-000000000000")!
+        let resolved = try SignedHTTPClient.resolveIdempotencyKey(
+            existing: nil,
+            uuidFactory: { fixed },
+        )
+        #expect(resolved == fixed.uuidString.lowercased())
+    }
+
+    @Test
+    func isMutatingMatrix() {
+        #expect(SignedHTTPClient.isMutating(method: "POST"))
+        #expect(SignedHTTPClient.isMutating(method: "post"))
+        #expect(SignedHTTPClient.isMutating(method: "PUT"))
+        #expect(SignedHTTPClient.isMutating(method: "PATCH"))
+        #expect(SignedHTTPClient.isMutating(method: "DELETE"))
+        #expect(!SignedHTTPClient.isMutating(method: "GET"))
+        #expect(!SignedHTTPClient.isMutating(method: "HEAD"))
+        #expect(!SignedHTTPClient.isMutating(method: "OPTIONS"))
+        #expect(!SignedHTTPClient.isMutating(method: nil))
+        #expect(!SignedHTTPClient.isMutating(method: ""))
+        // Unknown verbs are treated as read — server-side routes are
+        // method-explicit and a bogus verb would 405 regardless.
+        #expect(!SignedHTTPClient.isMutating(method: "PROPFIND"))
+    }
+
+    @Test
+    func isValidIdempotencyKeyMatrix() {
+        #expect(SignedHTTPClient.isValidIdempotencyKey("00000000-0000-0000-0000-000000000000"))
+        #expect(SignedHTTPClient.isValidIdempotencyKey("DEADBEEF-0000-4000-8000-FEEDFACECAFE"))
+        #expect(SignedHTTPClient.isValidIdempotencyKey("deadbeef-0000-4000-8000-feedfacecafe"))
+        #expect(!SignedHTTPClient.isValidIdempotencyKey(""))
+        #expect(!SignedHTTPClient.isValidIdempotencyKey("deadbeef00004000800feedfacecafe"))
+        #expect(!SignedHTTPClient.isValidIdempotencyKey("xxxxxxxx-0000-4000-8000-feedfacecafe"))
+    }
+}
