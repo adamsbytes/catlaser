@@ -65,9 +65,31 @@ let package = Package(
             ],
             path: "Sources/CatLaserAuth",
         ),
+        // Test-only. Holds `SoftwareIdentityStore`, the in-memory P-256
+        // identity used by unit tests that cannot reach the Secure
+        // Enclave (SPM test runners, Linux CI). Deliberately NOT listed
+        // in `products:` above — external consumers of this package
+        // (the app target, future modules) cannot import it, so there
+        // is no path by which a non-SE identity can be wired into a
+        // shipping build.
+        .target(
+            name: "CatLaserAuthTestSupport",
+            dependencies: [
+                "CatLaserAuth",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux, .windows, .android, .wasi]),
+                ),
+            ],
+            path: "Sources/CatLaserAuthTestSupport",
+        ),
         .testTarget(
             name: "CatLaserAuthTests",
-            dependencies: ["CatLaserAuth"],
+            dependencies: [
+                "CatLaserAuth",
+                "CatLaserAuthTestSupport",
+            ],
             path: "Tests/CatLaserAuthTests",
         ),
         .target(
@@ -82,6 +104,7 @@ let package = Package(
             dependencies: [
                 "CatLaserApp",
                 "CatLaserAuth",
+                "CatLaserAuthTestSupport",
             ],
             path: "Tests/CatLaserAppTests",
         ),

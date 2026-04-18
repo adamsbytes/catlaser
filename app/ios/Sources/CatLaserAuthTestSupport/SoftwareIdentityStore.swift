@@ -1,3 +1,4 @@
+import CatLaserAuth
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
@@ -6,6 +7,13 @@ import Crypto
 #endif
 
 /// Software-backed `DeviceIdentityStoring` for tests and non-Darwin CI.
+///
+/// Lives in `CatLaserAuthTestSupport` — a non-product target. Cannot be
+/// imported from `CatLaserApp` or any external consumer of the package;
+/// only test targets (which add `CatLaserAuthTestSupport` to their own
+/// dependencies) can construct one. Production code gets
+/// `SecureEnclaveIdentityStore` from `CatLaserAuth` and has no path to
+/// reach this type.
 ///
 /// Generates a P-256 key in-process using CryptoKit / swift-crypto. The
 /// key material lives in memory for the lifetime of the actor; there is
