@@ -3,6 +3,7 @@ import { env } from '~/lib/env.ts';
 import { errorResponse } from '~/lib/http.ts';
 import { APPLE_APP_SITE_ASSOCIATION_PATH } from '~/lib/universal-link.ts';
 import { authRoute } from '~/routes/auth.ts';
+import { DEVICES_PAIR_PATH, devicesPairRoute } from '~/routes/devices.ts';
 import { healthRoute } from '~/routes/health.ts';
 import { ME_PATH, meRoute } from '~/routes/me.ts';
 import { appleAppSiteAssociationRoute, universalLinkRoute } from '~/routes/universal-link.ts';
@@ -33,6 +34,9 @@ export const handle = async (request: Request): Promise<Response> => {
   }
   if (url.pathname === ME_PATH) {
     return await meRoute(request);
+  }
+  if (url.pathname === DEVICES_PAIR_PATH) {
+    return await devicesPairRoute(request);
   }
   return errorResponse('not_found', `No route for ${request.method} ${url.pathname}`, 404);
 };

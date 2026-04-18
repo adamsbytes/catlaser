@@ -348,3 +348,86 @@ export const accountRelations = relations(account, ({ one }) => ({
     references: [user.id],
   }),
 }));
+
+/**
+ * Device-pairing ledger — the single bridge between a QR code scanned in
+ * the mobile app and the Tailscale endpoint of a provisioned device.
+ *
+ * Flow:
+ *
+ * - At device first-boot provisioning (a later build step), the device
+ *   registers itself with the coordination server: it generates a 160-bit
+ *   base32 pairing code, sends `(code, device_id, device_name, host, port,
+ *   expires_at)` to a provisioning endpoint, and renders the QR
+ *   `catlaser://pair?code=<code>&device=<device_id>` on its own screen.
+ *   The plaintext `code` is kept by the device long enough to print and
+ *   then discarded; the server stores only `base64url-no-pad(sha256(code))`
+ *   in `code_hash`, so a compromise of this table cannot redeem into a
+ *   valid pairing — the attacker would have to scan the physical QR.
+ * - At pair time, the app scans the QR, lifts `(code, device_id)` out of
+ *   the URL, and POSTs them to `/api/v1/devices/pair` authenticated with
+ *   the user's bearer + `api:` attestation + `Idempotency-Key`. The server
+ *   atomically claims the row — `UPDATE ... WHERE code_hash = $1 AND
+ *   device_id = $2 AND claimed_at IS NULL AND expires_at > now
+ *   RETURNING ...` — and returns the device's Tailscale endpoint to the
+ *   app. A zero-row return tells the server to do a classifying read that
+ *   distinguishes unknown-code / expired / already-claimed /
+ *   device-mismatch. Device-mismatch collapses to 404 on the wire so a
+ *   scanner cannot fingerprint which opaque codes exist in the ledger.
+ *
+ * `code_hash` uses the same plain-SHA-256 scheme as `magic_link_attestation.token_identifier`
+ * — the input is 160 bits of unstructured entropy, well above the
+ * threshold where plain hashing is sufficient against rainbow-table
+ * attacks, and the symmetry keeps the "plaintext secrets never land in
+ * the DB" posture consistent across both high-value tokens the server
+ * holds.
+ *
+ * `claimed_by_user_id` uses `ON DELETE SET NULL` rather than `CASCADE`:
+ * a user deleting their account unbinds the pairing claim but leaves the
+ * ledger row intact. The device is still provisioned in the fleet —
+ * another user with a fresh QR from the same device would generate a new
+ * pairing code, and the historical row is useful for fleet diagnostics.
+ * Deleting the row on user-delete would destroy that audit trail for a
+ * nullable association that has no operational utility after the owning
+ * user is gone.
+ *
+ * `tailscale_host` / `tailscale_port` are the endpoint the app's
+ * `DeviceTransport` opens a TCP channel to. Host is validated at issuance
+ * time (DNS-name or IP literal per RFC 1035); port is an unsigned 16-bit
+ * integer. Storing the endpoint on the pairing row rather than on a
+ * separate `device` table is intentional for v1: the app persists the
+ * resolved endpoint to Keychain and never re-resolves, matching the "QR
+ * brokers endpoint once" posture in ADR-006 and the iOS
+ * `PairingClient.exchange` contract. A re-pair flow (device changed its
+ * Tailscale IP, user re-scans a fresh QR) produces a new row with the
+ * new endpoint.
+ */
+export const devicePairingCode = pgTable(
+  'device_pairing_code',
+  {
+    id: text('id').primaryKey(),
+    codeHash: text('code_hash').notNull().unique(),
+    deviceId: text('device_id').notNull(),
+    deviceName: text('device_name'),
+    tailscaleHost: text('tailscale_host').notNull(),
+    tailscalePort: integer('tailscale_port').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    claimedAt: timestamp('claimed_at'),
+    claimedByUserId: text('claimed_by_user_id').references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp('created_at').notNull(),
+  },
+  (table) => [
+    index('device_pairing_code_expires_at_idx').on(table.expiresAt),
+    index('device_pairing_code_device_id_idx').on(table.deviceId),
+    index('device_pairing_code_claimed_by_user_id_idx').on(table.claimedByUserId),
+  ],
+);
+
+export const devicePairingCodeRelations = relations(devicePairingCode, ({ one }) => ({
+  claimedByUser: one(user, {
+    fields: [devicePairingCode.claimedByUserId],
+    references: [user.id],
+  }),
+}));

@@ -14,6 +14,20 @@ CREATE TABLE "account" (
 	"updated_at" timestamp NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "device_pairing_code" (
+	"id" text PRIMARY KEY NOT NULL,
+	"code_hash" text NOT NULL,
+	"device_id" text NOT NULL,
+	"device_name" text,
+	"tailscale_host" text NOT NULL,
+	"tailscale_port" integer NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"claimed_at" timestamp,
+	"claimed_by_user_id" text,
+	"created_at" timestamp NOT NULL,
+	CONSTRAINT "device_pairing_code_code_hash_unique" UNIQUE("code_hash")
+);
+--> statement-breakpoint
 CREATE TABLE "email_rate_limit" (
 	"id" text PRIMARY KEY NOT NULL,
 	"email_hash" text NOT NULL,
@@ -96,10 +110,14 @@ CREATE TABLE "verification" (
 );
 --> statement-breakpoint
 ALTER TABLE "account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "device_pairing_code" ADD CONSTRAINT "device_pairing_code_claimed_by_user_id_user_id_fk" FOREIGN KEY ("claimed_by_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "idempotency_record" ADD CONSTRAINT "idempotency_record_session_id_session_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."session"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "session" ADD CONSTRAINT "session_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "session_attestation" ADD CONSTRAINT "session_attestation_session_id_session_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."session"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "account_userId_idx" ON "account" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "device_pairing_code_expires_at_idx" ON "device_pairing_code" USING btree ("expires_at");--> statement-breakpoint
+CREATE INDEX "device_pairing_code_device_id_idx" ON "device_pairing_code" USING btree ("device_id");--> statement-breakpoint
+CREATE INDEX "device_pairing_code_claimed_by_user_id_idx" ON "device_pairing_code" USING btree ("claimed_by_user_id");--> statement-breakpoint
 CREATE INDEX "email_rate_limit_window_started_at_idx" ON "email_rate_limit" USING btree ("window_started_at");--> statement-breakpoint
 CREATE INDEX "idempotency_record_session_id_idx" ON "idempotency_record" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "idempotency_record_expires_at_idx" ON "idempotency_record" USING btree ("expires_at");--> statement-breakpoint

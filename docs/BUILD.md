@@ -72,7 +72,7 @@
   - [X] Protected-route attestation middleware (api: binding on every authenticated call, per-session SE pubkey stored at sign-in, signature verify gates the request)
   - [X] Idempotency keys on mutating routes (server dedupes within skew window to block write-replay on captured attestations)
   - [X] Rate limiting (per-email + per-IP cooldown, enumeration-resistant identical 200 responses)
-  - [ ] Device pairing endpoint/flow
+  - [X] Device pairing endpoint/flow
   - [ ] Cloudflare Tunnel deployment (cloudflared on VM, no inbound ports) + client pins 3–4 public roots CF chains through
 
 [ ] App — iOS (SwiftUI, primary)
