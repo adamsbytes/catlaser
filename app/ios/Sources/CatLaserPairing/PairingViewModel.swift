@@ -34,40 +34,64 @@ public final class PairingViewModel {
     public private(set) var phase: PairingPhase = .checkingExisting
     public private(set) var connectionState: ConnectionState = .idle
 
+    /// Default cadence between successive background ownership
+    /// re-checks while the app is foregrounded. A daily check catches
+    /// supersession without burning an attested HTTP call on every
+    /// scene activation. The cadence matters because the lookup is
+    /// read-only and attested, but not free — each call burns a
+    /// Secure-Enclave signing op.
+    public static let defaultReverifyInterval: TimeInterval = 24 * 60 * 60
+
     private let pairingClient: PairingClient
+    private let pairedDevicesClient: PairedDevicesClient?
     private let store: any EndpointStore
     private let permissionGate: any CameraPermissionGate
     private let connectionManagerFactory: @Sendable (PairedDevice) -> ConnectionManager
     private let clock: @Sendable () -> Date
+    private let reverifyInterval: TimeInterval
 
     private var manager: ConnectionManager?
     private var connectionStateTask: Task<Void, Never>?
+    private var lastReverifyAt: Date?
 
     public init(
         pairingClient: PairingClient,
+        pairedDevicesClient: PairedDevicesClient? = nil,
         store: any EndpointStore,
         permissionGate: any CameraPermissionGate,
         connectionManagerFactory: @escaping @Sendable (PairedDevice) -> ConnectionManager,
         clock: @escaping @Sendable () -> Date = { Date() },
+        reverifyInterval: TimeInterval = PairingViewModel.defaultReverifyInterval,
     ) {
         self.pairingClient = pairingClient
+        self.pairedDevicesClient = pairedDevicesClient
         self.store = store
         self.permissionGate = permissionGate
         self.connectionManagerFactory = connectionManagerFactory
         self.clock = clock
+        self.reverifyInterval = reverifyInterval
     }
 
     /// Called when the screen first appears. Loads any persisted
     /// pairing, starts the connection manager if present, otherwise
     /// gates on camera permission to proceed to the QR scanner.
+    ///
+    /// Also fires an ownership re-verification against the server
+    /// before adopting the persisted device (if a
+    /// `PairedDevicesClient` is wired). If the server reports the
+    /// stored `device_id` as no longer active — the most common cause
+    /// is that the device was re-paired to a different user — the
+    /// local row is wiped and the user is routed back to the pairing
+    /// flow. An offline or transiently-failed re-check is tolerated
+    /// silently: we adopt the cached pairing and try again on the
+    /// next interval, so a flaky-network launch never locks the user
+    /// out of a device they legitimately own.
     public func start() async {
         guard case .checkingExisting = phase else { return }
 
+        let existing: PairedDevice?
         do {
-            if let existing = try await store.load() {
-                await adoptPaired(existing)
-                return
-            }
+            existing = try await store.load()
         } catch {
             // Corrupted / unreadable keychain row — surface, but
             // leave the caller a clean "try to re-scan" path. Clear
@@ -77,7 +101,53 @@ public final class PairingViewModel {
             return
         }
 
-        await advanceToScanningOrPermission()
+        guard let existing else {
+            await advanceToScanningOrPermission()
+            return
+        }
+
+        // Verify the cached pairing against the server before
+        // adopting it. An authoritative "not yours anymore" response
+        // wipes and routes to re-pair; anything else (network, 5xx,
+        // attestation hiccup) lets the cached pairing proceed and
+        // retries on the next reverify window.
+        switch await reverifyOwnership(of: existing) {
+        case .stillOwned, .indeterminate:
+            await adoptPaired(existing)
+        case .noLongerOwned:
+            try? await store.delete()
+            await advanceToScanningOrPermission()
+        }
+    }
+
+    /// Trigger an ownership re-check on demand. Safe to call from any
+    /// lifecycle hook (scene foreground, daily timer, manual refresh).
+    /// No-op if the client was constructed without a
+    /// `PairedDevicesClient`, if no pairing is currently held, or if
+    /// the last successful reverification was within
+    /// `reverifyInterval`. A result of `.noLongerOwned` wipes the
+    /// local row, tears down the active connection, and routes the
+    /// user back to the scanner.
+    public func reverifyOwnershipIfNeeded() async {
+        guard let manager, pairedDevicesClient != nil else { return }
+        guard case let .paired(device) = phase else { return }
+        if let lastReverifyAt {
+            let elapsed = clock().timeIntervalSince(lastReverifyAt)
+            if elapsed < reverifyInterval { return }
+        }
+        switch await reverifyOwnership(of: device) {
+        case .stillOwned, .indeterminate:
+            break
+        case .noLongerOwned:
+            await manager.stop()
+            connectionStateTask?.cancel()
+            connectionStateTask = nil
+            self.manager = nil
+            connectionState = .idle
+            try? await store.delete()
+            await advanceToScanningOrPermission()
+        }
+        _ = manager
     }
 
     /// Explicitly request camera permission when in
@@ -244,6 +314,50 @@ public final class PairingViewModel {
         case .notDetermined, .denied, .restricted:
             phase = .needsCameraPermission(status)
         }
+    }
+
+    /// Outcome of a single server-side ownership re-check. A
+    /// `.stillOwned` or `.noLongerOwned` answer is authoritative
+    /// (2xx from the coordination server); `.indeterminate` is the
+    /// fail-open bucket for network, 5xx, 429, or an attestation
+    /// failure that would otherwise log the user out on a flaky
+    /// launch. Callers that see `.indeterminate` keep the cached
+    /// pairing and retry on the next scheduled reverification.
+    private enum OwnershipCheckOutcome {
+        case stillOwned
+        case noLongerOwned
+        case indeterminate
+    }
+
+    /// Ask the coordination server whether `device.id` is still among
+    /// the signed-in user's active (non-revoked) claims. The "no
+    /// client wired" path returns `.indeterminate` so the cached
+    /// pairing survives when the host app hasn't plumbed the client
+    /// — tests and migration surfaces can construct the view model
+    /// without it.
+    private func reverifyOwnership(of device: PairedDevice) async -> OwnershipCheckOutcome {
+        guard let client = pairedDevicesClient else { return .indeterminate }
+        let devices: [PairedDevice]
+        do {
+            devices = try await client.list()
+        } catch {
+            // `client.list()` is `throws(PairingError)`, so every
+            // failure is already the right type. Classify it:
+            // `missingSession` is authoritative "nothing owned";
+            // everything else is transient and callers must keep the
+            // cached pairing until the next window.
+            switch error {
+            case .missingSession:
+                return .noLongerOwned
+            case .network, .rateLimited, .serverError, .invalidServerResponse,
+                 .storage, .attestation, .codeAlreadyUsed, .codeExpired,
+                 .codeNotFound, .invalidCode:
+                return .indeterminate
+            }
+        }
+        lastReverifyAt = clock()
+        let stillOwned = devices.contains(where: { $0.id == device.id })
+        return stillOwned ? .stillOwned : .noLongerOwned
     }
 
     /// Exposed for tests / app lifecycle hooks: returns the

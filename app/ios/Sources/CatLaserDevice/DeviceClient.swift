@@ -15,6 +15,13 @@ import SwiftProtobuf
 /// 3. Surface transport failures as `DeviceClientError` to every
 ///    pending continuation, finish the event stream, and transition to
 ///    the closed state.
+/// 4. Perform a mandatory `AuthRequest` handshake as the first frame
+///    after transport open, using a caller-supplied attestation block.
+///    The device rejects every subsequent frame until the handshake
+///    completes successfully, so `connect()` does not return until the
+///    `AuthResponse` has been received and accepted. A `nil` block is
+///    accepted only for legacy tests that exercise the transport
+///    machinery in isolation.
 ///
 /// Only one consumer of `events` is supported; the stream is
 /// constructed at init and handed out by reference. Multiple
@@ -27,6 +34,17 @@ import SwiftProtobuf
 /// `.alreadyConnected`. `disconnect` is idempotent.
 public actor DeviceClient {
     public typealias ClientClock = @Sendable () -> Date
+
+    /// Builder for the attestation header to place on the first
+    /// TCP frame. Returns the same base64-of-JSON payload the app
+    /// sends to the coordination server on the `api:` binding, but
+    /// with a `dev:<ts>` binding that targets the device daemon.
+    ///
+    /// Lifetime of the returned string matches the returned value —
+    /// the handshake consumes it once. The closure is called inside
+    /// the actor's isolation domain, so it must be `@Sendable` and
+    /// must not capture non-Sendable state.
+    public typealias AttestationBuilder = @Sendable () async throws -> String
 
     /// Default per-request timeout. The wire protocol is request/response
     /// over a healthy Tailscale link; real responses are sub-second.
@@ -84,8 +102,19 @@ public actor DeviceClient {
         eventStream
     }
 
-    /// Open the underlying transport and start the receive loop.
-    public func connect() async throws {
+    /// Open the underlying transport, start the receive loop, and
+    /// complete the mandatory device-auth handshake.
+    ///
+    /// - Parameter handshake: closure that returns the `x-device-
+    ///   attestation` header payload (base64 v4 JSON) signed with
+    ///   the app's Secure-Enclave key under the `dev:<ts>` binding.
+    ///   Passing `nil` skips the handshake and is intended only for
+    ///   tests that exercise the transport/correlation code directly
+    ///   (e.g. via `InMemoryDeviceTransport`). Production callers
+    ///   MUST provide a handshake block; the server disconnects any
+    ///   client that sends a non-auth frame first, so skipping the
+    ///   handshake against a real device is a guaranteed failure.
+    public func connect(handshake: AttestationBuilder? = nil) async throws {
         switch state {
         case .connecting, .connected:
             throw DeviceClientError.alreadyConnected
@@ -111,6 +140,80 @@ public actor DeviceClient {
         receiveTask = Task { [weak self] in
             await self?.runReceiveLoop(stream)
         }
+        guard let handshake else { return }
+        do {
+            try await performHandshake(handshake)
+        } catch {
+            // The handshake owns the teardown path — a failed call
+            // tears the transport down and throws — but callers
+            // expect `connect()` to have either `.connected` or
+            // `.closed` state on return, never a dangling
+            // half-open. `performHandshake` already closes on
+            // failure, so we just surface the error.
+            throw error
+        }
+    }
+
+    private func performHandshake(_ handshake: AttestationBuilder) async throws {
+        let header: String
+        do {
+            header = try await handshake()
+        } catch let error as DeviceClientError {
+            await shutdownForHandshakeFailure()
+            throw error
+        } catch {
+            await shutdownForHandshakeFailure()
+            throw DeviceClientError.handshakeFailed(
+                reason: "attestation build failed: \(error.localizedDescription)",
+            )
+        }
+        var authRequest = Catlaser_App_V1_AppRequest()
+        authRequest.auth.attestationHeader = header
+        let event: Catlaser_App_V1_DeviceEvent
+        do {
+            event = try await request(authRequest)
+        } catch let error as DeviceClientError {
+            await shutdownForHandshakeFailure()
+            // A remote error during handshake means the device
+            // refused the AuthRequest itself (the server sends a
+            // typed `error` event only for dispatcher issues; a
+            // refused handshake writes an AuthResponse with
+            // ok=false, which lands in the success branch below).
+            // Surfacing whatever the client got here lets the
+            // caller distinguish a transport drop from a crypto
+            // rejection.
+            throw error
+        } catch {
+            await shutdownForHandshakeFailure()
+            throw DeviceClientError.handshakeFailed(
+                reason: "handshake transport error: \(error.localizedDescription)",
+            )
+        }
+        guard case let .authResponse(response) = event.event else {
+            await shutdownForHandshakeFailure()
+            throw DeviceClientError.handshakeFailed(
+                reason: "handshake reply was not AuthResponse (got \(String(describing: event.event)))",
+            )
+        }
+        if !response.ok {
+            await shutdownForHandshakeFailure()
+            throw DeviceClientError.handshakeFailed(reason: response.reason)
+        }
+    }
+
+    /// Tear the transport down after a handshake failure. Identical
+    /// to `disconnect()` except it does not produce a
+    /// `.notConnected` error on a subsequent call — the caller is
+    /// already in the middle of surfacing a specific handshake
+    /// error and shouldn't get a second message about it.
+    private func shutdownForHandshakeFailure() async {
+        guard state != .closed else { return }
+        state = .closed
+        receiveTask?.cancel()
+        receiveTask = nil
+        await transport.close()
+        await failAllPending(.cancelled)
+        eventContinuation.finish()
     }
 
     /// Tear the transport down and fail all outstanding requests.

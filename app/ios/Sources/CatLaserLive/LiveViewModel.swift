@@ -246,6 +246,7 @@ private extension Catlaser_App_V1_DeviceEvent.OneOf_Event {
         case .error: "error"
         case .schedule: "schedule"
         case .pushTokenAck: "push_token_ack"
+        case .authResponse: "auth_response"
         }
     }
 }

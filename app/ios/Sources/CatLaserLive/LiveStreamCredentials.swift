@@ -20,9 +20,16 @@ public struct LiveStreamCredentials: Sendable, Equatable {
     public let token: String
 
     public init(url: URL, token: String) throws(LiveStreamCredentialsError) {
-        guard let scheme = url.scheme?.lowercased(),
-              scheme == "wss" || scheme == "ws" || scheme == "https" || scheme == "http"
-        else {
+        // Signaling must be TLS-encrypted. LiveKit's subscriber JWT grants
+        // room-join rights for the duration of the token; on a plaintext
+        // `ws://` connection that JWT — and the signaling channel that
+        // carries SDP and ICE metadata — is visible to every network hop
+        // between the app and the LiveKit server. For a product that
+        // streams video of the user's home, the allowlist is a single
+        // scheme. No http, no ws, no local-dev escape hatch compiled into
+        // shipping code — a debug build that needs plaintext must patch
+        // this file, not flip a flag.
+        guard let scheme = url.scheme?.lowercased(), scheme == "wss" else {
             throw .invalidURLScheme
         }
         guard url.host?.isEmpty == false else {

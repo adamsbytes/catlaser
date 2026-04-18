@@ -448,4 +448,259 @@ struct PairingViewModelTests {
 
         #expect(vm.phase == .needsCameraPermission(.denied))
     }
+
+    // MARK: - ownership re-verification (#4)
+
+    private func makePairedListResponse(for devices: [PairedDevice]) -> HTTPResponse {
+        let entries: [[String: Any]] = devices.map { device in
+            let pairedAt = ISO8601DateFormatter().string(from: device.pairedAt)
+            let name: Any = device.name.isEmpty ? NSNull() : device.name
+            return [
+                "device_id": device.id,
+                "device_name": name,
+                "host": device.endpoint.host,
+                "port": Int(device.endpoint.port),
+                "paired_at": pairedAt,
+            ]
+        }
+        return HTTPResponse.json(["ok": true, "data": ["devices": entries]])
+    }
+
+    @Test
+    func startWithPersistedDeviceAdoptsWhenServerConfirmsOwnership() async throws {
+        // The happy path after the ownership-re-check was wired: the
+        // cached pairing is still active server-side, so the VM
+        // transitions to `.paired` and bind the connection manager
+        // just like before. This test pins the behavior so a later
+        // tightening (e.g. hard-fail on any HTTP error) doesn't
+        // regress the cached-claim re-adoption silently.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            .response(makePairedListResponse(for: [device])),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: http,
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        if case let .paired(loaded) = vm.phase {
+            #expect(loaded == device)
+        } else {
+            Issue.record("expected .paired, got \(vm.phase)")
+        }
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
+    }
+
+    @Test
+    func startWipesPersistedDeviceWhenServerReportsRevocation() async throws {
+        // The primary guarantee behind fix #4: a cached pairing that
+        // the server has superseded (revoked via a re-pair by another
+        // user) must not survive launch. The VM wipes the Keychain
+        // row and routes the user back to the scanner.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            .response(makePairedListResponse(for: [])),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: http,
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        #expect(vm.phase == .scanning)
+        #expect(try await store.load() == nil)
+    }
+
+    @Test
+    func startWipesPersistedDeviceOn401FromListEndpoint() async throws {
+        // A 401 on the re-check means the server no longer has a
+        // session for this bearer. That's the same authoritative
+        // "you don't own anything" answer as an empty list — wipe
+        // and route to re-pair (which will itself route to sign-in
+        // because the bearer is invalid).
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse.json(
+                ["ok": false, "error": ["code": "SESSION_REQUIRED", "message": "expired"]],
+                status: 401,
+            )),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: http,
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        #expect(vm.phase == .scanning)
+        #expect(try await store.load() == nil)
+    }
+
+    @Test
+    func startAdoptsCachedDeviceWhenListEndpointErrors() async throws {
+        // Network failures and 5xx are NOT authoritative — they mean
+        // "we don't know." Wiping the Keychain on a flaky-network
+        // launch would be a terrible UX (user loses their pairing
+        // because their tailnet hit a transient DNS issue). The VM
+        // must fail open: adopt the cached pairing and retry on the
+        // next reverify window.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse.json(
+                ["ok": false, "error": ["code": "INTERNAL", "message": "boom"]],
+                status: 503,
+            )),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: http,
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        if case let .paired(loaded) = vm.phase {
+            #expect(loaded == device)
+        } else {
+            Issue.record("expected .paired, got \(vm.phase)")
+        }
+        #expect(try await store.load() == device)
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
+    }
+
+    @Test
+    func startAdoptsCachedDeviceWhenNoPairedDevicesClientWired() async throws {
+        // Backwards compatibility for construction sites (and tests)
+        // that don't plumb the list client. The VM must adopt the
+        // cached pairing unconditionally rather than treating the
+        // missing client as "nothing owned." Tests that exercise
+        // non-re-verification behavior rely on this.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+        )
+        await vm.start()
+        if case let .paired(loaded) = vm.phase {
+            #expect(loaded == device)
+        } else {
+            Issue.record("expected .paired, got \(vm.phase)")
+        }
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
+    }
+
+    @Test
+    func reverifyOwnershipIfNeededHonorsCadence() async throws {
+        // The VM must only fire a reverify request once per
+        // `reverifyInterval`; a scene-foreground storm must not burn
+        // an attested request per event. This test asserts that a
+        // follow-up call within the interval is a no-op.
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            .response(makePairedListResponse(for: [device])),
+            .response(makePairedListResponse(for: [device])),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: http,
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            reverifyInterval: 60,
+        )
+        await vm.start()
+        // First call already fired during `start()`.
+        #expect(await http.requests().count == 1)
+        // A second immediate call must NOT burn another attested
+        // request.
+        await vm.reverifyOwnershipIfNeeded()
+        #expect(await http.requests().count == 1)
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
+    }
+
+    @Test
+    func reverifyOwnershipIfNeededWipesWhenServerRevokes() async throws {
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            // First call (start) confirms ownership.
+            .response(makePairedListResponse(for: [device])),
+            // Second call (manual reverify after interval) reports
+            // revocation.
+            .response(makePairedListResponse(for: [])),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: http,
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        // Set a zero interval so the second call is always allowed.
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            reverifyInterval: 0,
+        )
+        await vm.start()
+        await vm.reverifyOwnershipIfNeeded()
+        #expect(vm.phase == .scanning)
+        #expect(try await store.load() == nil)
+    }
 }

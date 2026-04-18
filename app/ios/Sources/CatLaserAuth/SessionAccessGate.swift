@@ -37,7 +37,26 @@ import LocalAuthentication
 /// must never be trusted with a bearer token.
 public actor SessionAccessGate {
     /// Default idle window between biometric prompts during normal use.
-    public static let defaultIdleTimeout: TimeInterval = 15 * 60
+    ///
+    /// 120 seconds (2 minutes) balances two forces:
+    ///
+    /// * Short enough that a thief who picks up an unlocked phone has a
+    ///   narrow window to exfiltrate the bearer cache and drive the
+    ///   coordination server / device endpoints before the next read
+    ///   falls through to the keychain-level `.userPresence` gate.
+    /// * Long enough that an attentive user flipping between the app and
+    ///   (say) a message thread does not burn a biometric prompt every
+    ///   time they come back inside a single sitting.
+    ///
+    /// This default assumes the host app *also* wires a scene-lifecycle
+    /// observer that calls `GatedBearerTokenStore.invalidateSession()` on
+    /// `scenePhase == .background`. Without that hook the full 2 min
+    /// window elapses on an idle screen lock, which is weaker than the
+    /// product posture demands. The app target is responsible for this
+    /// wiring; the library cannot enforce it because the SPM target
+    /// cannot import `SwiftUI.ScenePhase` without dragging UI deps into
+    /// every auth-only consumer.
+    public static let defaultIdleTimeout: TimeInterval = 120
 
     /// Evaluation policy. `.deviceOwnerAuthentication` accepts biometric or
     /// device passcode; `.biometricOnly` rejects passcode fallback.

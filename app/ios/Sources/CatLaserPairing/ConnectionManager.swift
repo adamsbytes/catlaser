@@ -39,6 +39,7 @@ import Foundation
 public actor ConnectionManager {
     public typealias DeviceClientFactory = @Sendable (DeviceEndpoint) -> DeviceClient
     public typealias JitterSource = @Sendable (ClosedRange<Double>) -> Double
+    public typealias HandshakeBuilder = @Sendable () async throws -> String
 
     /// Tunables for the supervisor loop. Defaults are chosen for a
     /// real iOS device on Wi-Fi with a healthy Tailscale link: 20s
@@ -108,6 +109,11 @@ public actor ConnectionManager {
     private let configuration: Configuration
     private let clock: @Sendable () -> Date
     private let jitter: JitterSource
+    /// Closure that produces the `x-device-attestation` header value
+    /// threaded into `DeviceClient.connect(handshake:)` on every
+    /// reconnect. Nil-permitted only for tests that use the in-memory
+    /// transport and don't exercise the real handshake path.
+    private let handshakeBuilder: HandshakeBuilder?
 
     private let stateStream: AsyncStream<ConnectionState>
     private let stateContinuation: AsyncStream<ConnectionState>.Continuation
@@ -129,6 +135,7 @@ public actor ConnectionManager {
         endpoint: DeviceEndpoint,
         clientFactory: @escaping DeviceClientFactory,
         pathMonitor: any NetworkPathMonitor,
+        handshakeBuilder: HandshakeBuilder? = nil,
         configuration: Configuration = .default,
         clock: @escaping @Sendable () -> Date = { Date() },
         jitter: @escaping JitterSource = { Double.random(in: $0) },
@@ -136,6 +143,7 @@ public actor ConnectionManager {
         self.endpoint = endpoint
         self.clientFactory = clientFactory
         self.pathMonitor = pathMonitor
+        self.handshakeBuilder = handshakeBuilder
         self.configuration = configuration
         self.clock = clock
         self.jitter = jitter
@@ -264,7 +272,7 @@ public actor ConnectionManager {
 
             let client = clientFactory(endpoint)
             do {
-                try await client.connect()
+                try await client.connect(handshake: handshakeBuilder)
             } catch {
                 if stopped { return }
                 await scheduleBackoff()

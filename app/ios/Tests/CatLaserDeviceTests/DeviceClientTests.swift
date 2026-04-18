@@ -377,4 +377,141 @@ struct DeviceClientTests {
         await server.stop()
         await client.disconnect()
     }
+
+    // MARK: - Device-auth handshake (fix #2)
+
+    @Test
+    func handshakeHappyPathSendsAuthRequestAndAcceptsResponse() async throws {
+        // The client MUST send the handshake as its first frame. The
+        // scripted server echoes an AuthResponse(ok=true). After the
+        // handshake, normal request/response continues to work.
+        let (client, transport) = makeClient()
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            if case .auth = request.request {
+                var event = Catlaser_App_V1_DeviceEvent()
+                var response = Catlaser_App_V1_AuthResponse()
+                response.ok = true
+                event.authResponse = response
+                return .reply(event)
+            }
+            // The post-handshake GetStatus ping verifies the connection
+            // is usable end-to-end.
+            var event = Catlaser_App_V1_DeviceEvent()
+            event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+            return .reply(event)
+        }
+        await server.run()
+
+        try await client.connect {
+            "attestation-header-value"
+        }
+
+        var ping = Catlaser_App_V1_AppRequest()
+        ping.getStatus = Catlaser_App_V1_GetStatusRequest()
+        let response = try await client.request(ping)
+        if case .statusUpdate = response.event {
+            // good
+        } else {
+            Issue.record("expected status_update event, got \(String(describing: response.event))")
+        }
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test
+    func handshakeRejectedResponseThrowsHandshakeFailed() async throws {
+        // The server says ok=false with a specific reason. The client
+        // surfaces it as `.handshakeFailed(reason:)` and tears the
+        // transport down — `isConnected` must read false after the
+        // throw so callers can drive reconnect with backoff.
+        let (client, transport) = makeClient()
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            if case .auth = request.request {
+                var event = Catlaser_App_V1_DeviceEvent()
+                var response = Catlaser_App_V1_AuthResponse()
+                response.ok = false
+                response.reason = "DEVICE_AUTH_NOT_AUTHORIZED"
+                event.authResponse = response
+                return .reply(event)
+            }
+            return .silent
+        }
+        await server.run()
+
+        do {
+            try await client.connect {
+                "attestation-header-value"
+            }
+            Issue.record("expected throw")
+        } catch let error as DeviceClientError {
+            if case let .handshakeFailed(reason) = error {
+                #expect(reason == "DEVICE_AUTH_NOT_AUTHORIZED")
+            } else {
+                Issue.record("expected handshakeFailed, got \(error)")
+            }
+        }
+        #expect(!(await client.isConnected))
+        await server.stop()
+    }
+
+    @Test
+    func handshakeBlockFailureSurfacesAsHandshakeFailed() async throws {
+        // The attestation builder itself can throw (e.g. SE key
+        // unavailable, clock out of range). The error must be mapped
+        // to `.handshakeFailed` so `ConnectionManager`'s reconnect
+        // loop handles it like a server rejection.
+        let (client, transport) = makeClient()
+        let server = ScriptedDeviceServer(transport: transport) { _ in .silent }
+        await server.run()
+
+        do {
+            try await client.connect {
+                struct BuilderFailure: Error {}
+                throw BuilderFailure()
+            }
+            Issue.record("expected throw")
+        } catch let error as DeviceClientError {
+            if case let .handshakeFailed(reason) = error {
+                #expect(reason.contains("attestation build failed"))
+            } else {
+                Issue.record("expected handshakeFailed, got \(error)")
+            }
+        }
+        #expect(!(await client.isConnected))
+        await server.stop()
+    }
+
+    @Test
+    func handshakeReplyOfWrongKindFailsCleanly() async throws {
+        // The server's first reply is anything other than
+        // AuthResponse (simulating a protocol regression). The
+        // client must refuse to treat it as a successful handshake
+        // and must close the connection.
+        let (client, transport) = makeClient()
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            if case .auth = request.request {
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            }
+            return .silent
+        }
+        await server.run()
+
+        do {
+            try await client.connect {
+                "attestation-header-value"
+            }
+            Issue.record("expected throw")
+        } catch let error as DeviceClientError {
+            if case let .handshakeFailed(reason) = error {
+                #expect(reason.contains("was not AuthResponse"))
+            } else {
+                Issue.record("expected handshakeFailed, got \(error)")
+            }
+        }
+        #expect(!(await client.isConnected))
+        await server.stop()
+    }
 }

@@ -69,6 +69,14 @@ public enum LiveViewError: Error, Equatable, Sendable {
             .internalFailure("device client already connected")
         case .cancelled:
             .internalFailure("cancelled")
+        case let .handshakeFailed(reason):
+            // A rejected device-auth handshake collapses to
+            // `.notConnected` with the reason embedded so the UI
+            // can surface "re-pair" vs "clock sync" messaging. The
+            // view-level distinction between a missing session and
+            // a failed handshake is not load-bearing — both mean
+            // "can't talk to the device right now."
+            .transportFailure("device-auth handshake rejected: \(reason)")
         }
     }
 }

@@ -21,6 +21,13 @@ import Foundation
 ///   caller inspects `code`/`message` to decide what to show.
 /// * `.wrongEventKind` — response arrived but its oneof branch didn't
 ///   match what the caller asked for; a protocol bug on either side.
+/// * `.handshakeFailed` — the mandatory first-frame device-auth
+///   handshake was rejected. Carries the `DEVICE_AUTH_*` reason string
+///   emitted by the device daemon (matches
+///   `catlaser_brain.auth.handshake.HandshakeReason`). Actionable by
+///   the caller: `DEVICE_AUTH_NOT_AUTHORIZED` / `DEVICE_AUTH_ACL_NOT_READY`
+///   mean re-pair; `DEVICE_AUTH_SKEW_EXCEEDED` means sync the clock;
+///   anything else is a client bug or a captured-replay attempt.
 public enum DeviceClientError: Error, Equatable, Sendable {
     case notConnected
     case alreadyConnected
@@ -34,4 +41,5 @@ public enum DeviceClientError: Error, Equatable, Sendable {
     case cancelled
     case remote(code: UInt32, message: String)
     case wrongEventKind(expected: String, got: String)
+    case handshakeFailed(reason: String)
 }

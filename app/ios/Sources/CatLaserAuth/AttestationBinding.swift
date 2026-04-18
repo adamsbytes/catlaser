@@ -8,7 +8,7 @@ import Foundation
 /// pinning hook). Binding each signature to a context-specific value
 /// collapses that window to a single request.
 ///
-/// Five variants, one per authenticated endpoint:
+/// Six variants, one per authenticated endpoint:
 ///
 /// * `.request(timestamp:)` — placed on the outbound `requestMagicLink`
 ///   call. Timestamp is Unix seconds at the moment the attestation is
@@ -55,9 +55,22 @@ import Foundation
 ///   cannot act — a fresh SE signature is also required. ADR-006
 ///   documents the full contract.
 ///
+/// * `.device(timestamp:)` — placed on the `AuthRequest` frame the app
+///   sends as the FIRST frame on every TCP connection to the device
+///   daemon. The frame carries a full v4 attestation header with
+///   `bnd = "dev:<unix_seconds>"`. The device parses the header,
+///   reconstructs the signed bytes, verifies the P-256 ECDSA signature
+///   against the `pk` embedded in the frame, and then matches that pk
+///   against its cached ACL of authorized users. Skew is checked by the
+///   device against its local clock with the same ±60s window as the
+///   server-side bindings. Distinct tag prevents any other captured
+///   attestation from being replayed as a device auth frame, and
+///   prevents a captured device frame from being replayed against a
+///   coordination-server endpoint.
+///
 /// Wire format: the binding renders to a tagged UTF-8 string
 /// (`"req:<ts>"`, `"ver:<token>"`, `"sis:<ts>:<rawNonce>"`,
-/// `"out:<ts>"`, or `"api:<ts>"`) that is both:
+/// `"out:<ts>"`, `"api:<ts>"`, or `"dev:<ts>"`) that is both:
 ///
 /// 1. Placed on the wire under the `bnd` key of the attestation payload.
 /// 2. Appended to the 32-byte `fph` hash and fed as the ECDSA message —
@@ -73,6 +86,7 @@ public enum AttestationBinding: Sendable, Equatable {
     case social(timestamp: Int64, rawNonce: String)
     case signOut(timestamp: Int64)
     case api(timestamp: Int64)
+    case device(timestamp: Int64)
 
     /// Upper bound on the UTF-8 size of `wireBytes`. Magic-link tokens and
     /// raw nonces are small (tens of bytes); this bound exists so a
@@ -90,6 +104,7 @@ public enum AttestationBinding: Sendable, Equatable {
         case let .social(timestamp, rawNonce): "sis:\(timestamp):\(rawNonce)"
         case let .signOut(timestamp): "out:\(timestamp)"
         case let .api(timestamp): "api:\(timestamp)"
+        case let .device(timestamp): "dev:\(timestamp)"
         }
     }
 
@@ -160,8 +175,14 @@ public enum AttestationBinding: Sendable, Equatable {
             }
             return .api(timestamp: parsed)
         }
+        if let ts = wireValue.prefixStrippedIfMatches("dev:") {
+            guard let parsed = Int64(ts), parsed > 0, String(parsed) == ts else {
+                throw .attestationFailed("bnd device timestamp is not a positive decimal Int64")
+            }
+            return .device(timestamp: parsed)
+        }
         throw .attestationFailed(
-            "bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', 'out:', or 'api:')",
+            "bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', 'out:', 'api:', or 'dev:')",
         )
     }
 }

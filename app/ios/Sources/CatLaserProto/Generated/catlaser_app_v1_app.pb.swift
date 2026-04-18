@@ -484,6 +484,55 @@ public struct Catlaser_App_V1_UnregisterPushTokenRequest: Sendable {
   public init() {}
 }
 
+/// First frame on every TCP connection from the app to the device.
+/// The device rejects any other AppRequest oneof case until it has
+/// received a well-formed AuthRequest AND verified the embedded
+/// attestation against its cached ACL.
+///
+/// `attestation_header` is the same v4 `x-device-attestation`
+/// base64(payload) string the app sends to the coordination server,
+/// but with the `dev:<unix_seconds>` binding tag. The device parses
+/// it, reconstructs the signed message, verifies the ECDSA signature
+/// against the `fph` hash + `bnd` bytes, and then checks the signer's
+/// SPKI (from `pk`) against its cached ACL of authorized users.
+///
+/// The device emits exactly one AuthResponse back to confirm accept
+/// or reject. On reject, the device closes the connection; on
+/// accept, normal request-response traffic follows.
+public struct Catlaser_App_V1_AuthRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Base64(JSON(payload)) with payload.bnd = "dev:<unix_seconds>".
+  /// The exact v4 wire format the app emits elsewhere, reused here
+  /// so the device needs only one attestation parser.
+  public var attestationHeader: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Device's reply to an AuthRequest. Emitted once per handshake. On
+/// `ok=false`, the device closes the connection after sending this
+/// frame so the app can surface the specific reason.
+public struct Catlaser_App_V1_AuthResponse: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var ok: Bool = false
+
+  /// Machine-readable reason when `ok=false`. Mirrors the
+  /// `DEVICE_AUTH_*` strings defined by the Python handshake module.
+  public var reason: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// Envelope for all app-to-device commands. Sent over WebRTC data channel or
 /// TCP over Tailscale.
 public struct Catlaser_App_V1_AppRequest: Sendable {
@@ -618,6 +667,14 @@ public struct Catlaser_App_V1_AppRequest: Sendable {
     set {request = .unregisterPushToken(newValue)}
   }
 
+  public var auth: Catlaser_App_V1_AuthRequest {
+    get {
+      if case .auth(let v)? = request {return v}
+      return Catlaser_App_V1_AuthRequest()
+    }
+    set {request = .auth(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Request: Equatable, Sendable {
@@ -636,6 +693,7 @@ public struct Catlaser_App_V1_AppRequest: Sendable {
     case getSchedule(Catlaser_App_V1_GetScheduleRequest)
     case registerPushToken(Catlaser_App_V1_RegisterPushTokenRequest)
     case unregisterPushToken(Catlaser_App_V1_UnregisterPushTokenRequest)
+    case auth(Catlaser_App_V1_AuthRequest)
 
   }
 
@@ -910,6 +968,14 @@ public struct Catlaser_App_V1_DeviceEvent: Sendable {
     set {event = .pushTokenAck(newValue)}
   }
 
+  public var authResponse: Catlaser_App_V1_AuthResponse {
+    get {
+      if case .authResponse(let v)? = event {return v}
+      return Catlaser_App_V1_AuthResponse()
+    }
+    set {event = .authResponse(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Event: Equatable, Sendable {
@@ -924,6 +990,7 @@ public struct Catlaser_App_V1_DeviceEvent: Sendable {
     case error(Catlaser_App_V1_DeviceError)
     case schedule(Catlaser_App_V1_ScheduleList)
     case pushTokenAck(Catlaser_App_V1_PushTokenAck)
+    case authResponse(Catlaser_App_V1_AuthResponse)
 
   }
 
@@ -1532,9 +1599,74 @@ extension Catlaser_App_V1_UnregisterPushTokenRequest: SwiftProtobuf.Message, Swi
   }
 }
 
+extension Catlaser_App_V1_AuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AuthRequest"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}attestation_header\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.attestationHeader) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.attestationHeader.isEmpty {
+      try visitor.visitSingularStringField(value: self.attestationHeader, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Catlaser_App_V1_AuthRequest, rhs: Catlaser_App_V1_AuthRequest) -> Bool {
+    if lhs.attestationHeader != rhs.attestationHeader {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Catlaser_App_V1_AuthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".AuthResponse"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ok\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 1)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Catlaser_App_V1_AuthResponse, rhs: Catlaser_App_V1_AuthResponse) -> Bool {
+    if lhs.ok != rhs.ok {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Catlaser_App_V1_AppRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AppRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}start_session\0\u{3}stop_session\0\u{3}get_status\0\u{3}get_cat_profiles\0\u{3}update_cat_profile\0\u{3}delete_cat_profile\0\u{3}get_play_history\0\u{3}start_stream\0\u{3}stop_stream\0\u{3}set_schedule\0\u{3}identify_new_cat\0\u{3}run_diagnostic\0\u{3}request_id\0\u{3}get_schedule\0\u{3}register_push_token\0\u{3}unregister_push_token\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}start_session\0\u{3}stop_session\0\u{3}get_status\0\u{3}get_cat_profiles\0\u{3}update_cat_profile\0\u{3}delete_cat_profile\0\u{3}get_play_history\0\u{3}start_stream\0\u{3}stop_stream\0\u{3}set_schedule\0\u{3}identify_new_cat\0\u{3}run_diagnostic\0\u{3}request_id\0\u{3}get_schedule\0\u{3}register_push_token\0\u{3}unregister_push_token\0\u{1}auth\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1738,6 +1870,19 @@ extension Catlaser_App_V1_AppRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
           self.request = .unregisterPushToken(v)
         }
       }()
+      case 17: try {
+        var v: Catlaser_App_V1_AuthRequest?
+        var hadOneofValue = false
+        if let current = self.request {
+          hadOneofValue = true
+          if case .auth(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.request = .auth(v)
+        }
+      }()
       default: break
       }
     }
@@ -1814,6 +1959,10 @@ extension Catlaser_App_V1_AppRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
     case .unregisterPushToken?: try {
       guard case .unregisterPushToken(let v)? = self.request else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
+    }()
+    case .auth?: try {
+      guard case .auth(let v)? = self.request else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
     }()
     default: break
     }
@@ -2213,7 +2362,7 @@ extension Catlaser_App_V1_DeviceError: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Catlaser_App_V1_DeviceEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEvent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}status_update\0\u{3}cat_profile_list\0\u{3}play_history\0\u{3}stream_offer\0\u{3}session_summary\0\u{3}new_cat_detected\0\u{3}hopper_empty\0\u{3}diagnostic_result\0\u{1}error\0\u{3}request_id\0\u{1}schedule\0\u{3}push_token_ack\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}status_update\0\u{3}cat_profile_list\0\u{3}play_history\0\u{3}stream_offer\0\u{3}session_summary\0\u{3}new_cat_detected\0\u{3}hopper_empty\0\u{3}diagnostic_result\0\u{1}error\0\u{3}request_id\0\u{1}schedule\0\u{3}push_token_ack\0\u{3}auth_response\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2365,6 +2514,19 @@ extension Catlaser_App_V1_DeviceEvent: SwiftProtobuf.Message, SwiftProtobuf._Mes
           self.event = .pushTokenAck(v)
         }
       }()
+      case 13: try {
+        var v: Catlaser_App_V1_AuthResponse?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .authResponse(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .authResponse(v)
+        }
+      }()
       default: break
       }
     }
@@ -2425,6 +2587,10 @@ extension Catlaser_App_V1_DeviceEvent: SwiftProtobuf.Message, SwiftProtobuf._Mes
     case .pushTokenAck?: try {
       guard case .pushTokenAck(let v)? = self.event else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    }()
+    case .authResponse?: try {
+      guard case .authResponse(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
     }()
     default: break
     }

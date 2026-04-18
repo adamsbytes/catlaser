@@ -83,6 +83,20 @@ struct SessionAccessGateTests {
     }
 
     @Test
+    func defaultIdleTimeoutIsTight() {
+        // The default idle window is the post-prompt duration during
+        // which the bearer cache answers without a new biometric
+        // challenge. Drifting it above ~5 minutes widens the
+        // stolen-unlocked-phone window materially; this test pins the
+        // posture so a well-meaning ergonomics patch cannot silently
+        // regress it. 120 s is the current ship target — raise this
+        // assertion deliberately, with a security review, if product
+        // UX requires a larger window.
+        #expect(SessionAccessGate.defaultIdleTimeout <= 300)
+        #expect(SessionAccessGate.defaultIdleTimeout > 0)
+    }
+
+    @Test
     func authenticateSuccessMarksFresh() async throws {
         let clock = TestClock()
         let recorder = EvaluationRecorder()

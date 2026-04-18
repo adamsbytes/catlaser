@@ -102,6 +102,12 @@ struct AttestationBindingTests {
     }
 
     @Test
+    func deviceRendersTaggedUnixSeconds() {
+        #expect(AttestationBinding.device(timestamp: 1_700_000_000).wireValue == "dev:1700000000")
+        #expect(AttestationBinding.device(timestamp: 1).wireValue == "dev:1")
+    }
+
+    @Test
     func wireBytesIsUtf8OfWireValue() {
         let binding = AttestationBinding.verify(token: "abc")
         #expect(binding.wireBytes == Data("ver:abc".utf8))
@@ -111,6 +117,8 @@ struct AttestationBindingTests {
         #expect(signOut.wireBytes == Data("out:42".utf8))
         let api = AttestationBinding.api(timestamp: 42)
         #expect(api.wireBytes == Data("api:42".utf8))
+        let device = AttestationBinding.device(timestamp: 42)
+        #expect(device.wireBytes == Data("dev:42".utf8))
     }
 
     @Test
@@ -141,6 +149,12 @@ struct AttestationBindingTests {
     func decodeRoundTripsApi() throws {
         let decoded = try AttestationBinding.decode(wireValue: "api:1700000000")
         #expect(decoded == .api(timestamp: 1_700_000_000))
+    }
+
+    @Test
+    func decodeRoundTripsDevice() throws {
+        let decoded = try AttestationBinding.decode(wireValue: "dev:1700000000")
+        #expect(decoded == .device(timestamp: 1_700_000_000))
     }
 
     @Test
