@@ -35,6 +35,7 @@ PUSH_PLATFORM_UNSPECIFIED: PushPlatform
 
 class AppRequest(_message.Message):
     __slots__ = [
+        "auth",
         "delete_cat_profile",
         "get_cat_profiles",
         "get_play_history",
@@ -52,6 +53,7 @@ class AppRequest(_message.Message):
         "unregister_push_token",
         "update_cat_profile",
     ]
+    AUTH_FIELD_NUMBER: _ClassVar[int]
     DELETE_CAT_PROFILE_FIELD_NUMBER: _ClassVar[int]
     GET_CAT_PROFILES_FIELD_NUMBER: _ClassVar[int]
     GET_PLAY_HISTORY_FIELD_NUMBER: _ClassVar[int]
@@ -68,6 +70,7 @@ class AppRequest(_message.Message):
     STOP_STREAM_FIELD_NUMBER: _ClassVar[int]
     UNREGISTER_PUSH_TOKEN_FIELD_NUMBER: _ClassVar[int]
     UPDATE_CAT_PROFILE_FIELD_NUMBER: _ClassVar[int]
+    auth: AuthRequest
     delete_cat_profile: DeleteCatProfileRequest
     get_cat_profiles: GetCatProfilesRequest
     get_play_history: GetPlayHistoryRequest
@@ -102,7 +105,22 @@ class AppRequest(_message.Message):
         get_schedule: _Optional[_Union[GetScheduleRequest, _Mapping]] = ...,
         register_push_token: _Optional[_Union[RegisterPushTokenRequest, _Mapping]] = ...,
         unregister_push_token: _Optional[_Union[UnregisterPushTokenRequest, _Mapping]] = ...,
+        auth: _Optional[_Union[AuthRequest, _Mapping]] = ...,
     ) -> None: ...
+
+class AuthRequest(_message.Message):
+    __slots__ = ["attestation_header"]
+    ATTESTATION_HEADER_FIELD_NUMBER: _ClassVar[int]
+    attestation_header: str
+    def __init__(self, attestation_header: _Optional[str] = ...) -> None: ...
+
+class AuthResponse(_message.Message):
+    __slots__ = ["ok", "reason"]
+    OK_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    ok: bool
+    reason: str
+    def __init__(self, ok: bool = ..., reason: _Optional[str] = ...) -> None: ...
 
 class CatProfile(_message.Message):
     __slots__ = [
@@ -175,6 +193,7 @@ class DeviceError(_message.Message):
 
 class DeviceEvent(_message.Message):
     __slots__ = [
+        "auth_response",
         "cat_profile_list",
         "diagnostic_result",
         "error",
@@ -188,6 +207,7 @@ class DeviceEvent(_message.Message):
         "status_update",
         "stream_offer",
     ]
+    AUTH_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     CAT_PROFILE_LIST_FIELD_NUMBER: _ClassVar[int]
     DIAGNOSTIC_RESULT_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
@@ -200,6 +220,7 @@ class DeviceEvent(_message.Message):
     SESSION_SUMMARY_FIELD_NUMBER: _ClassVar[int]
     STATUS_UPDATE_FIELD_NUMBER: _ClassVar[int]
     STREAM_OFFER_FIELD_NUMBER: _ClassVar[int]
+    auth_response: AuthResponse
     cat_profile_list: CatProfileList
     diagnostic_result: DiagnosticResult
     error: DeviceError
@@ -226,6 +247,7 @@ class DeviceEvent(_message.Message):
         error: _Optional[_Union[DeviceError, _Mapping]] = ...,
         schedule: _Optional[_Union[ScheduleList, _Mapping]] = ...,
         push_token_ack: _Optional[_Union[PushTokenAck, _Mapping]] = ...,
+        auth_response: _Optional[_Union[AuthResponse, _Mapping]] = ...,
     ) -> None: ...
 
 class DiagnosticResult(_message.Message):

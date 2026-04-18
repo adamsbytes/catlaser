@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import socket
 import struct
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
+from catlaser_brain.auth.acl import AclStore
+from catlaser_brain.auth.coord_client import AclGrant, AclSnapshot
 from catlaser_brain.network.handler import DeviceState, RequestHandler
 from catlaser_brain.network.server import MAX_CLIENTS, AppServer
 from catlaser_brain.network.wire import (
@@ -54,9 +61,136 @@ def handler(conn: Database, state: DeviceState) -> RequestHandler:
     return RequestHandler(conn.conn, state)
 
 
+class ClientAuth(NamedTuple):
+    """Generated P-256 key + pre-built ACL entry for the test handshake.
+
+    Tests instantiate one per connection to simulate a real signed-in
+    user. The ``spki_b64`` is seeded into the server's AclStore so
+    the handshake will accept signatures under this key.
+    """
+
+    private_key: ec.EllipticCurvePrivateKey
+    spki_b64: str
+
+
+def _make_client_auth() -> ClientAuth:
+    """Generate a P-256 keypair mirroring what an iOS SE would emit."""
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+    spki = public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return ClientAuth(
+        private_key=private_key,
+        spki_b64=base64.b64encode(spki).decode("ascii"),
+    )
+
+
+def _primed_acl(*, grants: tuple[str, ...]) -> AclStore:
+    """Build a primed AclStore containing ``grants`` (base64 SPKIs)."""
+    store = AclStore()
+    snapshot = AclSnapshot(
+        device_id="cat-test",
+        revision=1,
+        grants=tuple(
+            AclGrant(
+                user_spki_b64=spki,
+                revision=i + 1,
+                granted_at_iso="2026-01-01T00:00:00Z",
+            )
+            for i, spki in enumerate(grants)
+        ),
+    )
+    store.apply(snapshot)
+    return store
+
+
+def _build_attestation_header(
+    *,
+    client: ClientAuth,
+    timestamp: int,
+    fingerprint_hash: bytes | None = None,
+) -> str:
+    """Produce a v4 x-device-attestation payload with dev:<ts> binding.
+
+    Mirrors the iOS `DeviceAttestationEncoder.encodeHeaderValue` shape
+    exactly so the device's handshake verifier exercises the same
+    parse + verify path that production traffic hits.
+    """
+    fph = fingerprint_hash if fingerprint_hash is not None else b"\xab" * 32
+    binding = f"dev:{timestamp}"
+    signed = fph + binding.encode("utf-8")
+    signature = client.private_key.sign(signed, ec.ECDSA(hashes.SHA256()))
+    spki_der = client.private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    payload = {
+        "bnd": binding,
+        "fph": base64.urlsafe_b64encode(fph).rstrip(b"=").decode("ascii"),
+        "pk": base64.b64encode(spki_der).decode("ascii"),
+        "sig": base64.b64encode(signature).decode("ascii"),
+        "v": 4,
+    }
+    outer = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(outer).decode("ascii")
+
+
+def _perform_handshake(
+    sock: socket.socket,
+    server: AppServer,
+    *,
+    client: ClientAuth,
+    timestamp: int | None = None,
+) -> pb.AuthResponse:
+    """Send an AuthRequest, consume the AuthResponse, return it.
+
+    Polls the server between send and receive so the server has a
+    chance to process the frame — test sockets are non-blocking from
+    the server's side, so without the poll the response never lands
+    in the client's recv buffer.
+    """
+    ts = int(time.time()) if timestamp is None else timestamp
+    header = _build_attestation_header(client=client, timestamp=ts)
+    request = pb.AppRequest()
+    request.auth.attestation_header = header
+    _send_request(sock, request)
+    server.poll()
+    response_event = _recv_event(sock)
+    return response_event.auth_response
+
+
+def _connect_authenticated(
+    server: AppServer,
+    client: ClientAuth,
+) -> socket.socket:
+    """Connect and complete the handshake. Raises on rejection."""
+    sock = _connect(server)
+    server.poll()
+    response = _perform_handshake(sock, server, client=client)
+    if not response.ok:
+        sock.close()
+        msg = f"handshake failed: {response.reason}"
+        raise AssertionError(msg)
+    return sock
+
+
 @pytest.fixture
-def server(handler: RequestHandler) -> Iterator[AppServer]:
-    srv = AppServer(handler, "127.0.0.1", 0)
+def client_auth() -> ClientAuth:
+    """Fresh P-256 keypair for the default test handshake."""
+    return _make_client_auth()
+
+
+@pytest.fixture
+def acl(client_auth: ClientAuth) -> AclStore:
+    """Primed AclStore that grants the default client's SPKI."""
+    return _primed_acl(grants=(client_auth.spki_b64,))
+
+
+@pytest.fixture
+def server(handler: RequestHandler, acl: AclStore) -> Iterator[AppServer]:
+    srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
     srv.start()
     yield srv
     srv.close()
@@ -555,8 +689,8 @@ class TestHandlerErrors:
 
 
 class TestServerConnection:
-    def test_start_and_close(self, handler: RequestHandler):
-        srv = AppServer(handler, "127.0.0.1", 0)
+    def test_start_and_close(self, handler: RequestHandler, acl: AclStore):
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
         srv.start()
         assert srv.client_count == 0
         _, port = srv.address
@@ -596,8 +730,8 @@ class TestServerConnection:
         server.poll()
         assert server.client_count == 0
 
-    def test_context_manager(self, handler: RequestHandler):
-        with AppServer(handler, "127.0.0.1", 0) as srv:
+    def test_context_manager(self, handler: RequestHandler, acl: AclStore):
+        with AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0) as srv:
             srv.start()
             client = _connect(srv)
             srv.poll()
@@ -605,16 +739,15 @@ class TestServerConnection:
             client.close()
         assert srv.client_count == 0
 
-    def test_address_before_start_raises(self, handler: RequestHandler):
-        srv = AppServer(handler, "127.0.0.1", 0)
+    def test_address_before_start_raises(self, handler: RequestHandler, acl: AclStore):
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
         with pytest.raises(RuntimeError, match="not started"):
             _ = srv.address
 
 
 class TestServerRequestResponse:
-    def test_get_status(self, server: AppServer):
-        client = _connect(server)
-        server.poll()
+    def test_get_status(self, server: AppServer, client_auth: ClientAuth):
+        client = _connect_authenticated(server, client_auth)
 
         _send_request(
             client,
@@ -628,82 +761,125 @@ class TestServerRequestResponse:
         assert event.status_update.firmware_version == "1.0.0-test"
         client.close()
 
-    def test_multiple_requests_same_client(self, server: AppServer):
-        client = _connect(server)
-        server.poll()
+    def test_multiple_requests_same_client(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        client = _connect_authenticated(server, client_auth)
 
         for i in range(1, 4):
             _send_request(
                 client,
                 pb.AppRequest(request_id=i, get_status=pb.GetStatusRequest()),
             )
-        server.poll()
+            # Poll between each send so the server has a chance to
+            # read and respond. Batching three sends under a single
+            # poll is technically correct but hits an edge where the
+            # kernel's send buffer flushes partially and the client
+            # sees a fraction of the responses.
+            server.poll()
 
         for i in range(1, 4):
             event = _recv_event(client)
             assert event.request_id == i
         client.close()
 
-    def test_requests_from_different_clients(self, server: AppServer):
-        c1 = _connect(server)
-        c2 = _connect(server)
-        server.poll()
+    def test_requests_from_different_clients(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ):
+        # Both clients use the SAME user SPKI (same household). Tests
+        # that cover cross-user isolation live in the dedicated
+        # handshake suite below.
+        acl = _primed_acl(grants=(client_auth.spki_b64,))
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            c1 = _connect_authenticated(srv, client_auth)
+            c2 = _connect_authenticated(srv, client_auth)
 
-        _send_request(c1, pb.AppRequest(request_id=10, get_status=pb.GetStatusRequest()))
-        _send_request(c2, pb.AppRequest(request_id=20, get_status=pb.GetStatusRequest()))
-        server.poll()
+            _send_request(
+                c1,
+                pb.AppRequest(request_id=10, get_status=pb.GetStatusRequest()),
+            )
+            _send_request(
+                c2,
+                pb.AppRequest(request_id=20, get_status=pb.GetStatusRequest()),
+            )
+            srv.poll()
 
-        e1 = _recv_event(c1)
-        e2 = _recv_event(c2)
-        assert e1.request_id == 10
-        assert e2.request_id == 20
-        c1.close()
-        c2.close()
+            e1 = _recv_event(c1)
+            e2 = _recv_event(c2)
+            assert e1.request_id == 10
+            assert e2.request_id == 20
+            c1.close()
+            c2.close()
+        finally:
+            srv.close()
 
 
 class TestServerBroadcast:
-    def test_broadcast_to_all_clients(self, server: AppServer):
-        c1 = _connect(server)
-        c2 = _connect(server)
-        server.poll()
+    def test_broadcast_to_all_clients(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ):
+        acl = _primed_acl(grants=(client_auth.spki_b64,))
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            c1 = _connect_authenticated(srv, client_auth)
+            c2 = _connect_authenticated(srv, client_auth)
 
-        server.broadcast(
-            pb.DeviceEvent(
-                status_update=pb.StatusUpdate(firmware_version="broadcast-test"),
-            ),
-        )
+            srv.broadcast(
+                pb.DeviceEvent(
+                    status_update=pb.StatusUpdate(firmware_version="broadcast-test"),
+                ),
+            )
 
-        e1 = _recv_event(c1)
-        e2 = _recv_event(c2)
-        assert e1.status_update.firmware_version == "broadcast-test"
-        assert e2.status_update.firmware_version == "broadcast-test"
-        c1.close()
-        c2.close()
+            e1 = _recv_event(c1)
+            e2 = _recv_event(c2)
+            assert e1.status_update.firmware_version == "broadcast-test"
+            assert e2.status_update.firmware_version == "broadcast-test"
+            c1.close()
+            c2.close()
+        finally:
+            srv.close()
 
     def test_broadcast_with_no_clients(self, server: AppServer):
         server.broadcast(pb.DeviceEvent(hopper_empty=pb.HopperEmpty()))
 
-    def test_broadcast_removes_dead_client(self, server: AppServer):
-        c1 = _connect(server)
-        c2 = _connect(server)
-        server.poll()
-        assert server.client_count == 2
+    def test_broadcast_removes_dead_client(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ):
+        acl = _primed_acl(grants=(client_auth.spki_b64,))
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            c1 = _connect_authenticated(srv, client_auth)
+            c2 = _connect_authenticated(srv, client_auth)
+            assert srv.client_count == 2
 
-        c1.close()
-        server.poll()
-        assert server.client_count == 1
+            c1.close()
+            srv.poll()
+            assert srv.client_count == 1
 
-        server.broadcast(
-            pb.DeviceEvent(hopper_empty=pb.HopperEmpty()),
-        )
-        event = _recv_event(c2)
-        assert event.HasField("hopper_empty")
-        assert server.client_count == 1
-        c2.close()
+            srv.broadcast(
+                pb.DeviceEvent(hopper_empty=pb.HopperEmpty()),
+            )
+            event = _recv_event(c2)
+            assert event.HasField("hopper_empty")
+            assert srv.client_count == 1
+            c2.close()
+        finally:
+            srv.close()
 
-    def test_broadcast_request_id_zero(self, server: AppServer):
-        client = _connect(server)
-        server.poll()
+    def test_broadcast_request_id_zero(self, server: AppServer, client_auth: ClientAuth):
+        client = _connect_authenticated(server, client_auth)
 
         server.broadcast(
             pb.DeviceEvent(
@@ -722,3 +898,244 @@ class TestServerBroadcast:
         assert event.request_id == 0
         assert event.session_summary.duration_sec == 120
         client.close()
+
+    def test_broadcast_skips_unauthorized_clients(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        # An unauthenticated client connects but does NOT complete
+        # the handshake. A subsequent broadcast must NOT reach that
+        # client (defense in depth against a dropper-connection
+        # sitting pre-auth and collecting device state).
+        unauth = _connect(server)
+        server.poll()
+        auth = _connect_authenticated(server, client_auth)
+
+        server.broadcast(
+            pb.DeviceEvent(hopper_empty=pb.HopperEmpty()),
+        )
+
+        # Authorized client got it.
+        event = _recv_event(auth)
+        assert event.HasField("hopper_empty")
+
+        # Unauthorized client has no pending data.
+        unauth.settimeout(0.05)
+        try:
+            data = unauth.recv(4)
+        except (TimeoutError, BlockingIOError):
+            data = b""
+        assert data == b""
+        auth.close()
+        unauth.close()
+
+
+class TestServerHandshake:
+    """Coverage for the AppServer's first-frame auth state machine.
+
+    Every reject path produces a ``DEVICE_AUTH_*`` reason on the
+    ``AuthResponse`` so the app can surface a specific remediation.
+    Non-auth first frames are dropped silently because a response
+    in that case would help a prober distinguish "wrong frame" from
+    "bad attestation" — the contract says the first frame is ALWAYS
+    AuthRequest, and violators don't get a state-disclosing error.
+    """
+
+    def test_happy_path_accepts_and_sets_authorized(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        sock = _connect(server)
+        server.poll()
+        response = _perform_handshake(sock, server, client=client_auth)
+        assert response.ok is True
+        assert response.reason == ""
+        # Subsequent request-response works.
+        _send_request(
+            sock,
+            pb.AppRequest(request_id=99, get_status=pb.GetStatusRequest()),
+        )
+        server.poll()
+        event = _recv_event(sock)
+        assert event.request_id == 99
+        assert event.HasField("status_update")
+        sock.close()
+
+    def test_rejects_spki_not_in_acl(
+        self,
+        handler: RequestHandler,
+    ):
+        # Client's SPKI is not seeded into the ACL.
+        client = _make_client_auth()
+        acl = _primed_acl(grants=())
+        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            sock = _connect(srv)
+            srv.poll()
+            response = _perform_handshake(sock, srv, client=client)
+            assert response.ok is False
+            assert response.reason == "DEVICE_AUTH_NOT_AUTHORIZED"
+            sock.close()
+        finally:
+            srv.close()
+
+    def test_rejects_when_acl_not_primed(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ):
+        # Unprimed store: no snapshot has been applied yet.
+        unprimed = AclStore()
+        srv = AppServer(handler, acl=unprimed, bind_addr="127.0.0.1", port=0)
+        srv.start()
+        try:
+            sock = _connect(srv)
+            srv.poll()
+            response = _perform_handshake(sock, srv, client=client_auth)
+            assert response.ok is False
+            assert response.reason == "DEVICE_AUTH_ACL_NOT_READY"
+            sock.close()
+        finally:
+            srv.close()
+
+    def test_rejects_stale_timestamp(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        sock = _connect(server)
+        server.poll()
+        # 120 s in the past; ±60 s skew means a reject.
+        stale_ts = int(time.time()) - 120
+        response = _perform_handshake(
+            sock,
+            server,
+            client=client_auth,
+            timestamp=stale_ts,
+        )
+        assert response.ok is False
+        assert response.reason == "DEVICE_AUTH_SKEW_EXCEEDED"
+        sock.close()
+
+    def test_rejects_wrong_binding_tag(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        # Build a payload with `api:` instead of `dev:`. Every other
+        # field is valid; only the tag is wrong. The server must
+        # refuse so a captured sign-in attestation cannot be
+        # replayed as a device-auth frame.
+        timestamp = int(time.time())
+        binding = f"api:{timestamp}"
+        fph = b"\xab" * 32
+        signed = fph + binding.encode("utf-8")
+        signature = client_auth.private_key.sign(signed, ec.ECDSA(hashes.SHA256()))
+        spki_der = client_auth.private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        payload = {
+            "bnd": binding,
+            "fph": base64.urlsafe_b64encode(fph).rstrip(b"=").decode("ascii"),
+            "pk": base64.b64encode(spki_der).decode("ascii"),
+            "sig": base64.b64encode(signature).decode("ascii"),
+            "v": 4,
+        }
+        outer = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        header = base64.b64encode(outer).decode("ascii")
+
+        sock = _connect(server)
+        server.poll()
+        request = pb.AppRequest()
+        request.auth.attestation_header = header
+        _send_request(sock, request)
+        server.poll()
+        event = _recv_event(sock)
+        assert event.auth_response.ok is False
+        assert event.auth_response.reason == "DEVICE_AUTH_BINDING_MISMATCH"
+        sock.close()
+
+    def test_rejects_signature_under_different_key(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        # Build a payload whose `pk` matches `client_auth`'s public
+        # key (so ACL lookup succeeds) but whose signature was
+        # produced by a DIFFERENT key. Signature verify must reject.
+        attacker = _make_client_auth()
+        timestamp = int(time.time())
+        binding = f"dev:{timestamp}"
+        fph = b"\xab" * 32
+        signed = fph + binding.encode("utf-8")
+        bad_signature = attacker.private_key.sign(signed, ec.ECDSA(hashes.SHA256()))
+        spki_der = client_auth.private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        payload = {
+            "bnd": binding,
+            "fph": base64.urlsafe_b64encode(fph).rstrip(b"=").decode("ascii"),
+            "pk": base64.b64encode(spki_der).decode("ascii"),
+            "sig": base64.b64encode(bad_signature).decode("ascii"),
+            "v": 4,
+        }
+        outer = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        header = base64.b64encode(outer).decode("ascii")
+
+        sock = _connect(server)
+        server.poll()
+        request = pb.AppRequest()
+        request.auth.attestation_header = header
+        _send_request(sock, request)
+        server.poll()
+        event = _recv_event(sock)
+        assert event.auth_response.ok is False
+        assert event.auth_response.reason == "DEVICE_AUTH_SIGNATURE_INVALID"
+        sock.close()
+
+    def test_non_auth_first_frame_disconnects_silently(
+        self,
+        server: AppServer,
+    ):
+        # A probe that opens a connection and sends anything other
+        # than AuthRequest is dropped without a response frame. The
+        # test asserts the socket is closed from the server side.
+        sock = _connect(server)
+        server.poll()
+        _send_request(
+            sock,
+            pb.AppRequest(request_id=1, get_status=pb.GetStatusRequest()),
+        )
+        server.poll()
+        # recv returns b"" on a graceful close.
+        sock.settimeout(1.0)
+        data = sock.recv(4)
+        assert data == b""
+        sock.close()
+
+    def test_second_auth_after_success_disconnects(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ):
+        # A client cannot re-authenticate mid-connection. The second
+        # AuthRequest flips the client off with the distinct
+        # `DEVICE_AUTH_ALREADY_AUTHORIZED` reason.
+        sock = _connect_authenticated(server, client_auth)
+        # Send another AuthRequest.
+        second = pb.AppRequest()
+        second.auth.attestation_header = _build_attestation_header(
+            client=client_auth,
+            timestamp=int(time.time()),
+        )
+        _send_request(sock, second)
+        server.poll()
+        event = _recv_event(sock)
+        assert event.auth_response.ok is False
+        assert event.auth_response.reason == "DEVICE_AUTH_ALREADY_AUTHORIZED"
+        sock.close()

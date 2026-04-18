@@ -3,7 +3,9 @@ name = "catlaser-brain"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=46.0.6",
     "google-auth>=2.0",
+    "httpx>=0.28.1",
     "livekit-api>=1.1.0",
     "protobuf>=5.29,<6",
 ]

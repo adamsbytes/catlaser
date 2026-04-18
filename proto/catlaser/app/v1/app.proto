@@ -137,6 +137,38 @@ message UnregisterPushTokenRequest {
   string token = 1;
 }
 
+// First frame on every TCP connection from the app to the device.
+// The device rejects any other AppRequest oneof case until it has
+// received a well-formed AuthRequest AND verified the embedded
+// attestation against its cached ACL.
+//
+// `attestation_header` is the same v4 `x-device-attestation`
+// base64(payload) string the app sends to the coordination server,
+// but with the `dev:<unix_seconds>` binding tag. The device parses
+// it, reconstructs the signed message, verifies the ECDSA signature
+// against the `fph` hash + `bnd` bytes, and then checks the signer's
+// SPKI (from `pk`) against its cached ACL of authorized users.
+//
+// The device emits exactly one AuthResponse back to confirm accept
+// or reject. On reject, the device closes the connection; on
+// accept, normal request-response traffic follows.
+message AuthRequest {
+  // Base64(JSON(payload)) with payload.bnd = "dev:<unix_seconds>".
+  // The exact v4 wire format the app emits elsewhere, reused here
+  // so the device needs only one attestation parser.
+  string attestation_header = 1;
+}
+
+// Device's reply to an AuthRequest. Emitted once per handshake. On
+// `ok=false`, the device closes the connection after sending this
+// frame so the app can surface the specific reason.
+message AuthResponse {
+  bool ok = 1;
+  // Machine-readable reason when `ok=false`. Mirrors the
+  // `DEVICE_AUTH_*` strings defined by the Python handshake module.
+  string reason = 2;
+}
+
 // Envelope for all app-to-device commands. Sent over WebRTC data channel or
 // TCP over Tailscale.
 message AppRequest {
@@ -160,6 +192,7 @@ message AppRequest {
     GetScheduleRequest get_schedule = 14;
     RegisterPushTokenRequest register_push_token = 15;
     UnregisterPushTokenRequest unregister_push_token = 16;
+    AuthRequest auth = 17;
   }
 }
 
@@ -249,5 +282,6 @@ message DeviceEvent {
     DeviceError error = 9;
     ScheduleList schedule = 11;
     PushTokenAck push_token_ack = 12;
+    AuthResponse auth_response = 13;
   }
 }
