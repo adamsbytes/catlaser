@@ -13,9 +13,10 @@ import {
 } from '~/lib/attestation-skew.ts';
 import { AttestationVerifyError, verifyAttestationSignature } from '~/lib/attestation-verify.ts';
 import { deriveTokenIdentifier, lookupMagicLinkAttestation } from '~/lib/magic-link-attestation.ts';
+import { storeSessionAttestation } from '~/lib/session-attestation.ts';
 
 /**
- * Device-attestation plugin — BUILD.md Part 9 steps 5 and 6.
+ * Device-attestation plugin — BUILD.md Part 9 steps 5, 6, and 7.
  *
  * Gates every attestation-carrying auth endpoint with the v3 wire
  * contract described in ADR-006:
@@ -25,14 +26,23 @@ import { deriveTokenIdentifier, lookupMagicLinkAttestation } from '~/lib/magic-l
  * - `GET  /magic-link/verify`    — binding tag `ver:<magic_link_token>`,
  *                                  stored-fph + stored-pk byte-equal
  *                                  against the row captured at request
- *                                  time (DEVICE_MISMATCH on miss).
+ *                                  time (DEVICE_MISMATCH on miss). On
+ *                                  success, the `(fph, pk)` is copied
+ *                                  into the freshly-minted session's
+ *                                  `session_attestation` row so every
+ *                                  protected `api:` call that follows
+ *                                  verifies under that exact key.
  * - `POST /sign-in/social`       — binding tag `sis:<raw_nonce>`, plus
  *                                  a three-way match between the
  *                                  binding, the request body's
  *                                  `idToken.nonce`, and the provider's
  *                                  own ID-token `nonce` claim (the
  *                                  third leg is enforced by the Apple /
- *                                  Google verifier configuration).
+ *                                  Google verifier configuration). On
+ *                                  success, the attestation pk is
+ *                                  captured against the new session in
+ *                                  `session_attestation`, same as the
+ *                                  magic-link path.
  * - `POST /sign-out`             — binding tag `out:<unix_seconds>`,
  *                                  ±60s skew enforced.
  *
@@ -50,21 +60,24 @@ import { deriveTokenIdentifier, lookupMagicLinkAttestation } from '~/lib/magic-l
  * 5. For `/sign-in/social` only: the `sis:` nonce must byte-equal
  *    `body.idToken.nonce` (`ATTESTATION_NONCE_MISMATCH` /
  *    `ID_TOKEN_NONCE_REQUIRED`).
- * 6. For timestamped bindings (`req:`, `out:`, and `api:` when step 7
- *    mounts it on protected routes): enforce ±60s skew against the
- *    server clock (`ATTESTATION_SKEW_EXCEEDED`).
+ * 6. For timestamped bindings (`req:`, `out:`, and `api:` on
+ *    protected routes): enforce ±60s skew against the server clock
+ *    (`ATTESTATION_SKEW_EXCEEDED`).
  * 7. For `ver:` only: look up the `(fph, pk)` captured at
  *    `/sign-in/magic-link` time under the same token identifier, and
  *    byte-compare against the verify-time attestation (`DEVICE_MISMATCH`
  *    on missing / stale row or on either of the two byte-compares).
  *
- * Step 6 establishes the semantic layer on top of step 5's crypto
- * floor. Step 7 mounts the `api:` binding on every authenticated
- * protected route using the same skew enforcement this file installs
- * for `req:` and `out:`. Step 8 adds `Idempotency-Key` replay
- * protection on mutating routes. None of those steps need to rewrite
- * anything this plugin does — they layer on top of the enforcement
- * matrix established here.
+ * After a session-minting endpoint (`/magic-link/verify`,
+ * `/sign-in/social`) completes successfully, an after-hook copies the
+ * incoming attestation's `(fingerprintHash, publicKeySPKI)` into
+ * `session_attestation` keyed on `ctx.context.newSession.session.id`.
+ * This pins the session to a specific Secure-Enclave key; protected
+ * routes (step 7, `protected-route.ts`) verify every `api:` binding
+ * under that stored pk, collapsing "captured bearer" into "captured
+ * bearer AND the non-extractable SE key" — the latter is not a real
+ * threat. Step 8 adds `Idempotency-Key` replay protection on mutating
+ * routes and does not rewrite anything this plugin does.
  */
 
 /**
@@ -380,6 +393,76 @@ const runAttestationGate = async (
 };
 
 /**
+ * Paths on which a successful response mints a new session. The
+ * after-hook persists the captured attestation against
+ * `ctx.context.newSession.session.id` so the protected-route middleware
+ * has a stored pk to verify against on every subsequent `api:` call.
+ *
+ * `/sign-out` also carries an attestation binding but does not create a
+ * session; explicitly excluded from the capture set.
+ */
+const SESSION_CAPTURE_PATHS: ReadonlySet<string> = new Set([
+  '/magic-link/verify',
+  '/sign-in/social',
+]);
+
+/**
+ * Persist the captured `(fph, pk)` against the session id the
+ * sign-in endpoint just produced. Runs only when:
+ *
+ * 1. The path is one the plugin's before-hook already gated (so the
+ *    header is present and structurally sound).
+ * 2. `ctx.context.newSession` is set — better-auth's `setSessionCookie`
+ *    populates this on every successful session mint, so its absence
+ *    means the endpoint short-circuited (e.g. redirect-only OAuth flow)
+ *    and there is no session to bind to yet.
+ *
+ * Re-parsing the header here is cheap and deliberate — the before-hook
+ * validated it but did not hand the parsed object down. A re-parse
+ * failure at this stage would mean the hook pipeline regressed (the
+ * before-hook accepted a payload it should have rejected, or the header
+ * mutated between hooks); that is an invariant violation the server
+ * must refuse the sign-in over rather than silently skip. Missing
+ * attestation rows would 401 every protected call afterwards, which is
+ * a worse failure mode than an explicit 500 here.
+ */
+const captureSessionAttestation = async (
+  path: string,
+  headers: Headers | undefined,
+  newSession: { readonly session: { readonly id: string } } | null | undefined,
+): Promise<void> => {
+  if (!SESSION_CAPTURE_PATHS.has(path)) {
+    return;
+  }
+  if (newSession === null || newSession === undefined) {
+    return;
+  }
+  const headerValue = headers?.get(ATTESTATION_HEADER_NAME) ?? undefined;
+  if (headerValue === undefined) {
+    throw new Error(
+      `${path} reached the attestation after-hook without an '${ATTESTATION_HEADER_NAME}' header — the before-hook should have rejected this request`,
+    );
+  }
+  let parsed: ParsedAttestation;
+  try {
+    parsed = decodeAttestationHeader(headerValue);
+  } catch (error) {
+    if (error instanceof AttestationHeaderParseError || error instanceof AttestationParseError) {
+      throw new Error(
+        `${path} re-parse of '${ATTESTATION_HEADER_NAME}' failed (${error.code}: ${error.message}) — the before-hook should have rejected this upstream`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  await storeSessionAttestation({
+    sessionId: newSession.session.id,
+    fingerprintHash: parsed.fingerprintHash,
+    publicKeySPKI: parsed.publicKeySPKI,
+  });
+};
+
+/**
  * Factory options. A tests-only `nowSeconds` injection seam lets
  * integration tests drive the clock deterministically against fixed
  * attestation timestamps without monkey-patching `Date.now`. Production
@@ -426,6 +509,21 @@ export const deviceAttestationPlugin = (
             // the boundary so downstream helpers get a type-safe view.
             const body: unknown = ctx.body;
             await runAttestationGate(spec, { headers, body }, nowSeconds);
+          }),
+        },
+      ],
+      after: [
+        {
+          matcher: (context) => {
+            const { path } = context;
+            return typeof path === 'string' && SESSION_CAPTURE_PATHS.has(path);
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            const { path, headers, context } = ctx;
+            if (typeof path !== 'string') {
+              return;
+            }
+            await captureSessionAttestation(path, headers, context.newSession);
           }),
         },
       ],

@@ -5,6 +5,8 @@ import {
   accountRelations,
   magicLinkAttestation,
   session,
+  sessionAttestation,
+  sessionAttestationRelations,
   sessionRelations,
   user,
   userRelations,
@@ -18,9 +20,11 @@ const schema = {
   account,
   verification,
   magicLinkAttestation,
+  sessionAttestation,
   userRelations,
   sessionRelations,
   accountRelations,
+  sessionAttestationRelations,
 };
 
 const client: SQL = new SQL(env.DATABASE_URL);

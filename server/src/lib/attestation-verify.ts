@@ -171,32 +171,20 @@ const importPublicKey = (spki: Uint8Array): KeyObject => {
 };
 
 /**
- * Verify the attestation's ECDSA signature. Throws
- * `AttestationVerifyError` with code `ATTESTATION_SPKI_INVALID` when
- * the SPKI is structurally bad or the point is off-curve, or
- * `ATTESTATION_SIGNATURE_INVALID` when the signature fails to verify.
- *
- * The signed message is exactly `fingerprintHash || bnd_utf8` — same
- * byte sequence iOS passes to `DeviceIdentityStoring.sign(_:)`. The
- * signature on the wire is DER-encoded; `dsaEncoding: 'der'` keeps
- * Node from mis-parsing it as IEEE-P1363.
- *
- * The caller is responsible for having parsed the header and verified
- * the expected binding tag for the endpoint — this function operates
- * on a fully-typed `ParsedAttestation` and does not re-validate
- * those invariants.
+ * Shared ECDSA-P256-SHA256 verifier. Accepts an already-imported OpenSSL
+ * key so both the wire-key and stored-key entry points share the exact
+ * same verify semantics — `dsaEncoding: 'der'` keeps Node from
+ * mis-parsing the DER signature as IEEE-P1363, and every thrown-or-false
+ * path collapses into `ATTESTATION_SIGNATURE_INVALID`.
  */
-export const verifyAttestationSignature = (parsed: ParsedAttestation): void => {
-  assertValidEcP256Spki(parsed.publicKeySPKI);
-  const key = importPublicKey(parsed.publicKeySPKI);
-  const data = buildSignedMessage(parsed);
+const verifyEcdsaOrThrow = (key: KeyObject, message: Uint8Array, signature: Uint8Array): void => {
   let didVerify: boolean;
   try {
     didVerify = verify(
       'sha256',
-      Buffer.from(data),
+      Buffer.from(message),
       { key, dsaEncoding: 'der' },
-      Buffer.from(parsed.signature),
+      Buffer.from(signature),
     );
   } catch (error) {
     throw new AttestationVerifyError(
@@ -210,4 +198,57 @@ export const verifyAttestationSignature = (parsed: ParsedAttestation): void => {
       'ECDSA signature verification returned false',
     );
   }
+};
+
+/**
+ * Verify the attestation's ECDSA signature against the public key the
+ * caller sent on the wire. Throws `AttestationVerifyError` with code
+ * `ATTESTATION_SPKI_INVALID` when the SPKI is structurally bad or the
+ * point is off-curve, or `ATTESTATION_SIGNATURE_INVALID` when the
+ * signature fails to verify.
+ *
+ * The signed message is exactly `fingerprintHash || bnd_utf8` — same
+ * byte sequence iOS passes to `DeviceIdentityStoring.sign(_:)`. The
+ * signature on the wire is DER-encoded.
+ *
+ * The caller is responsible for having parsed the header and verified
+ * the expected binding tag for the endpoint — this function operates
+ * on a fully-typed `ParsedAttestation` and does not re-validate
+ * those invariants. Sign-in ceremonies use this form because the
+ * signing key is what's being registered; protected routes use
+ * `verifyAttestationSignatureWithStoredKey` instead.
+ */
+export const verifyAttestationSignature = (parsed: ParsedAttestation): void => {
+  assertValidEcP256Spki(parsed.publicKeySPKI);
+  const key = importPublicKey(parsed.publicKeySPKI);
+  verifyEcdsaOrThrow(key, buildSignedMessage(parsed), parsed.signature);
+};
+
+/**
+ * Verify the attestation's ECDSA signature against a public key the
+ * server has already persisted — for step 7, the per-session SPKI
+ * captured at sign-in. This is the load-bearing primitive that makes a
+ * captured bearer alone insufficient to act: the signed message is
+ * reconstructed from the wire (`parsed.fingerprintHash || bnd_utf8`) but
+ * the verifying key comes from storage, so an attacker who cannot
+ * reproduce a Secure-Enclave signature under the registered key cannot
+ * satisfy this check regardless of what SPKI or `fph` they supply on
+ * the wire.
+ *
+ * The stored SPKI is still fed through `assertValidEcP256Spki` for
+ * defence-in-depth — it was validated at sign-in time, but re-validating
+ * keeps the primitive safe if the storage layer ever yields garbage (a
+ * botched migration, a truncated column, a mis-decoded byte slice).
+ *
+ * Throws `ATTESTATION_SPKI_INVALID` if the stored SPKI is unusable, or
+ * `ATTESTATION_SIGNATURE_INVALID` if the signature does not verify under
+ * it.
+ */
+export const verifyAttestationSignatureWithStoredKey = (
+  parsed: ParsedAttestation,
+  storedPublicKeySPKI: Uint8Array,
+): void => {
+  assertValidEcP256Spki(storedPublicKeySPKI);
+  const key = importPublicKey(storedPublicKeySPKI);
+  verifyEcdsaOrThrow(key, buildSignedMessage(parsed), parsed.signature);
 };

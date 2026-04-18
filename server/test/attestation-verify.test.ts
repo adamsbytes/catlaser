@@ -10,6 +10,7 @@ import {
   assertValidEcP256Spki,
   buildSignedMessage,
   verifyAttestationSignature,
+  verifyAttestationSignatureWithStoredKey,
 } from '~/lib/attestation-verify.ts';
 import { createTestDeviceKey, defaultFingerprintHash } from './support/signed-attestation.ts';
 
@@ -112,6 +113,7 @@ describe('attestation verify: signature over fph || bnd', () => {
       { tag: 'verify', token: 'abc.def.ghi' },
       { tag: 'social', rawNonce: 'fresh-nonce' },
       { tag: 'signOut', timestamp: 2n },
+      { tag: 'api', timestamp: 1_800_000_000n },
     ];
     for (const binding of bindings) {
       const attestation = signedAttestation({ binding });
@@ -216,6 +218,130 @@ describe('attestation verify: signature over fph || bnd', () => {
   });
 });
 
+describe('attestation verify: stored-key verification path (BUILD.md Part 9 step 7)', () => {
+  test('stored-key verify accepts a signature made under the same SE key on the wire', () => {
+    // The happy path for protected routes: the wire carries a matching
+    // pk and a valid signature, the stored SPKI is identical, and verify
+    // passes. Exercises the `api:` binding specifically, since that's
+    // the only tag protected routes accept.
+    const attestation = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    expect(() =>
+      verifyAttestationSignatureWithStoredKey(attestation, attestation.publicKeySPKI),
+    ).not.toThrow();
+  });
+
+  test('wire-pk swapped on a valid signature still verifies under the stored key', () => {
+    // Documents the load-bearing invariant: the wire pk is IGNORED on
+    // the stored-key verify path. A misbehaving or malicious client
+    // could send any pk on the wire; what matters is whether the
+    // signature verifies against the key the server captured at
+    // sign-in. This is why a captured bearer alone is inert — the
+    // attacker cannot forge a signature under the stored key.
+    const genuine = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    const decoy = createTestDeviceKey();
+    const withDecoyWirePk: ParsedAttestation = {
+      ...genuine,
+      publicKeySPKI: decoy.publicKeySPKI,
+    };
+    expect(() =>
+      verifyAttestationSignatureWithStoredKey(withDecoyWirePk, genuine.publicKeySPKI),
+    ).not.toThrow();
+  });
+
+  test('signature made under an attacker key rejects when stored key belongs to original device', () => {
+    // The canonical capture-the-bearer attack: attacker holds the bearer
+    // and produces a fresh `api:` attestation under their own SE key.
+    // Wire pk matches the attacker, wire sig matches the attacker — but
+    // the stored SPKI is the original device's, so verify fails.
+    const attackerAttestation = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    const victim = createTestDeviceKey();
+    const err = captureError(() =>
+      verifyAttestationSignatureWithStoredKey(attackerAttestation, victim.publicKeySPKI),
+    );
+    expect(err.code).toBe('ATTESTATION_SIGNATURE_INVALID');
+  });
+
+  test('tampered signature rejects even when stored key matches the wire key', () => {
+    const attestation = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    const tampered = Uint8Array.from(attestation.signature);
+    const lastIndex = tampered.length - 1;
+    const lastByte = tampered[lastIndex];
+    if (lastByte === undefined) {
+      throw new Error('signature is empty');
+    }
+    // eslint-disable-next-line no-bitwise
+    tampered[lastIndex] = lastByte ^ 0xff;
+    const err = captureError(() =>
+      verifyAttestationSignatureWithStoredKey(
+        { ...attestation, signature: tampered },
+        attestation.publicKeySPKI,
+      ),
+    );
+    expect(err.code).toBe('ATTESTATION_SIGNATURE_INVALID');
+  });
+
+  test('fph-mutated attestation rejects — recomputed message differs from what was signed', () => {
+    const attestation = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    const mutatedFph = new Uint8Array(FINGERPRINT_HASH_BYTES).fill(0x7e);
+    const err = captureError(() =>
+      verifyAttestationSignatureWithStoredKey(
+        { ...attestation, fingerprintHash: mutatedFph },
+        attestation.publicKeySPKI,
+      ),
+    );
+    expect(err.code).toBe('ATTESTATION_SIGNATURE_INVALID');
+  });
+
+  test('malformed stored SPKI (not 91 bytes) rejects with SPKI_INVALID before verify runs', () => {
+    const attestation = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    const err = captureError(() =>
+      verifyAttestationSignatureWithStoredKey(attestation, new Uint8Array(12)),
+    );
+    expect(err.code).toBe('ATTESTATION_SPKI_INVALID');
+  });
+
+  test('stored SPKI with an off-curve point rejects as SPKI_INVALID, not SIGNATURE_INVALID', () => {
+    const attestation = signedAttestation({
+      binding: { tag: 'api', timestamp: 1_800_000_000n },
+    });
+    const bogusSpki = new Uint8Array(EC_P256_SPKI_TOTAL_BYTES);
+    bogusSpki.set(EC_P256_SPKI_PREFIX, 0);
+    bogusSpki[EC_P256_SPKI_PREFIX.length] = 0x04;
+    const err = captureError(() => verifyAttestationSignatureWithStoredKey(attestation, bogusSpki));
+    expect(err.code).toBe('ATTESTATION_SPKI_INVALID');
+  });
+
+  test('different binding tag in the wire header invalidates a signature made over a different tag', () => {
+    // An attacker re-using a sign-in-time `req:` attestation on a protected
+    // route is rejected both by the binding-tag check (at the middleware
+    // layer) and — if that check were ever bypassed — by the signature
+    // re-verification here, because the signed bytes include the binding
+    // verbatim.
+    const attestation = signedAttestation({
+      binding: { tag: 'request', timestamp: 1_800_000_000n },
+    });
+    const err = captureError(() =>
+      verifyAttestationSignatureWithStoredKey(
+        { ...attestation, binding: { tag: 'api', timestamp: 1_800_000_000n } },
+        attestation.publicKeySPKI,
+      ),
+    );
+    expect(err.code).toBe('ATTESTATION_SIGNATURE_INVALID');
+  });
+});
+
 describe('attestation verify: signed-message reconstruction', () => {
   test('buildSignedMessage produces fph || bnd_utf8, exactly', () => {
     const fph = new Uint8Array(FINGERPRINT_HASH_BYTES).fill(0x42);
@@ -240,6 +366,7 @@ describe('attestation verify: signed-message reconstruction', () => {
       [{ tag: 'verify', token: 'the-token' }, 'ver:the-token'],
       [{ tag: 'social', rawNonce: 'a-nonce' }, 'sis:a-nonce'],
       [{ tag: 'signOut', timestamp: 9_999_999_999n }, 'out:9999999999'],
+      [{ tag: 'api', timestamp: 1_800_000_000n }, 'api:1800000000'],
     ];
     for (const [binding, expectedWire] of cases) {
       const message = buildSignedMessage({

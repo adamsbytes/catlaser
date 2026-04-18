@@ -113,6 +113,54 @@ export const magicLinkAttestation = pgTable(
   (table) => [index('magic_link_attestation_expires_at_idx').on(table.expiresAt)],
 );
 
+/**
+ * Device-attestation binding captured at sign-in. Step 7 of Part 9 uses this
+ * table to bind every authenticated API call to the Secure Enclave key the
+ * session was minted under:
+ *
+ * - On `/magic-link/verify` and `/sign-in/social`, the attestation plugin's
+ *   after-hook writes `(session_id, fingerprint_hash, public_key_spki)` here
+ *   once better-auth has created the session row. The incoming
+ *   `x-device-attestation` header has already been fully validated by the
+ *   before-hook (structural parse, SPKI, binding tag, ECDSA, nonce or
+ *   stored-(fph, pk) match, ±60s skew) before this row is written, so the pk
+ *   captured here is exactly what the sign-in ceremony accepted.
+ * - On every protected-route call, the middleware parses the request's
+ *   `api:` attestation, looks up this row by the resolved session's `id`,
+ *   verifies the ECDSA signature against the stored SPKI (NOT the wire
+ *   SPKI), and enforces the ±60s skew window. Verifying under the stored
+ *   key is the load-bearing defence: a captured bearer paired with a fresh
+ *   attestation signed by any other key cannot satisfy the verify.
+ *
+ * 1:1 with `session` via the unique `session_id` FK. `ON DELETE CASCADE`
+ * keeps the binding's lifetime equal to the session's: sign-out, session
+ * revoke, or user delete drops this row automatically. A missing row on a
+ * protected call surfaces as `SESSION_ATTESTATION_MISSING` — this should
+ * never happen in practice (sign-in writes it atomically inside the sign-in
+ * request) but the middleware rejects with 401 rather than treating the
+ * absence as "skip the gate".
+ *
+ * Values are base64 strings rather than `bytea`: the PostgreSQL driver on
+ * `bun-sql` does not round-trip `bytea` without adapter glue, and the rows
+ * are small fixed-size payloads (32-byte fingerprint hash + 91-byte SPKI).
+ * Text encoding keeps the schema portable and the byte-equal comparison is
+ * string-level (see `session-attestation.ts`).
+ */
+export const sessionAttestation = pgTable(
+  'session_attestation',
+  {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id')
+      .notNull()
+      .unique()
+      .references(() => session.id, { onDelete: 'cascade' }),
+    fingerprintHash: text('fingerprint_hash').notNull(),
+    publicKeySpki: text('public_key_spki').notNull(),
+    createdAt: timestamp('created_at').notNull(),
+  },
+  (table) => [index('session_attestation_session_id_idx').on(table.sessionId)],
+);
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
@@ -122,6 +170,17 @@ export const sessionRelations = relations(session, ({ one }) => ({
   user: one(user, {
     fields: [session.userId],
     references: [user.id],
+  }),
+  attestation: one(sessionAttestation, {
+    fields: [session.id],
+    references: [sessionAttestation.sessionId],
+  }),
+}));
+
+export const sessionAttestationRelations = relations(sessionAttestation, ({ one }) => ({
+  session: one(session, {
+    fields: [sessionAttestation.sessionId],
+    references: [session.id],
   }),
 }));
 

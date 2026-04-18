@@ -69,7 +69,7 @@
   - [X] Universal Link handler (inert HTML at universalLinkPath, distinct from /api/auth/magic-link/verify; AASA serving iOS bundle ID)
   - [X] Device attestation plugin — v3 (SPKI parse, ECDSA verify over fph || bnd, per-tag binding parse)
   - [X] Binding enforcement (req: ±60s skew, ver: stored fph + pk byte-equal, sis: nonce three-way, out: ±60s skew, api: ±60s skew)
-  - [ ] Protected-route attestation middleware (api: binding on every authenticated call, per-session SE pubkey stored at sign-in, signature verify gates the request)
+  - [X] Protected-route attestation middleware (api: binding on every authenticated call, per-session SE pubkey stored at sign-in, signature verify gates the request)
   - [ ] Idempotency keys on mutating routes (server dedupes within skew window to block write-replay on captured attestations)
   - [ ] Rate limiting (per-email + per-IP cooldown, enumeration-resistant identical 200 responses)
   - [ ] Cloudflare Tunnel deployment (cloudflared on VM, no inbound ports) + client pins 3–4 public roots CF chains through
