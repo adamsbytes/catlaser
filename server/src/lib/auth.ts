@@ -3,6 +3,7 @@ import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { bearer } from 'better-auth/plugins';
 import { buildBeforeHook } from '~/lib/auth-hooks.ts';
+import { deviceAttestationPlugin } from '~/lib/attestation-plugin.ts';
 import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery } from '~/lib/magic-link.ts';
@@ -31,7 +32,11 @@ export const createAuth = (overrides: CreateAuthOverrides = {}): Auth => {
     secret: env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, { provider: 'pg' }),
     trustedOrigins: [...env.TRUSTED_ORIGINS],
-    plugins: [bearer({ requireSignature: true }), buildMagicLinkPlugin(env, delivery)],
+    plugins: [
+      bearer({ requireSignature: true }),
+      buildMagicLinkPlugin(env, delivery),
+      deviceAttestationPlugin(),
+    ],
     socialProviders: buildSocialProviders(env, overrides),
     hooks: {
       before: buildBeforeHook(env),

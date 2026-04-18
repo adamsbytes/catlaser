@@ -1,8 +1,11 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 import { z } from 'zod';
+import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import { handle } from '~/server.ts';
+import type { TestDeviceKey } from './support/signed-attestation.ts';
+import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
 const AUTH_BASE = '/api/v1/auth';
 
@@ -29,6 +32,17 @@ const callAuth = async (
   const body: unknown = text.length > 0 ? JSON.parse(text) : null;
   return { response, body };
 };
+
+let device: TestDeviceKey;
+let signOutHeader: string;
+
+beforeAll(() => {
+  device = createTestDeviceKey();
+  signOutHeader = buildSignedAttestationHeader({
+    deviceKey: device,
+    binding: { tag: 'signOut', timestamp: 1n },
+  });
+});
 
 describe('auth: mounting', () => {
   test('routes mount at /api/v1/auth (ok endpoint returns 200)', async () => {
@@ -86,6 +100,11 @@ describe('auth: trusted origins (CSRF protection for cookie-bearing requests)', 
   // (better-auth validateOrigin short-circuits when useCookies is false — bearer
   // clients can't be CSRF'd because browsers don't auto-attach Bearer headers).
   // These tests exercise the enforcement path that protects cookie-session clients.
+  //
+  // Because `/sign-out` is attestation-gated, each request here attaches a
+  // valid `out:` binding so the origin check is the layer exercised — the
+  // alternative (no attestation) would short-circuit to 401
+  // ATTESTATION_REQUIRED and leave origin behavior unverified.
 
   test('POST with untrusted Origin and a cookie is rejected with 403', async () => {
     const { response, body } = await callAuth('/sign-out', {
@@ -94,6 +113,7 @@ describe('auth: trusted origins (CSRF protection for cookie-bearing requests)', 
         Origin: untrustedOrigin,
         Cookie: 'better-auth.session_token=placeholder',
         'Content-Type': 'application/json',
+        [ATTESTATION_HEADER_NAME]: signOutHeader,
       },
     });
     expect(response.status).toBe(403);
@@ -108,6 +128,7 @@ describe('auth: trusted origins (CSRF protection for cookie-bearing requests)', 
         Origin: trustedOrigin,
         Cookie: 'better-auth.session_token=placeholder',
         'Content-Type': 'application/json',
+        [ATTESTATION_HEADER_NAME]: signOutHeader,
       },
     });
     // Trusted origin means the origin check passes. Without a real session the
@@ -121,6 +142,7 @@ describe('auth: trusted origins (CSRF protection for cookie-bearing requests)', 
       headers: {
         Cookie: 'better-auth.session_token=placeholder',
         'Content-Type': 'application/json',
+        [ATTESTATION_HEADER_NAME]: signOutHeader,
       },
     });
     expect(response.status).toBe(403);
@@ -132,12 +154,44 @@ describe('auth: trusted origins (CSRF protection for cookie-bearing requests)', 
       headers: {
         Origin: untrustedOrigin,
         'Content-Type': 'application/json',
+        [ATTESTATION_HEADER_NAME]: signOutHeader,
       },
     });
     // Documents the bearer-only path: no cookie means no CSRF vector, so the
     // origin header is intentionally not gated. Bearer tokens are protected by
     // signature validation (requireSignature), not origin policy.
     expect(response.status).not.toBe(403);
+  });
+});
+
+describe('auth: sign-out attestation gate', () => {
+  test('POST /sign-out without attestation → 401 ATTESTATION_REQUIRED regardless of origin', async () => {
+    const { response, body } = await callAuth('/sign-out', {
+      method: 'POST',
+      headers: {
+        Origin: trustedOrigin,
+        'Content-Type': 'application/json',
+      },
+    });
+    expect(response.status).toBe(401);
+    expect(errorBodyShape.parse(body).code).toBe('ATTESTATION_REQUIRED');
+  });
+
+  test('POST /sign-out with req: binding → 401 ATTESTATION_BINDING_MISMATCH', async () => {
+    const reqHeader = buildSignedAttestationHeader({
+      deviceKey: device,
+      binding: { tag: 'request', timestamp: 1n },
+    });
+    const { response, body } = await callAuth('/sign-out', {
+      method: 'POST',
+      headers: {
+        Origin: trustedOrigin,
+        'Content-Type': 'application/json',
+        [ATTESTATION_HEADER_NAME]: reqHeader,
+      },
+    });
+    expect(response.status).toBe(401);
+    expect(errorBodyShape.parse(body).code).toBe('ATTESTATION_BINDING_MISMATCH');
   });
 });
 

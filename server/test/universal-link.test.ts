@@ -329,16 +329,19 @@ describe('universal-link: path-dispatch isolation', () => {
   });
 
   test('GET on the API verify path is not served by the universal-link handler', async () => {
-    // The auth handler owns the API verify path. Hitting it with no token
-    // produces a redirect (per the magic-link plugin) — never the inert
-    // HTML body. Proving that the two handlers are structurally disjoint
-    // makes a future dispatch-order regression visible.
+    // The auth handler owns the API verify path. With the device-attestation
+    // plugin gating `/magic-link/verify`, an unauthenticated probe lands on
+    // the plugin's 401 ATTESTATION_REQUIRED response — never the inert HTML
+    // body. Accepting 401 alongside the older redirect / 4xx outcomes keeps
+    // this assertion resilient to the step-5 / step-6 layering while still
+    // flagging a regression where the universal-link handler would claim
+    // the API path.
     const response = await fetchPath(API_MAGIC_LINK_VERIFY_PATH);
     if (response.status === 200) {
       const body = await response.text();
       expect(body).not.toBe(INERT_HTML_BODY);
     } else {
-      expect([301, 302, 303, 307, 308, 400, 403, 404]).toContain(response.status);
+      expect([301, 302, 303, 307, 308, 400, 401, 403, 404]).toContain(response.status);
     }
   });
 

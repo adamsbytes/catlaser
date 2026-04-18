@@ -3,15 +3,20 @@ import { beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { user, verification } from '~/db/schema.ts';
+import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import { AUTH_BASE_PATH, createAuth } from '~/lib/auth.ts';
 import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery, MagicLinkEmailPayload } from '~/lib/magic-link.ts';
 import { resolveAllowedCallbackUrl } from '~/lib/magic-link.ts';
+import type { TestDeviceKey } from './support/signed-attestation.ts';
+import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
 
 /**
- * End-to-end coverage for the magic-link plugin. Three invariants dominate
- * this file:
+ * End-to-end coverage for the magic-link plugin plus the
+ * device-attestation plugin that gates it.
+ *
+ * Four invariants dominate this file:
  *
  * 1. The emailed URL is ALWAYS the Universal Link URL, never the API
  *    verify endpoint and never influenced by client-supplied body fields.
@@ -20,10 +25,11 @@ import { resolveAllowedCallbackUrl } from '~/lib/magic-link.ts';
  *    is rejected with 403 `MAGIC_LINK_CALLBACK_FORBIDDEN`.
  * 3. Tokens land in the `verification` table hashed (base64url-no-pad
  *    SHA-256); the wire token stays plaintext so the email is usable.
- *
- * Every test drives the real better-auth instance via `createAuth()` and
- * the real Postgres instance `docker compose up` provisions for this
- * suite. No plugin internals are bypassed.
+ * 4. Both `POST /sign-in/magic-link` and `GET /magic-link/verify`
+ *    require a v3 device-attestation header whose binding matches
+ *    the endpoint (`req:` / `ver:` respectively) and whose ECDSA
+ *    signature verifies. Callers without an attestation are rejected
+ *    by the attestation plugin before the magic-link plugin runs.
  */
 
 const SIGN_IN_URL = `http://localhost${AUTH_BASE_PATH}/sign-in/magic-link`;
@@ -53,10 +59,6 @@ const clearEmail = async (email: string): Promise<void> => {
       await db.delete(user).where(eq(user.id, row.id));
     }),
   );
-  // Cascade drops sessions/accounts; verification rows are keyed by token
-  // digest, so only `sendCount > 0` tests care about cleaning them — left
-  // intact so "token already redeemed" state survives across tests that
-  // expect it.
 };
 
 class RecordingDelivery implements MagicLinkDelivery {
@@ -91,14 +93,45 @@ class RecordingDelivery implements MagicLinkDelivery {
 
 let delivery: RecordingDelivery;
 let auth: ReturnType<typeof createAuth>;
+let device: TestDeviceKey;
+
+const reqAttestation = (timestamp = 1_734_489_600n): string =>
+  buildSignedAttestationHeader({
+    deviceKey: device,
+    binding: { tag: 'request', timestamp },
+  });
+
+const verAttestation = (token: string): string =>
+  buildSignedAttestationHeader({
+    deviceKey: device,
+    binding: { tag: 'verify', token },
+  });
+
+interface PostOptions {
+  /** Explicit attestation header to attach; defaults to a valid `req:`
+   * binding signed with the shared test device key. */
+  readonly attestation?: string;
+  /** Set to true to omit the attestation header entirely — used to
+   * exercise the ATTESTATION_REQUIRED rejection path. */
+  readonly skipAttestation?: boolean;
+}
 
 const post = async (
   body: unknown,
   extraHeaders: Record<string, string> = {},
+  options: PostOptions = {},
 ): Promise<{ response: Response; body: unknown }> => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Origin: trustedOrigin,
+    ...extraHeaders,
+  };
+  if (options.skipAttestation !== true) {
+    headers[ATTESTATION_HEADER_NAME] = options.attestation ?? reqAttestation();
+  }
   const init: RequestInit = {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: trustedOrigin, ...extraHeaders },
+    headers,
     body: JSON.stringify(body),
   };
   const response = await auth.handler(new Request(SIGN_IN_URL, init));
@@ -110,7 +143,17 @@ const post = async (
 const verifyViaToken = async (token: string): Promise<Response> => {
   const url = new URL(VERIFY_URL_BASE);
   url.searchParams.set('token', token);
-  return await auth.handler(new Request(url.toString(), { method: 'GET' }));
+  const headers: Record<string, string> = { [ATTESTATION_HEADER_NAME]: verAttestation(token) };
+  return await auth.handler(new Request(url.toString(), { method: 'GET', headers }));
+};
+
+const verifyRaw = async (
+  token: string,
+  headers: Record<string, string> = {},
+): Promise<Response> => {
+  const url = new URL(VERIFY_URL_BASE);
+  url.searchParams.set('token', token);
+  return await auth.handler(new Request(url.toString(), { method: 'GET', headers }));
 };
 
 const base64UrlNoPadSha256 = (input: string): string =>
@@ -124,6 +167,7 @@ const base64UrlNoPadSha256 = (input: string): string =>
 beforeAll(() => {
   delivery = new RecordingDelivery();
   auth = createAuth({ magicLinkDelivery: delivery });
+  device = createTestDeviceKey();
 });
 
 beforeEach(() => {
@@ -182,23 +226,20 @@ describe('magic-link: emailed URL construction', () => {
 });
 
 describe('magic-link: callbackURL allowlist (phishing-relay defence)', () => {
-  // Two defensive layers protect this route:
+  // The callback-URL allowlist check lives in `options.hooks.before`,
+  // which better-auth runs before plugin hooks. With that ordering, a
+  // malformed `callbackURL` is refused before the attestation plugin
+  // ever parses the header — so these tests submit an attestation, but
+  // the response code is driven by the callback-URL layer.
   //
-  //  - better-auth's built-in `originCheckMiddleware` runs on every POST
-  //    and rejects a `callbackURL` whose ORIGIN (scheme + host + port)
-  //    is not in `trustedOrigins` with `INVALID_CALLBACK_URL` / 403.
-  //    This layer handles the "host not ours" class of attacks.
+  //  - better-auth's built-in `originCheckMiddleware` catches the
+  //    "scheme/host not trusted" class with `INVALID_CALLBACK_URL` / 403.
+  //  - Our `buildBeforeHook` in `auth-hooks.ts` catches the "host is
+  //    trusted but path / shape is wrong" class with
+  //    `MAGIC_LINK_CALLBACK_FORBIDDEN` / 403.
   //
-  //  - Our `buildBeforeHook` in `auth-hooks.ts` runs after the router
-  //    middleware and rejects any string that isn't a byte-for-byte
-  //    match of the configured Universal Link URL with
-  //    `MAGIC_LINK_CALLBACK_FORBIDDEN` / 403. This layer handles the
-  //    "host is trusted but path / shape is wrong" class.
-  //
-  // Each test below is annotated with which layer it exercises. Both
-  // layers terminate the request before `sendMagicLink` runs, so the
-  // `delivery.callCount() === 0` assertion is the real phishing-relay
-  // invariant.
+  // Either way, `sendMagicLink` must not fire and `delivery.callCount()`
+  // must stay zero — that is the real phishing-relay invariant.
 
   test('exact allowlisted URL → accepted', async () => {
     const email = 'allow-exact@example.com';
@@ -214,9 +255,6 @@ describe('magic-link: callbackURL allowlist (phishing-relay defence)', () => {
       callbackURL: 'https://evil.example/sign-in',
     });
     expect(response.status).toBe(403);
-    // built-in origin-check catches before our hook — the code may be
-    // INVALID_CALLBACK_URL or MAGIC_LINK_CALLBACK_FORBIDDEN depending on
-    // execution order, but delivery must never fire.
     const parsed = errorBodyShape.parse(body);
     expect(
       parsed.code === 'INVALID_CALLBACK_URL' || parsed.code === 'MAGIC_LINK_CALLBACK_FORBIDDEN',
@@ -285,8 +323,6 @@ describe('magic-link: callbackURL allowlist (phishing-relay defence)', () => {
   });
 
   test('relative path → 403 MAGIC_LINK_CALLBACK_FORBIDDEN (layer 2: built-in allows relative, ours does not)', async () => {
-    // `originCheck` passes relative paths through with `allowRelativePaths: true`;
-    // our hook rejects because the absolute Universal Link URL cannot be a relative path.
     const { response, body } = await post({
       email: 'reject-relative@example.com',
       callbackURL: '/sign-in',
@@ -326,6 +362,52 @@ describe('magic-link: email validation', () => {
     const { response } = await post({ email: '' });
     expect(response.status).toBe(400);
     expect(delivery.callCount()).toBe(0);
+  });
+});
+
+describe('magic-link: attestation enforcement on both endpoints', () => {
+  test('POST /sign-in/magic-link without attestation → 401 ATTESTATION_REQUIRED, delivery not invoked', async () => {
+    const { response, body } = await post(
+      { email: 'no-attestation@example.com' },
+      {},
+      { skipAttestation: true },
+    );
+    expect(response.status).toBe(401);
+    expect(errorBodyShape.parse(body).code).toBe('ATTESTATION_REQUIRED');
+    expect(delivery.callCount()).toBe(0);
+  });
+
+  test('GET /magic-link/verify without attestation → 401 ATTESTATION_REQUIRED', async () => {
+    const response = await verifyRaw('anything');
+    expect(response.status).toBe(401);
+    const parsed = errorBodyShape.parse(await response.json());
+    expect(parsed.code).toBe('ATTESTATION_REQUIRED');
+  });
+
+  test('POST /sign-in/magic-link with a sis: binding → 401 ATTESTATION_BINDING_MISMATCH', async () => {
+    const misboundHeader = buildSignedAttestationHeader({
+      deviceKey: device,
+      binding: { tag: 'social', rawNonce: 'oops' },
+    });
+    const { response, body } = await post(
+      { email: 'wrong-tag@example.com' },
+      {},
+      { attestation: misboundHeader },
+    );
+    expect(response.status).toBe(401);
+    expect(errorBodyShape.parse(body).code).toBe('ATTESTATION_BINDING_MISMATCH');
+    expect(delivery.callCount()).toBe(0);
+  });
+
+  test('GET /magic-link/verify with a req: binding → 401 ATTESTATION_BINDING_MISMATCH', async () => {
+    const misboundHeader = buildSignedAttestationHeader({
+      deviceKey: device,
+      binding: { tag: 'request', timestamp: 1n },
+    });
+    const response = await verifyRaw('any-token', { [ATTESTATION_HEADER_NAME]: misboundHeader });
+    expect(response.status).toBe(401);
+    const parsed = errorBodyShape.parse(await response.json());
+    expect(parsed.code).toBe('ATTESTATION_BINDING_MISMATCH');
   });
 });
 
@@ -372,9 +454,6 @@ describe('magic-link: verify round-trip', () => {
     const second = await verifyViaToken(token);
     expect([301, 302, 303, 307, 308]).toContain(second.status);
     const location = second.headers.get('location') ?? '';
-    // Second attempt either hits ATTEMPTS_EXCEEDED (if verification row
-    // still exists) or INVALID_TOKEN (if it was deleted). Both encode the
-    // same user-visible outcome: the token is no longer usable.
     expect(/error=(?:ATTEMPTS_EXCEEDED|INVALID_TOKEN)/v.test(location)).toBe(true);
     await clearEmail(email);
   });
@@ -403,7 +482,12 @@ describe('magic-link: verify round-trip', () => {
     const url = new URL(VERIFY_URL_BASE);
     url.searchParams.set('token', 'irrelevant');
     url.searchParams.set('callbackURL', 'https://evil.example/land');
-    const response = await auth.handler(new Request(url.toString(), { method: 'GET' }));
+    const response = await auth.handler(
+      new Request(url.toString(), {
+        method: 'GET',
+        headers: { [ATTESTATION_HEADER_NAME]: verAttestation('irrelevant') },
+      }),
+    );
     // The originCheck middleware runs BEFORE token lookup; an untrusted
     // callbackURL short-circuits to 403 regardless of token validity.
     expect(response.status).toBe(403);
@@ -462,27 +546,11 @@ describe('magic-link: CSRF / origin handling', () => {
   });
 });
 
-describe('magic-link: hook scope isolation', () => {
-  test('social hook does NOT fire on /sign-in/magic-link (no attestation required)', async () => {
-    const email = 'scope-no-attestation@example.com';
-    await clearEmail(email);
-    // If the social attestation hook were mis-routed, we'd get
-    // ATTESTATION_REQUIRED here. The response must either succeed or
-    // fail for an unrelated reason.
-    const { response, body } = await post({ email });
-    const parsed = errorBodyShape.parse(body);
-    expect(parsed.code ?? '').not.toBe('ATTESTATION_REQUIRED');
-    expect(parsed.code ?? '').not.toBe('ATTESTATION_INVALID');
-    expect(response.status).toBe(200);
-    await clearEmail(email);
-  });
-
-  test('magic-link hook does NOT fire on /sign-in/social (no callback check)', async () => {
-    // Submit a /sign-in/social request with no attestation header. We
-    // must see the SOCIAL hook's ATTESTATION_REQUIRED code, NOT the
-    // magic-link hook's MAGIC_LINK_CALLBACK_FORBIDDEN code. That proves
-    // the path dispatch in `buildBeforeHook` keeps the two concerns
-    // separate.
+describe('magic-link: plugin scope isolation', () => {
+  test('callback-URL hook does NOT fire on /sign-in/social', async () => {
+    // POST /sign-in/social with no attestation header. The magic-link
+    // callback-URL hook's MAGIC_LINK_CALLBACK_FORBIDDEN code must NOT
+    // appear; the attestation plugin is the layer that rejects.
     const socialURL = `http://localhost${AUTH_BASE_PATH}/sign-in/social`;
     const response = await auth.handler(
       new Request(socialURL, {
@@ -494,5 +562,18 @@ describe('magic-link: hook scope isolation', () => {
     const parsed = errorBodyShape.parse(await response.json());
     expect(parsed.code).toBe('ATTESTATION_REQUIRED');
     expect(parsed.code).not.toBe('MAGIC_LINK_CALLBACK_FORBIDDEN');
+  });
+
+  test('attestation req: binding on /sign-in/magic-link passes through to the magic-link plugin', async () => {
+    const email = 'scope-req-binding@example.com';
+    await clearEmail(email);
+    const { response, body } = await post({ email });
+    const parsed = errorBodyShape.parse(body);
+    // No attestation code fires when the header, tag, and signature are
+    // valid. The magic-link plugin then runs and emits the email.
+    expect(parsed.code ?? '').not.toContain('ATTESTATION_');
+    expect(response.status).toBe(200);
+    expect(delivery.callCount()).toBe(1);
+    await clearEmail(email);
   });
 });

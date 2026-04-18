@@ -1,30 +1,31 @@
 import { timingSafeEqual } from 'node:crypto';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import type { AuthMiddleware } from 'better-auth/api';
-import { AttestationParseError } from '~/lib/attestation-binding.ts';
-import type { ParsedAttestation } from '~/lib/attestation-header.ts';
-import { AttestationHeaderParseError, decodeAttestationHeader } from '~/lib/attestation-header.ts';
 import type { Env } from '~/lib/env.ts';
 import { resolveAllowedCallbackUrl } from '~/lib/magic-link.ts';
 
-/** Header the client attaches on every authenticated call. Lowercased for
- *  canonical matching — `Headers.get` is case-insensitive regardless. */
-export const ATTESTATION_HEADER_NAME = 'x-device-attestation';
-
-export type SocialSignInAttestationCode =
-  | 'ATTESTATION_REQUIRED'
-  | 'ATTESTATION_INVALID'
-  | 'ATTESTATION_BINDING_MISMATCH'
-  | 'ATTESTATION_NONCE_MISMATCH'
-  | 'ID_TOKEN_NONCE_REQUIRED';
+/**
+ * Top-level `options.hooks.before` wiring. All device-attestation
+ * concerns — header parse, SPKI validation, per-tag binding match,
+ * ECDSA verify, and the social-provider nonce three-way match — live
+ * in `~/lib/attestation-plugin.ts` and run as a better-auth plugin
+ * hook. What remains here is everything that is NOT attestation:
+ * today that means exactly the magic-link callback-URL allowlist,
+ * which is a property of the email we're about to send and has no
+ * cryptographic surface.
+ *
+ * Ordering: better-auth executes `options.hooks.before` before plugin
+ * `hooks.before` (see `toAuthEndpoints.getHooks`). The callback-URL
+ * allowlist running first means a malformed `callbackURL` on a
+ * `sign-in/magic-link` request is refused before any attestation
+ * parse is attempted — useful for both privacy (the header might
+ * encode identifying bytes) and latency (the request is bad either
+ * way). Attestation failures still dominate the response code for
+ * requests where the callback URL is absent or byte-equal to the
+ * allowlist.
+ */
 
 export type MagicLinkRequestHookCode = 'MAGIC_LINK_CALLBACK_FORBIDDEN';
-
-const socialAttestationError = (code: SocialSignInAttestationCode, message: string): APIError =>
-  new APIError('UNAUTHORIZED', {
-    code,
-    message,
-  });
 
 const magicLinkCallbackForbidden = (message: string): APIError =>
   new APIError('FORBIDDEN', {
@@ -41,44 +42,8 @@ const constantTimeStringEquals = (a: string, b: string): boolean => {
   return timingSafeEqual(aBytes, bBytes);
 };
 
-const parseHeaderOrThrow = (headers: Headers | undefined): ParsedAttestation => {
-  const headerValue = headers?.get(ATTESTATION_HEADER_NAME)?.trim();
-  if (headerValue === undefined || headerValue.length === 0) {
-    throw socialAttestationError(
-      'ATTESTATION_REQUIRED',
-      `missing or empty ${ATTESTATION_HEADER_NAME} header`,
-    );
-  }
-  try {
-    return decodeAttestationHeader(headerValue);
-  } catch (error) {
-    if (error instanceof AttestationHeaderParseError || error instanceof AttestationParseError) {
-      throw socialAttestationError('ATTESTATION_INVALID', error.message);
-    }
-    throw socialAttestationError(
-      'ATTESTATION_INVALID',
-      error instanceof Error ? error.message : 'attestation header parse failed',
-    );
-  }
-};
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
-
-const extractIdTokenNonce = (body: unknown): string | undefined => {
-  if (!isRecord(body)) {
-    return undefined;
-  }
-  const idTokenCandidate = body['idToken'];
-  if (!isRecord(idTokenCandidate)) {
-    return undefined;
-  }
-  const { nonce } = idTokenCandidate;
-  if (typeof nonce !== 'string' || nonce.length === 0) {
-    return undefined;
-  }
-  return nonce;
-};
 
 const extractBodyCallbackURL = (body: unknown): string | undefined => {
   if (!isRecord(body)) {
@@ -91,43 +56,10 @@ const extractBodyCallbackURL = (body: unknown): string | undefined => {
   return callbackURL;
 };
 
-// The guards are declared `async` even though their bodies are currently
-// synchronous: step 5 (ECDSA signature verification over `fph_raw ||
-// bnd_utf8`) introduces real async work, and declaring the long-lived
-// signature now means the call sites never have to move. The
-// `await Promise.resolve()` at the top keeps the contract honest under
-// ESLint `require-await` until the real await lands.
-const runSocialSignInGuard = async (ctx: {
-  readonly headers: Headers | undefined;
-  readonly body: unknown;
-}): Promise<void> => {
-  await Promise.resolve();
-  const attestation = parseHeaderOrThrow(ctx.headers);
-
-  if (attestation.binding.tag !== 'social') {
-    throw socialAttestationError(
-      'ATTESTATION_BINDING_MISMATCH',
-      `expected 'sis:' binding for /sign-in/social, got '${attestation.binding.tag}'`,
-    );
-  }
-
-  const bodyNonce = extractIdTokenNonce(ctx.body);
-  if (bodyNonce === undefined) {
-    throw socialAttestationError(
-      'ID_TOKEN_NONCE_REQUIRED',
-      'body.idToken.nonce is required for /sign-in/social',
-    );
-  }
-
-  if (!constantTimeStringEquals(attestation.binding.rawNonce, bodyNonce)) {
-    throw socialAttestationError(
-      'ATTESTATION_NONCE_MISMATCH',
-      "attestation 'sis:' binding does not match body.idToken.nonce",
-    );
-  }
-};
-
 const runMagicLinkRequestCallbackGuard = async (env: Env, body: unknown): Promise<void> => {
+  // `async` shape is preserved for symmetry with other before-guard
+  // helpers this file has historically carried; the body itself stays
+  // synchronous today.
   await Promise.resolve();
   const submitted = extractBodyCallbackURL(body);
   if (submitted === undefined) {
@@ -144,44 +76,30 @@ const runMagicLinkRequestCallbackGuard = async (env: Env, body: unknown): Promis
 };
 
 /**
- * Build the single `hooks.before` middleware used by `createAuth`. The
- * better-auth options contract accepts only one before-middleware, so path-
- * matching and composition happen here.
+ * Build the single `hooks.before` middleware used by `createAuth`.
  *
  * Paths currently guarded:
- *
- * - `POST /sign-in/social` — three-way nonce match between the request
- *   body's `idToken.nonce`, the `sis:<rawNonce>` attestation binding, and
- *   the provider-issued ID-token `nonce` claim (the third is enforced by
- *   the provider's `verifyIdToken` hook). Owned end-to-end by ADR-006 and
- *   BUILD.md Part 9 step 2. Failures map to HTTP 401 with a distinct
- *   `code` per failure.
  *
  * - `POST /sign-in/magic-link` — `callbackURL` allowlist enforcement.
  *   When a client submits `body.callbackURL`, it must byte-equal the
  *   configured Universal Link URL. Any other value — different host,
- *   different path, http scheme, relative path, trailing variation — is
- *   rejected with HTTP 403 `MAGIC_LINK_CALLBACK_FORBIDDEN`. The emailed
- *   URL itself is built server-side from env and never consumes the
- *   client-supplied value; this check is defence-in-depth against a
- *   future change that might.
+ *   different path, http scheme, relative path, trailing variation —
+ *   is rejected with HTTP 403 `MAGIC_LINK_CALLBACK_FORBIDDEN`. The
+ *   emailed URL itself is built server-side from env and never
+ *   consumes the client-supplied value; this check is defence-in-
+ *   depth against a future change that might.
  *
- * Not enforced here (by BUILD.md step boundaries):
- *
- * - ECDSA signature verification over `fph_raw || bnd_utf8` — step 5.
- * - `req:` / `ver:` / `sis:` / `out:` skew-window enforcement — step 6.
- * - Per-session SE public-key persistence — step 6/7.
- * - `api:` per-request attestation on protected routes — step 7.
- * - Idempotency-key replay protection — step 8.
- *
- * Every future step layers on top of the parse + match done here; none of
- * them rewrite it.
+ * Every other step boundary — attestation parse / SPKI / binding /
+ * ECDSA verify / nonce three-way / `req:` / `out:` skew / `ver:`
+ * stored-fph + pk byte-equal / `api:` per-request / idempotency —
+ * lives in the attestation plugin or in step 6+ additions to it, not
+ * here. Adding a fifth concern to this file means adding a fifth
+ * subsystem; adding attestation code here instead of in the plugin
+ * would cross the trust boundary this split is designed to preserve.
  */
 export const buildBeforeHook = (env: Env): AuthMiddleware =>
   createAuthMiddleware(async (ctx) => {
-    if (ctx.path === '/sign-in/social') {
-      await runSocialSignInGuard(ctx);
-    } else if (ctx.path === '/sign-in/magic-link') {
+    if (ctx.path === '/sign-in/magic-link') {
       await runMagicLinkRequestCallbackGuard(env, ctx.body);
     }
   });
