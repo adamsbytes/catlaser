@@ -66,7 +66,7 @@
   - [X] better-auth base (Postgres schema, bearer plugin, trusted origins pinned to Universal Link host)
   - [X] Social providers (Apple + Google, nonce three-way match: body + ID token claim + attestation bnd)
   - [X] Magic-link plugin (callbackURL allowlisted to Universal Link host — reject client-supplied hosts to block phishing-relay takeover)
-  - [ ] Universal Link handler (inert HTML at universalLinkPath, distinct from /api/auth/magic-link/verify; AASA serving iOS bundle ID)
+  - [X] Universal Link handler (inert HTML at universalLinkPath, distinct from /api/auth/magic-link/verify; AASA serving iOS bundle ID)
   - [ ] Device attestation plugin — v3 (SPKI parse, ECDSA verify over fph || bnd, per-tag binding parse)
   - [ ] Binding enforcement (req: ±60s skew, ver: stored fph + pk byte-equal, sis: nonce three-way, out: ±60s skew, api: ±60s skew)
   - [ ] Protected-route attestation middleware (api: binding on every authenticated call, per-session SE pubkey stored at sign-in, signature verify gates the request)

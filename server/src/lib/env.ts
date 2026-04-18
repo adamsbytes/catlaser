@@ -9,6 +9,7 @@ export interface Env {
   TRUSTED_ORIGINS: readonly string[];
   APPLE_CLIENT_ID: string;
   APPLE_APP_BUNDLE_IDENTIFIER: string;
+  APPLE_TEAM_ID: string;
   GOOGLE_CLIENT_ID: string;
   MAGIC_LINK_UNIVERSAL_LINK_HOST: string;
   MAGIC_LINK_UNIVERSAL_LINK_PATH: string;
@@ -102,6 +103,21 @@ const parseEnv = (source: Record<string, string | undefined>): Env => {
     // come back with `aud = <bundle id>`, so this is what the server pins
     // against when verifying Apple tokens from the app.
     APPLE_APP_BUNDLE_IDENTIFIER: z.string().min(1, 'APPLE_APP_BUNDLE_IDENTIFIER must not be empty'),
+    // Apple Developer Team ID (10-character uppercase alphanumeric). This
+    // pairs with `APPLE_APP_BUNDLE_IDENTIFIER` to form the `<TeamID>.<BundleID>`
+    // appID strings that go in the AASA (`apple-app-site-association`)
+    // file's `applinks.details[].appIDs` entries. iOS refuses to route a
+    // Universal Link into the app if the AASA's appID doesn't exactly match
+    // the app's own provisioned identifier — so this MUST match the Team ID
+    // on the Apple Developer account the app is signed with. Validated at
+    // process-start so a misconfigured deployment fails loudly rather than
+    // silently publishing an AASA the installed app will reject.
+    APPLE_TEAM_ID: z
+      .string()
+      .regex(
+        /^[\dA-Z]{10}$/v,
+        'APPLE_TEAM_ID must be exactly 10 uppercase-alphanumeric characters',
+      ),
     // Google OAuth client ID (the iOS client type registered in Google Cloud
     // Console). ID tokens issued to the app carry `aud = <client_id>`; the
     // server pins the `aud` against this value via better-auth's default
