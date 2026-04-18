@@ -10,7 +10,7 @@
     "lint": "prettier --write . && eslint . --cache",
     "lint:fix": "prettier --write . && eslint . --fix --cache",
     "typecheck": "tsc --noEmit",
-    "test": "bun run docker:up && bun run db:migrate && bun test; CODE=$?; bun run docker:down; exit $CODE",
+    "tests": "bun run docker:up && bun run db:migrate && bun test; CODE=$?; bun run docker:down; exit $CODE",
     "docker:up": "docker compose up -d --wait",
     "docker:down": "docker compose down",
     "db:generate": "drizzle-kit generate",

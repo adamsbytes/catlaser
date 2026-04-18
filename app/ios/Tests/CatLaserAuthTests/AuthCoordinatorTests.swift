@@ -503,7 +503,7 @@ struct AuthCoordinatorTests {
         try await coord.signOut()
         #expect(try await store.load() == nil)
         let req = try #require(await http.lastRequest())
-        #expect(req.url?.absoluteString == "https://auth.example/api/auth/sign-out")
+        #expect(req.url?.absoluteString == "https://auth.example/api/v1/auth/sign-out")
         #expect(req.headers["Authorization"] == "Bearer to-kill")
         let header = try #require(req.header(DeviceAttestationEncoder.headerName))
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)

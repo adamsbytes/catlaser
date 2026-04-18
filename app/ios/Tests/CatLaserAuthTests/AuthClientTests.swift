@@ -44,7 +44,7 @@ struct AuthClientTests {
         #expect(session.establishedAt == Date(timeIntervalSince1970: 1_700_000_000))
 
         let request = await mock.lastRequest()
-        #expect(request?.url?.absoluteString == "https://auth.example/api/auth/sign-in/social")
+        #expect(request?.url?.absoluteString == "https://auth.example/api/v1/auth/sign-in/social")
         #expect(request?.method == "POST")
         #expect(request?.headers["Content-Type"] == "application/json")
         #expect(request?.headers["Accept"] == "application/json")
@@ -289,7 +289,7 @@ struct AuthClientTests {
         )
         try await client.signOut(session: session, attestationHeader: "SIGN-OUT-HDR")
         let request = try #require(await mock.lastRequest())
-        #expect(request.url?.absoluteString == "https://auth.example/api/auth/sign-out")
+        #expect(request.url?.absoluteString == "https://auth.example/api/v1/auth/sign-out")
         #expect(request.method == "POST")
         #expect(request.headers["Authorization"] == "Bearer my-token")
         #expect(request.header(DeviceAttestationEncoder.headerName) == "SIGN-OUT-HDR",

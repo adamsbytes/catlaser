@@ -96,19 +96,19 @@ struct AuthConfigTests {
     @Test
     func socialSignInURLIsCorrect() throws {
         let c = try config()
-        #expect(c.socialSignInURL.absoluteString == "https://auth.catlaser.example/api/auth/sign-in/social")
+        #expect(c.socialSignInURL.absoluteString == "https://auth.catlaser.example/api/v1/auth/sign-in/social")
     }
 
     @Test
     func socialSignInURLPreservesBasePath() throws {
         let c = try config(baseURL: URL(string: "https://auth.catlaser.example/prefix")!)
-        #expect(c.socialSignInURL.absoluteString == "https://auth.catlaser.example/prefix/api/auth/sign-in/social")
+        #expect(c.socialSignInURL.absoluteString == "https://auth.catlaser.example/prefix/api/v1/auth/sign-in/social")
     }
 
     @Test
     func signOutURLIsCorrect() throws {
         let c = try config()
-        #expect(c.signOutURL.absoluteString == "https://auth.catlaser.example/api/auth/sign-out")
+        #expect(c.signOutURL.absoluteString == "https://auth.catlaser.example/api/v1/auth/sign-out")
     }
 
     @Test
@@ -121,14 +121,14 @@ struct AuthConfigTests {
     func magicLinkRequestURLIsCorrect() throws {
         let c = try config()
         #expect(c.magicLinkRequestURL.absoluteString
-            == "https://auth.catlaser.example/api/auth/sign-in/magic-link")
+            == "https://auth.catlaser.example/api/v1/auth/sign-in/magic-link")
     }
 
     @Test
     func magicLinkVerifyURLIsCorrect() throws {
         let c = try config()
         #expect(c.magicLinkVerifyURL.absoluteString
-            == "https://auth.catlaser.example/api/auth/magic-link/verify")
+            == "https://auth.catlaser.example/api/v1/auth/magic-link/verify")
     }
 
     @Test
@@ -213,7 +213,7 @@ struct AuthConfigTests {
         // equals the API verify endpoint's path, Safari reaching the URL
         // directly would be served by the API. The config must reject.
         #expect(throws: AuthConfigError.universalLinkPathCollidesWithAPI) {
-            _ = try config(universalLinkPath: "/api/auth/magic-link/verify")
+            _ = try config(universalLinkPath: "/api/v1/auth/magic-link/verify")
         }
     }
 
@@ -222,7 +222,7 @@ struct AuthConfigTests {
         #expect(throws: AuthConfigError.universalLinkPathCollidesWithAPI) {
             _ = try config(
                 baseURL: URL(string: "https://auth.catlaser.example/tenants/42")!,
-                universalLinkPath: "/tenants/42/api/auth/magic-link/verify",
+                universalLinkPath: "/tenants/42/api/v1/auth/magic-link/verify",
             )
         }
     }

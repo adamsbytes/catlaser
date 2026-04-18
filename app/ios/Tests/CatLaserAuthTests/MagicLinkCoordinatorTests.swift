@@ -234,7 +234,7 @@ struct MagicLinkCoordinatorTests {
         #expect(try await store.load() == session)
 
         let req = try #require(await mock.lastRequest())
-        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/magic-link/verify?token=opaque123")
+        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/v1/auth/magic-link/verify?token=opaque123")
     }
 
     @Test
@@ -389,7 +389,7 @@ struct MagicLinkCoordinatorTests {
         )
         try await coord.signOut()
         let req = try #require(await mock.lastRequest())
-        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/sign-out")
+        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/v1/auth/sign-out")
         #expect(req.headers["Authorization"] == "Bearer bearer-ml")
         let header = try #require(req.header(DeviceAttestationEncoder.headerName))
         let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)

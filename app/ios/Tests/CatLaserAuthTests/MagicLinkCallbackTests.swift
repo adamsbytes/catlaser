@@ -81,7 +81,7 @@ struct MagicLinkCallbackTests {
         // in bad-AASA cases and must never be able to complete sign-in
         // via that route.
         let config = try makeConfig()
-        let url = URL(string: "https://auth.catlaser.example/api/auth/magic-link/verify?token=abc")!
+        let url = URL(string: "https://auth.catlaser.example/api/v1/auth/magic-link/verify?token=abc")!
         expectInvalidMagicLink(url: url, config: config, matching: "host")
     }
 

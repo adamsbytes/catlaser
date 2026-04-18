@@ -37,7 +37,7 @@ struct AuthClientRequestMagicLinkTests {
             attestationHeader: "QVRURVNU",
         )
         let req = try #require(await mock.lastRequest())
-        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/sign-in/magic-link")
+        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/v1/auth/sign-in/magic-link")
         #expect(req.method == "POST")
         #expect(req.header("Content-Type") == "application/json")
         #expect(req.header("Accept") == "application/json")
@@ -195,7 +195,7 @@ struct AuthClientCompleteMagicLinkTests {
         #expect(session.establishedAt == Date(timeIntervalSince1970: 1_700_000_000))
 
         let req = try #require(await mock.lastRequest())
-        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/magic-link/verify?token=valid-token")
+        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/v1/auth/magic-link/verify?token=valid-token")
         #expect(req.method == "GET")
         #expect(req.header("Accept") == "application/json")
         #expect(req.header(DeviceAttestationEncoder.headerName) == "ATTEST")
@@ -212,7 +212,7 @@ struct AuthClientCompleteMagicLinkTests {
         )
         let req = try #require(await mock.lastRequest())
         // `URLComponents` percent-encodes reserved chars in query values.
-        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/auth/magic-link/verify?token=a+b%3Dc/d")
+        #expect(req.url?.absoluteString == "https://auth.catlaser.example/api/v1/auth/magic-link/verify?token=a+b%3Dc/d")
         let components = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)
         let value = components?.queryItems?.first(where: { $0.name == "token" })?.value
         #expect(value == "a+b=c/d", "server must receive the original token after decode")

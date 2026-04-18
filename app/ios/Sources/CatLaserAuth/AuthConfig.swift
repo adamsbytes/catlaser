@@ -19,7 +19,7 @@ public struct AuthConfig: Sendable, Equatable {
     /// outside the app cannot complete sign-in.
     public let universalLinkHost: String
     /// Path served by the Universal Link handler. Distinct from the API's
-    /// verify endpoint path (which is `/api/auth/magic-link/verify`).
+    /// verify endpoint path (which is `/api/v1/auth/magic-link/verify`).
     public let universalLinkPath: String
     /// Hosts trusted to receive the Google OIDC redirect. Redirect URLs
     /// with an https scheme and a host in this set are accepted; all other
@@ -95,19 +95,19 @@ public struct AuthConfig: Sendable, Equatable {
     }
 
     public var socialSignInURL: URL {
-        baseURL.appendingPathComponent("api/auth/sign-in/social")
+        baseURL.appendingPathComponent("api/v1/auth/sign-in/social")
     }
 
     public var signOutURL: URL {
-        baseURL.appendingPathComponent("api/auth/sign-out")
+        baseURL.appendingPathComponent("api/v1/auth/sign-out")
     }
 
     public var magicLinkRequestURL: URL {
-        baseURL.appendingPathComponent("api/auth/sign-in/magic-link")
+        baseURL.appendingPathComponent("api/v1/auth/sign-in/magic-link")
     }
 
     public var magicLinkVerifyURL: URL {
-        baseURL.appendingPathComponent("api/auth/magic-link/verify")
+        baseURL.appendingPathComponent("api/v1/auth/magic-link/verify")
     }
 
     /// Absolute URL the server should embed in the magic-link email. This
@@ -125,7 +125,7 @@ public struct AuthConfig: Sendable, Equatable {
     }
 
     private static func apiVerifyPath(baseURL: URL) -> String {
-        baseURL.appendingPathComponent("api/auth/magic-link/verify").path
+        baseURL.appendingPathComponent("api/v1/auth/magic-link/verify").path
     }
 
     private static func isPlausibleHost(_ candidate: String) -> Bool {

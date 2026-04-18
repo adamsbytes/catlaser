@@ -101,7 +101,7 @@ ios-check: ios-build ios-test
 server-check:
     cd server && bun run lint
     cd server && bun run typecheck
-    cd server && bun run test
+    cd server && bun run tests
 
 server-dev:
     cd server && bun run dev

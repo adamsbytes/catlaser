@@ -10,7 +10,70 @@ export interface Env {
   APPLE_CLIENT_ID: string;
   APPLE_APP_BUNDLE_IDENTIFIER: string;
   GOOGLE_CLIENT_ID: string;
+  MAGIC_LINK_UNIVERSAL_LINK_HOST: string;
+  MAGIC_LINK_UNIVERSAL_LINK_PATH: string;
 }
+
+/**
+ * Path served by the magic-link plugin's verify endpoint under
+ * `AUTH_BASE_PATH`. The Universal Link path must NOT equal this — otherwise
+ * the AASA-routed handler and the API handler would collide, defeating the
+ * device-binding check. Kept as a module constant so the env validator and
+ * the auth factory agree on a single source of truth.
+ */
+export const API_MAGIC_LINK_VERIFY_PATH = '/api/v1/auth/magic-link/verify';
+
+/**
+ * RFC 1035 host validator mirroring the iOS `AuthConfig.isPlausibleHost`
+ * check. Accepts ASCII labels only (IDN would require Punycode), rejects
+ * anything containing scheme/path/port/userinfo smuggling, caps at 253
+ * characters. A host rejected on iOS must also be rejected here and vice
+ * versa — otherwise the Universal Link round-trip is asymmetric.
+ */
+const HOST_LABEL_CHAR = /^[\d\-a-z]$/v;
+const isHostLabel = (label: string): boolean => {
+  if (label.length === 0 || label.length > 63) {
+    return false;
+  }
+  if (label.startsWith('-') || label.endsWith('-')) {
+    return false;
+  }
+  for (const char of label) {
+    if (!HOST_LABEL_CHAR.test(char)) {
+      return false;
+    }
+  }
+  return true;
+};
+const isPlausibleHost = (candidate: string): boolean => {
+  if (candidate.length === 0 || candidate.length > 253) {
+    return false;
+  }
+  const labels = candidate.split('.');
+  if (labels.length === 0) {
+    return false;
+  }
+  return labels.every((label) => isHostLabel(label));
+};
+
+/**
+ * Universal Link path validator. Must start with `/`, contain no query
+ * separator, fragment, or whitespace, and must not collide with the API
+ * verify endpoint. The collision check blocks a misconfiguration where the
+ * AASA-registered path double-routes to the server-side verify handler,
+ * which would let a browser fallback complete sign-in on a device that
+ * never produced the original attestation.
+ */
+const DISALLOWED_PATH_CHAR = /[\s#?]/v;
+const isPlausibleUniversalLinkPath = (path: string): boolean => {
+  if (!path.startsWith('/')) {
+    return false;
+  }
+  if (DISALLOWED_PATH_CHAR.test(path)) {
+    return false;
+  }
+  return path !== API_MAGIC_LINK_VERIFY_PATH;
+};
 
 const parseEnv = (source: Record<string, string | undefined>): Env => {
   const schema = z.object({
@@ -44,6 +107,29 @@ const parseEnv = (source: Record<string, string | undefined>): Env => {
     // server pins the `aud` against this value via better-auth's default
     // Google verifier.
     GOOGLE_CLIENT_ID: z.string().min(1, 'GOOGLE_CLIENT_ID must not be empty'),
+    // Universal Link host (iOS) / App Link host (Android) that receives
+    // magic-link emails. The AASA/assetlinks registration here associates
+    // the path with the app's bundle identifier, so iOS routes taps into
+    // the app rather than Safari. The server uses this host to construct
+    // the URL embedded in outgoing emails and to allowlist the
+    // client-supplied `callbackURL` on `POST /sign-in/magic-link` —
+    // rejecting any other host closes the phishing-relay takeover vector
+    // where an attacker would coax the server into emailing a link that
+    // lands on a host the attacker controls.
+    MAGIC_LINK_UNIVERSAL_LINK_HOST: z
+      .string()
+      .transform((value) => value.trim().toLowerCase())
+      .refine(isPlausibleHost, {
+        message: 'must be a host-only ASCII DNS name (no scheme, port, path, or whitespace)',
+      }),
+    // Path segment served by the Universal Link handler (distinct from the
+    // API verify endpoint). A browser that falls back here must receive
+    // inert HTML — see Part 9 step 4. Validated at process-start so a
+    // misconfiguration fails loudly instead of shipping emails with a
+    // broken destination.
+    MAGIC_LINK_UNIVERSAL_LINK_PATH: z.string().refine(isPlausibleUniversalLinkPath, {
+      message: `must start with '/', contain no '?'/'#'/whitespace, and must not equal '${API_MAGIC_LINK_VERIFY_PATH}'`,
+    }),
   });
 
   const result = schema.safeParse(source);
