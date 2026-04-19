@@ -6,10 +6,12 @@ import SwiftUI
 ///
 /// Presented once (on first install, and again if ``ConsentStore``'s
 /// versioned key has been rotated). Two toggles, a privacy footnote,
-/// and a Continue button. Defaults are both ON — the toggles are
-/// labelled explicitly and the user must scroll past the consent
-/// copy before tapping Continue, which matches Apple's definition of
-/// opt-in without burying the choice.
+/// and a Continue button. Defaults are both OFF — the only posture
+/// that survives GDPR / App Store "no pre-checked consent" scrutiny.
+/// The subtitle names the opt-out-by-default default explicitly so
+/// the user is never confused about which direction of the switch is
+/// the deliberate choice; the Continue button always advances,
+/// committing whatever the toggles currently are.
 public struct PrivacyConsentView: View {
     @Bindable private var viewModel: PrivacyConsentViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

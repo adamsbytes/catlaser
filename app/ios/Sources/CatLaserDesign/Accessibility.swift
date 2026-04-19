@@ -80,6 +80,8 @@ public enum AccessibilityID: String, Sendable, Hashable, CaseIterable {
     // Push
     case pushRoot = "push.root"
     case pushPrimerAllow = "push.button.primerAllow"
+    case pushPrimerLater = "push.button.primerLater"
+    case pushPostponedTurnOn = "push.button.postponedTurnOn"
     case pushOpenSettings = "push.button.openSettings"
     case pushRetry = "push.button.retry"
 

@@ -101,6 +101,18 @@ public final class PushViewModel {
 
     // MARK: - User actions
 
+    /// User explicitly tapped "Not now" on the primer. The primer
+    /// collapses to the compact ``.postponed`` pane for the rest of
+    /// the session; the OS permission prompt is untouched, so a
+    /// later ``requestAuthorization()`` call still produces the
+    /// one-shot system sheet. No-op if the state has already moved
+    /// past the primer (we should not backtrack a busy or terminal
+    /// state to a postponed label).
+    public func postponeAuthorization() {
+        guard case .idle = state else { return }
+        state = .postponed
+    }
+
     /// Trigger the OS authorization prompt. No-op if a prompt or
     /// registration is already in flight, or if we already have a
     /// terminal authorization answer.

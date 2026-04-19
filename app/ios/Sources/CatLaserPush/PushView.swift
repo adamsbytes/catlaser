@@ -61,6 +61,7 @@ public struct PushView: View {
     private var stateTag: String {
         switch viewModel.state {
         case .idle: "idle"
+        case .postponed: "postponed"
         case .requestingAuthorization: "requestingAuthorization"
         case .awaitingAPNsToken: "awaitingAPNsToken"
         case .registering: "registering"
@@ -75,6 +76,8 @@ public struct PushView: View {
         switch viewModel.state {
         case .idle:
             primer
+        case .postponed:
+            postponed
         case .requestingAuthorization, .awaitingAPNsToken:
             progress(label: PushStrings.awaitingTokenLabel)
         case .registering:
@@ -119,6 +122,53 @@ public struct PushView: View {
             .foregroundStyle(.white)
             .accessibilityID(.pushPrimerAllow)
             .accessibilityLabel(Text(PushStrings.primerAllowButton))
+            // Secondary, non-destructive "Not now". Styled as plain
+            // text so the visual hierarchy pushes the user toward
+            // "Turn on" without pressuring them — matching Apple's
+            // own permission primer pattern in Photos / Camera.
+            Button(PushStrings.primerLaterButton) {
+                Haptics.light.play()
+                viewModel.postponeAuthorization()
+            }
+            .buttonStyle(.plain)
+            .font(.body.weight(.regular))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .foregroundStyle(SemanticColor.textSecondary)
+            .accessibilityID(.pushPrimerLater)
+            .accessibilityLabel(Text(PushStrings.primerLaterButton))
+        }
+    }
+
+    private var postponed: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "bell.slash")
+                .font(.system(size: 44, weight: .regular))
+                .foregroundStyle(SemanticColor.textSecondary)
+                .accessibilityDecorativeIcon()
+            Text(PushStrings.postponedTitle)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(SemanticColor.textPrimary)
+                .multilineTextAlignment(.center)
+                .accessibilityHeader()
+            Text(PushStrings.postponedBody)
+                .font(.callout)
+                .foregroundStyle(SemanticColor.textSecondary)
+                .multilineTextAlignment(.center)
+            Spacer()
+            Button(PushStrings.postponedTurnOnButton) {
+                Haptics.commit.play()
+                Task { await viewModel.requestAuthorization() }
+            }
+            .buttonStyle(.plain)
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(SemanticColor.accent, in: Capsule())
+            .foregroundStyle(.white)
+            .accessibilityID(.pushPostponedTurnOn)
+            .accessibilityLabel(Text(PushStrings.postponedTurnOnButton))
         }
     }
 

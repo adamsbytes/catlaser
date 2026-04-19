@@ -71,7 +71,7 @@ public struct PairingView: View {
     private var contentView: some View {
         switch viewModel.phase {
         case .checkingExisting:
-            busyView(label: nil)
+            busyView(label: PairingStrings.checkingExistingLabel)
         case let .needsCameraPermission(status):
             permissionView(status: status)
         case .scanning:

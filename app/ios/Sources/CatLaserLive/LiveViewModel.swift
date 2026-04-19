@@ -66,6 +66,22 @@ public final class LiveViewModel {
 
     public private(set) var state: LiveViewState = .disconnected
 
+    /// True when the user tapped "Watch live" and then cancelled the
+    /// biometric / passcode prompt before the stream could proceed.
+    /// The VM returns to ``.disconnected`` silently on a cancel (no
+    /// error banner — the user said no, and nagging them with a red
+    /// dialog punishes the explicit choice), but the disconnected
+    /// screen reads the flag and softens its subtitle to "Couldn't
+    /// confirm your identity. Tap Watch live to try again." so the
+    /// user understands *why* nothing happened and where to go next.
+    ///
+    /// Cleared at the top of ``start()`` so any subsequent success
+    /// or failure rewrites the subtitle. Also cleared by
+    /// ``dismissError`` and when the screen hands the VM a
+    /// successful stream start — the flag is only truthful for the
+    /// single intervening disconnected frame.
+    public private(set) var didCancelAuthGate: Bool = false
+
     /// View-facing snapshot of the device's play-session status and
     /// hopper reading. Updated by the broker subscription; renders the
     /// top-of-stream overlay ("Playing now • 1m 20s") and the
@@ -81,6 +97,17 @@ public final class LiveViewModel {
     /// isn't left staring at a spinner that will never resolve.
     public static let connectTimeout: TimeInterval = 30
 
+    /// Wall-clock deadline for the ``.disconnecting`` phase. A healthy
+    /// ``LiveStreamSession.disconnect()`` + best-effort
+    /// ``StopStreamRequest`` settles inside a second; the watchdog
+    /// guards against a wedged LiveKit room or a device that refuses
+    /// to ack the stop request. If the deadline wins, the teardown
+    /// continues in the background (the LiveKit room cleans up on
+    /// its own once the network path recovers) but the UI moves
+    /// back to ``.disconnected`` so the user has a path forward
+    /// instead of a spinner that never resolves.
+    public static let stopTimeout: TimeInterval = 5
+
     /// The device control channel. ``var`` rather than ``let`` so a
     /// supervisor reconnect on the SAME paired device can swap in a
     /// fresh client without tearing down the user-visible streaming
@@ -90,6 +117,7 @@ public final class LiveViewModel {
     private let authGate: AuthGate
     private let liveKitAllowlist: LiveKitHostAllowlist
     private let connectTimeout: TimeInterval
+    private let stopTimeoutInterval: TimeInterval
     private let clock: @Sendable () -> Date
     private var currentSession: (any LiveStreamSession)?
     private var eventsTask: Task<Void, Never>?
@@ -103,6 +131,7 @@ public final class LiveViewModel {
         sessionFactory: @escaping @Sendable () -> any LiveStreamSession,
         eventBroker: DeviceEventBroker? = nil,
         connectTimeout: TimeInterval = LiveViewModel.connectTimeout,
+        stopTimeout: TimeInterval = LiveViewModel.stopTimeout,
         clock: @escaping @Sendable () -> Date = { Date() },
     ) {
         self.deviceClient = deviceClient
@@ -110,6 +139,7 @@ public final class LiveViewModel {
         self.liveKitAllowlist = liveKitAllowlist
         self.sessionFactory = sessionFactory
         self.connectTimeout = connectTimeout
+        self.stopTimeoutInterval = stopTimeout
         self.clock = clock
         if let eventBroker {
             startStatusObservation(broker: eventBroker)
@@ -139,13 +169,23 @@ public final class LiveViewModel {
     public func start() async {
         guard state.canStart else { return }
 
+        // Clear the transient "user cancelled the biometric prompt"
+        // flag at the top of each attempt. If the gate cancels again
+        // below, the flag is re-raised; otherwise the softened
+        // subtitle goes away the moment the user tries again.
+        didCancelAuthGate = false
+
         switch await authGate() {
         case .allowed:
             break
         case .cancelled:
             // User said no. Don't bounce them through an error banner
             // that re-prompts on dismiss — that would punish the
-            // explicit decline. Return to the idle entry point.
+            // explicit decline. Return to the idle entry point, but
+            // raise the transient flag so the disconnected subtitle
+            // tells them the biometric prompt was cancelled (and
+            // implicitly: tap Watch live again to try once more).
+            didCancelAuthGate = true
             state = .disconnected
             return
         case let .denied(reason):
@@ -213,17 +253,89 @@ public final class LiveViewModel {
     /// `.requestingOffer` finds no session yet, a stop during
     /// `.connecting` tears the session down before `.streaming`
     /// arrives, a stop during `.streaming` is the common case.
+    ///
+    /// The teardown is raced against a wall-clock deadline
+    /// (``stopTimeout``) so a wedged LiveKit disconnect or a device
+    /// that refuses to ack ``StopStreamRequest`` cannot pin the user
+    /// on the disconnecting spinner indefinitely. If the deadline
+    /// wins, the in-flight work is left to finish in the background
+    /// and the UI returns to ``.disconnected`` immediately. The
+    /// cooperative teardown's own ``tearDownSession`` clears
+    /// ``currentSession`` *before* awaiting the session's disconnect,
+    /// so a later ``start()`` cannot collide with a stale teardown
+    /// overwriting the fresh session reference.
     public func stop() async {
         guard state.canStop else { return }
         state = .disconnecting
         cancelConnectTimeout()
-        await tearDownSession()
-        await rollbackDeviceStream()
+        await raceTeardownAgainstStopTimeout()
         state = .disconnected
     }
 
-    /// Dismiss a `.failed` state. No-op otherwise.
+    /// Run the stop-path teardown (LiveKit disconnect + best-effort
+    /// ``StopStreamRequest``) and return when either the teardown
+    /// completes or the ``stopTimeout`` wall-clock deadline fires,
+    /// whichever is first.
+    ///
+    /// The teardown runs as an **unstructured** ``Task`` so a stuck
+    /// ``LiveStreamSession.disconnect()`` (non-cooperative on
+    /// cancellation) cannot hold ``stop()`` open past the wall-clock
+    /// deadline. Using a structured ``TaskGroup`` here would defeat
+    /// the whole watchdog: ``withTaskGroup`` only returns when every
+    /// child task has completed, so a hung child would pin the
+    /// caller regardless of ``cancelAll``.
+    ///
+    /// If the deadline wins, the teardown task keeps running in the
+    /// background — LiveKit cleans up on its own once the network
+    /// path recovers, and ``tearDownSession`` has already nulled
+    /// ``currentSession`` up-front so a subsequent ``start()``
+    /// cannot collide with a late-arriving assignment.
+    private func raceTeardownAgainstStopTimeout() async {
+        let deadline = stopTimeoutInterval
+        let nanos = UInt64(max(deadline, 0) * 1_000_000_000)
+
+        let teardownTask = Task { [weak self] in
+            await self?.performStopTeardown()
+        }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumer = OneShotResumer(continuation: continuation)
+            Task {
+                _ = await teardownTask.value
+                resumer.resume()
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: nanos)
+                resumer.resume()
+            }
+        }
+
+        // Deadline-won path: signal cooperative cancellation on the
+        // teardown so a checked-cancellation awaitable can exit
+        // early. Non-cooperative callees (LiveKit's own disconnect
+        // on some code paths) still run to completion in the
+        // background — that is explicitly the contract of the
+        // watchdog. When the teardown wins this cancel is a no-op.
+        teardownTask.cancel()
+    }
+
+    /// The actual teardown body. Extracted from ``stop()`` so the
+    /// watchdog race can wrap it in a ``TaskGroup``. Must remain
+    /// idempotent against cancellation and re-entry — a second
+    /// invocation while the first is still in flight would simply
+    /// tear down whatever state is left.
+    private func performStopTeardown() async {
+        await tearDownSession()
+        await rollbackDeviceStream()
+    }
+
+    /// Dismiss a `.failed` state. No-op otherwise. Also clears the
+    /// ``didCancelAuthGate`` flag so a user who lands on the error
+    /// screen after a cancel-then-denial sequence doesn't see a
+    /// stale "couldn't confirm" subtitle once the error is
+    /// dismissed.
     public func dismissError() {
+        didCancelAuthGate = false
         if case .failed = state {
             state = .disconnected
         }
@@ -385,10 +497,18 @@ public final class LiveViewModel {
         eventsTask?.cancel()
         eventsTask = nil
         cancelConnectTimeout()
-        if let session = currentSession {
-            await session.disconnect()
-        }
+        // Claim ownership of ``currentSession`` BEFORE awaiting the
+        // LiveKit-side disconnect. If the caller's ``stop()``
+        // watchdog expires and a subsequent ``start()`` assigns a
+        // fresh session to ``currentSession``, our slow disconnect
+        // path must not later null it back out — the new session
+        // would be detached from the view and the user would watch
+        // a black frame where the stream should be. Capturing the
+        // session locally and nulling the property up-front makes
+        // this race impossible.
+        guard let session = currentSession else { return }
         currentSession = nil
+        await session.disconnect()
     }
 
     /// Arm the wall-clock watchdog for the `.connecting` phase.
@@ -478,6 +598,30 @@ public final class LiveViewModel {
                 await rollbackDeviceStream()
             }
         }
+    }
+}
+
+// MARK: - One-shot continuation resumer
+
+/// Race helper for ``raceTeardownAgainstStopTimeout``. Two sibling
+/// observer tasks each call ``resume()`` when their branch finishes;
+/// only the first call resumes the checked continuation, the rest are
+/// silent no-ops. Without this guard the continuation would trap on
+/// the second ``resume`` invocation.
+private final class OneShotResumer: @unchecked Sendable {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private let lock = NSLock()
+
+    init(continuation: CheckedContinuation<Void, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume() {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
     }
 }
 

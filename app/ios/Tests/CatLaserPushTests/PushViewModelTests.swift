@@ -249,6 +249,80 @@ struct PushViewModelTests {
         vm.stop()
     }
 
+    // MARK: - postponeAuthorization()
+
+    /// "Not now" on the primer must land in ``.postponed`` without
+    /// touching the OS prompt. The OS grant stays ``.notDetermined``
+    /// so the one-shot system sheet is still available on a later
+    /// ``requestAuthorization()``.
+    @MainActor
+    @Test
+    func postponeFromPrimerKeepsOSGrantUntouched() async throws {
+        let bridge = StubOSBridge(initial: .notDetermined)
+        let registrar = PushTokenRegistrar()
+        let vm = Self.makeViewModel(bridge: bridge, registrar: registrar)
+        await vm.start()
+        #expect(vm.state == .idle)
+
+        vm.postponeAuthorization()
+
+        #expect(vm.state == .postponed)
+        #expect(vm.authorization == .notDetermined)
+        #expect(await bridge.promptCallCount == 0,
+                "postpone must never invoke the OS permission prompt")
+        #expect(await bridge.registerForRemoteCallCount == 0)
+        vm.stop()
+    }
+
+    /// The postponed pane's "Turn on notifications" button re-opens
+    /// the primer flow by calling ``requestAuthorization()`` directly.
+    /// That transition must still produce the OS prompt and, on
+    /// grant, kick APNs registration — identical to the primary path.
+    @MainActor
+    @Test
+    func requestAuthorizationFromPostponedReopensPrimerFlow() async throws {
+        let bridge = StubOSBridge(
+            initial: .notDetermined,
+            promptBehaviour: .returning(.authorized),
+        )
+        let registrar = PushTokenRegistrar()
+        let vm = Self.makeViewModel(bridge: bridge, registrar: registrar)
+        await vm.start()
+        vm.postponeAuthorization()
+        #expect(vm.state == .postponed)
+
+        await vm.requestAuthorization()
+
+        #expect(vm.state == .awaitingAPNsToken)
+        #expect(vm.authorization == .authorized)
+        #expect(await bridge.promptCallCount == 1)
+        #expect(await bridge.registerForRemoteCallCount == 1)
+        vm.stop()
+    }
+
+    /// Postpone must NOT backtrack a terminal state. A VM that is
+    /// already registered, denied, or busy has no business showing
+    /// the primer pane, so the method silently no-ops.
+    @MainActor
+    @Test
+    func postponeIsNoOpOutsideIdle() async throws {
+        let bridge = StubOSBridge(
+            initial: .notDetermined,
+            promptBehaviour: .returning(.denied),
+        )
+        let registrar = PushTokenRegistrar()
+        let vm = Self.makeViewModel(bridge: bridge, registrar: registrar)
+        await vm.start()
+        await vm.requestAuthorization()
+        #expect(vm.state == .authorizationDenied)
+
+        vm.postponeAuthorization()
+
+        #expect(vm.state == .authorizationDenied,
+                "postpone must not overwrite a terminal denial state")
+        vm.stop()
+    }
+
     // MARK: - handleDidRegister / handleDidFailToRegister
 
     @MainActor

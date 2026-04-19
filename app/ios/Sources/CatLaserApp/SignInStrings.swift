@@ -22,6 +22,12 @@ public enum SignInStrings {
     public static let emailButton = "Continue with email"
     public static let dividerLabel = "or"
     public static let emailSheetTitle = "Sign in by email"
+    /// Pre-send body copy on the email-entry sheet. The value-
+    /// proposition framing belongs HERE, before the link has been
+    /// sent; the post-send expiry-warning ``emailSentHint`` belongs
+    /// on the confirmation view only.
+    public static let emailSheetPrompt =
+        "One-tap sign-in. We'll email you a link — no password needed."
     public static let emailFieldLabel = "Email"
     public static let emailFieldPlaceholder = "you@example.com"
     public static let emailSendButton = "Send sign-in link"
@@ -36,6 +42,16 @@ public enum SignInStrings {
     public static let retryButton = "Try again"
     public static let cancelButton = "Cancel"
     public static let errorBannerTitle = "Sign-in failed"
+
+    /// Title shown on the full-screen cover when a Universal Link is
+    /// being verified against the server (cold start off a tapped
+    /// email link, or the in-session transition). Without this cover
+    /// the sign-in buttons stay visible and tappable while the
+    /// verification is running; users had no feedback that their tap
+    /// on the email link had done anything.
+    public static let verifyingMagicLinkTitle = "Signing you in…"
+    public static let verifyingMagicLinkSubtitle =
+        "Checking your sign-in link. This usually takes a moment."
 
     public static func emailSentBody(_ address: String) -> String {
         "We sent a sign-in link to \(address)."

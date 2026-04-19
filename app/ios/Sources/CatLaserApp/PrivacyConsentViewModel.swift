@@ -30,11 +30,19 @@ public final class PrivacyConsentViewModel {
     private let observability: Observability?
     private let onCompletion: @MainActor () -> Void
 
+    /// Both toggles default to ``false``. An opt-out-by-default
+    /// surface is the only posture that survives GDPR / App Store
+    /// "no pre-checked consent" scrutiny; the screen's subtitle
+    /// acknowledges the default so the user is never confused about
+    /// which direction of the switch is the deliberate choice.
+    /// Tests that want to exercise the opt-in path simply pass
+    /// ``initialCrashReporting: true`` and / or
+    /// ``initialTelemetry: true`` directly.
     public init(
         consentStore: any ConsentStore,
         observability: Observability?,
-        initialCrashReporting: Bool = true,
-        initialTelemetry: Bool = true,
+        initialCrashReporting: Bool = false,
+        initialTelemetry: Bool = false,
         onCompletion: @escaping @MainActor () -> Void,
     ) {
         self.consentStore = consentStore

@@ -273,35 +273,235 @@ struct ScheduleViewModelTests {
         #expect(draftSet.isDirty)
     }
 
+    // MARK: - toggleEnabled: immediate commit
+
+    /// A row toggle on a synced baseline row commits atomically: the
+    /// SetScheduleRequest carries the baseline with only the flipped
+    /// flag, the device's reply becomes the new baseline, and
+    /// ``isDirty`` stays false so no stale "Save" pill is advertised.
     @Test
-    func toggleEnabledFlipsFlag() async throws {
-        let entry = makeEntry(id: "morning", enabled: true)
+    func toggleEnabledCommitsImmediately() async throws {
+        let entry = makeEntry(id: "morning", startMinute: 480, durationMin: 15, enabled: true)
+        let savedRequest = LockedSetScheduleCapture()
+        let setCount = LockedCounter()
         let (vm, _, server, client) = try await makeHarness { request in
             switch request.request {
-            case .getSchedule: return self.reply(entries: [entry])
-            default: return .error(code: 2, message: "unexpected")
+            case .getSchedule:
+                return self.reply(entries: [entry])
+            case let .setSchedule(req):
+                setCount.increment()
+                savedRequest.set(req.entries)
+                return self.reply(entries: req.entries)
+            default:
+                return .error(code: 2, message: "unexpected")
             }
         }
         defer { teardown(server: server, client: client) }
 
         await vm.start()
-        vm.toggleEnabled(id: "morning")
-        guard case let .loaded(draftSet, _, _) = vm.state else {
-            Issue.record("expected .loaded after toggle")
+        await vm.toggleEnabled(id: "morning")
+
+        guard case let .loaded(draftSet, isRefreshing, isSaving) = vm.state else {
+            Issue.record("expected .loaded after toggle, got \(vm.state)")
             return
         }
+        #expect(!isRefreshing)
+        #expect(!isSaving)
+        #expect(setCount.value == 1,
+                "a row toggle must fire exactly one SetScheduleRequest")
         #expect(draftSet.entries.first?.enabled == false)
-        #expect(draftSet.isDirty)
-        vm.toggleEnabled(id: "morning")
-        // Flipping back exactly matches the baseline — isDirty
-        // drops to false so the Save button disables itself.
-        guard case let .loaded(restored, _, _) = vm.state else {
-            Issue.record("expected .loaded after second toggle")
+        #expect(draftSet.baseline.first?.enabled == false,
+                "baseline must absorb the device reply so isDirty stays false")
+        #expect(!draftSet.isDirty)
+        #expect(vm.lastActionError == nil)
+
+        let sent = savedRequest.get()
+        #expect(sent.count == 1)
+        #expect(sent.first?.entryID == "morning")
+        #expect(sent.first?.enabled == false)
+    }
+
+    /// A transport failure on the immediate commit must revert the
+    /// optimistic flip — the user sees the switch snap back to its
+    /// original position and the banner surfaces the diagnostic.
+    @Test
+    func toggleEnabledRollsBackOnFailure() async throws {
+        let entry = makeEntry(id: "morning", enabled: true)
+        let setCount = LockedCounter()
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule:
+                return self.reply(entries: [entry])
+            case .setSchedule:
+                setCount.increment()
+                return .error(code: 99, message: "transient")
+            default:
+                return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        await vm.toggleEnabled(id: "morning")
+
+        guard case let .loaded(draftSet, _, isSaving) = vm.state else {
+            Issue.record("expected .loaded after toggle failure, got \(vm.state)")
             return
         }
-        #expect(restored.entries.first?.enabled == true)
-        #expect(!restored.isDirty,
-                "toggling twice must restore baseline equality")
+        #expect(!isSaving)
+        #expect(setCount.value == 1)
+        #expect(draftSet.entries.first?.enabled == true,
+                "a failed commit must revert the optimistic flip")
+        #expect(draftSet.baseline.first?.enabled == true)
+        #expect(!draftSet.isDirty,
+                "rollback restores pre-toggle equality — no stale dirty flag")
+        #expect(vm.lastActionError != nil)
+    }
+
+    /// A row added locally (never synced) has no baseline counterpart.
+    /// A toggle on such a row falls back to a local-only mutation —
+    /// the two-phase add flow applies until the main Save lands the
+    /// new row.
+    @Test
+    func toggleEnabledOnUnsyncedEntryIsLocalOnly() async throws {
+        let setCount = LockedCounter()
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule:
+                return self.reply(entries: [])
+            case .setSchedule:
+                setCount.increment()
+                return self.reply(entries: [])
+            default:
+                return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        guard let newID = vm.addEntry() else {
+            Issue.record("addEntry should have returned an id")
+            return
+        }
+
+        await vm.toggleEnabled(id: newID)
+
+        #expect(setCount.value == 0,
+                "a toggle on an unsynced row must not fire wire traffic")
+        guard case let .loaded(draftSet, _, _) = vm.state else {
+            Issue.record("expected .loaded, got \(vm.state)")
+            return
+        }
+        #expect(draftSet.entries.first?.enabled == false,
+                "the local flip must land on the draft even without a commit")
+        #expect(draftSet.isDirty,
+                "the added row is still pending save; isDirty stays true")
+    }
+
+    /// Toggling one row must not silently commit an unrelated draft
+    /// edit the user was preparing in a sheet. The wire payload carries
+    /// baseline+toggle only; the other pending edit survives on the
+    /// draft so the main Save button still picks it up.
+    @Test
+    func toggleEnabledPreservesOtherPendingDraftEdits() async throws {
+        let alpha = makeEntry(id: "alpha", startMinute: 480, durationMin: 15)
+        let bravo = makeEntry(id: "bravo", startMinute: 720, durationMin: 20)
+        let savedRequest = LockedSetScheduleCapture()
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule:
+                return self.reply(entries: [alpha, bravo])
+            case let .setSchedule(req):
+                savedRequest.set(req.entries)
+                return self.reply(entries: req.entries)
+            default:
+                return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+
+        // Sheet-style edit on alpha: nudged duration up.
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var alphaDraft = draftSet.entries.first(where: { $0.id == "alpha" })
+        else {
+            Issue.record("expected loaded with alpha")
+            return
+        }
+        alphaDraft.durationMinutes = 45
+        vm.updateEntry(alphaDraft)
+
+        // Row toggle on bravo should commit baseline+toggle, not
+        // alpha's pending sheet edit.
+        await vm.toggleEnabled(id: "bravo")
+
+        let sent = savedRequest.get()
+        #expect(sent.count == 2)
+        let sentAlpha = sent.first { $0.entryID == "alpha" }
+        let sentBravo = sent.first { $0.entryID == "bravo" }
+        #expect(sentAlpha?.durationMin == 15,
+                "alpha's baseline duration must be preserved on the wire")
+        #expect(sentBravo?.enabled == false)
+
+        guard case let .loaded(after, _, _) = vm.state else {
+            Issue.record("expected loaded after toggle")
+            return
+        }
+        #expect(after.entries.first(where: { $0.id == "alpha" })?.durationMinutes == 45,
+                "alpha's pending draft edit must survive an unrelated toggle")
+        #expect(after.entries.first(where: { $0.id == "bravo" })?.enabled == false)
+        #expect(after.isDirty,
+                "alpha's pending edit keeps the draft dirty even after bravo committed")
+    }
+
+    /// A toggle issued while a save is already in flight must early-
+    /// exit — the VM guards its single-writer contract on ``isSaving``
+    /// so a rapid second tap does not race the first commit.
+    @Test
+    func toggleEnabledDuringSaveIsDropped() async throws {
+        let setGate = AsyncGate()
+        let entry = makeEntry(id: "morning", startMinute: 480, durationMin: 15)
+        let setCount = LockedCounter()
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule:
+                return self.reply(entries: [entry])
+            case let .setSchedule(req):
+                setCount.increment()
+                setGate.waitBlocking()
+                return self.reply(entries: req.entries)
+            default:
+                return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+
+        // Dirty the draft via a sheet-style edit so the main Save
+        // has something to commit.
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var draft = draftSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
+
+        // Kick the main save and park it on the gate.
+        async let saveTask: Result<Void, ScheduleError> = vm.save()
+        await pollUntil { !vm.state.canRefresh }
+
+        // A row toggle that arrives while the save is parked must
+        // early-exit without firing a second wire call.
+        await vm.toggleEnabled(id: "morning")
+        #expect(setCount.value == 1,
+                "concurrent toggle must not race an in-flight save")
+
+        setGate.signal()
+        _ = await saveTask
     }
 
     @Test
@@ -352,26 +552,37 @@ struct ScheduleViewModelTests {
         defer { teardown(server: server, client: client) }
 
         await vm.start()
-        vm.toggleEnabled(id: "morning")
+        // Sheet-style edit: bump the duration via updateEntry so the
+        // draft diverges from baseline without triggering the
+        // immediate-commit ``toggleEnabled`` path. The main Save then
+        // commits the sheet edit.
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var draft = draftSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
         let outcome = await vm.save()
         if case .success = outcome { /* good */ } else {
             Issue.record("expected .success, got \(outcome)")
         }
 
-        guard case let .loaded(draftSet, isRefreshing, isSaving) = vm.state else {
+        guard case let .loaded(savedSet, isRefreshing, isSaving) = vm.state else {
             Issue.record("expected .loaded after save")
             return
         }
         #expect(!isRefreshing)
         #expect(!isSaving)
-        #expect(!draftSet.isDirty,
+        #expect(!savedSet.isDirty,
                 "successful save must snap baseline to draft so isDirty flips back")
-        #expect(draftSet.entries.first?.enabled == false)
+        #expect(savedSet.entries.first?.durationMinutes == 45)
 
-        // Wire carried the TOGGLED entry, not the original.
+        // Wire carried the edited duration.
         let sent = savedRequest.get()
         #expect(sent.count == 1)
-        #expect(sent.first?.enabled == false)
+        #expect(sent.first?.durationMin == 45)
         #expect(sent.first?.entryID == "morning")
     }
 
@@ -496,19 +707,30 @@ struct ScheduleViewModelTests {
         defer { teardown(server: server, client: client) }
 
         await vm.start()
-        vm.toggleEnabled(id: "morning")
+        // Sheet-style edit via updateEntry so the Save path is what
+        // hits the transport failure. The immediate-commit toggle
+        // path has its own rollback assertion in
+        // ``toggleEnabledRollsBackOnFailure``.
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var draft = draftSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
         let outcome = await vm.save()
         if case .failure = outcome { /* good */ } else {
             Issue.record("expected .failure, got \(outcome)")
         }
-        guard case let .loaded(draftSet, _, isSaving) = vm.state else {
+        guard case let .loaded(afterFail, _, isSaving) = vm.state else {
             Issue.record("expected .loaded after save failure")
             return
         }
         #expect(!isSaving)
-        #expect(draftSet.entries.first?.enabled == false,
+        #expect(afterFail.entries.first?.durationMinutes == 45,
                 "draft must survive transport failure")
-        #expect(draftSet.isDirty,
+        #expect(afterFail.isDirty,
                 "isDirty must remain true so the Save button stays enabled")
         #expect(vm.lastActionError != nil)
     }
@@ -529,7 +751,14 @@ struct ScheduleViewModelTests {
         defer { teardown(server: server, client: client) }
 
         await vm.start()
-        vm.toggleEnabled(id: "morning")
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var draft = draftSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
         let initial = setCount.value
         async let a: Result<Void, ScheduleError> = vm.save()
         async let b: Result<Void, ScheduleError> = vm.save()
@@ -791,7 +1020,14 @@ struct ScheduleViewModelTests {
         defer { teardown(server: server, client: client) }
 
         await vm.start()
-        vm.toggleEnabled(id: "morning")
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var draft = draftSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
         _ = await vm.save()
         #expect(vm.lastActionError != nil)
         vm.dismissActionError()
@@ -822,7 +1058,14 @@ struct ScheduleViewModelTests {
         defer { teardown(server: server, client: client) }
 
         await vm.start()
-        vm.toggleEnabled(id: "morning")
+        guard case let .loaded(draftSet, _, _) = vm.state,
+              var draft = draftSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
         async let saveTask: Result<Void, ScheduleError> = vm.save()
         await pollUntil { !vm.state.canRefresh }
         #expect(!vm.state.canRefresh, "canRefresh must be false while saving")
@@ -851,10 +1094,19 @@ struct ScheduleViewModelTests {
         }
         await vm.start()
 
-        // Edit the draft locally (toggle the existing window off).
-        vm.toggleEnabled(id: "morning")
+        // Edit the draft locally via updateEntry so the dirty state
+        // is local-only; the immediate-commit toggle path would have
+        // fired against the old client before the swap.
+        guard case let .loaded(initialSet, _, _) = vm.state,
+              var draft = initialSet.entries.first
+        else {
+            Issue.record("expected loaded with morning")
+            return
+        }
+        draft.durationMinutes = 45
+        vm.updateEntry(draft)
         guard case let .loaded(beforeSwap, _, _) = vm.state else {
-            Issue.record("expected loaded after start, got \(vm.state)")
+            Issue.record("expected loaded after edit, got \(vm.state)")
             return
         }
         #expect(beforeSwap.isDirty)
@@ -893,10 +1145,10 @@ struct ScheduleViewModelTests {
             return
         }
         #expect(afterSwap.isDirty)
-        #expect(afterSwap.entries.first { $0.id == "morning" }?.enabled == false)
+        #expect(afterSwap.entries.first { $0.id == "morning" }?.durationMinutes == 45)
 
         // Save routes to the NEW client and the captured request
-        // contains the toggled-off entry.
+        // contains the edited duration.
         let outcome = await vm.save()
         if case .success = outcome { /* good */ } else {
             Issue.record("expected save success on new client, got \(outcome)")
@@ -904,7 +1156,7 @@ struct ScheduleViewModelTests {
         let captured = newSetCapture.get()
         #expect(captured.count == 1)
         #expect(captured.first?.entryID == "morning")
-        #expect(captured.first?.enabled == false)
+        #expect(captured.first?.durationMin == 45)
     }
 
     // MARK: - Poll helper

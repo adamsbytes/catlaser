@@ -25,6 +25,16 @@ final class MockLiveStreamSession: LiveStreamSession, @unchecked Sendable {
         case manual
     }
 
+    /// Behaviour for `disconnect()`. Defaults to `.immediate` so
+    /// every existing test that did not care about the stop path
+    /// continues to see the prior behaviour; the `.manual` variant
+    /// parks the caller until the test explicitly resumes and is the
+    /// scaffolding for the stop-watchdog coverage.
+    enum DisconnectBehavior: Sendable {
+        case immediate
+        case manual
+    }
+
     private let state = MockState()
 
     private let eventStream: AsyncStream<LiveStreamEvent>
@@ -63,12 +73,25 @@ final class MockLiveStreamSession: LiveStreamSession, @unchecked Sendable {
     func disconnect() async {
         await state.recordDisconnect()
         eventContinuation.yield(.disconnected(reason: .localRequest))
+        if await state.disconnectBehavior == .manual {
+            await state.awaitManualDisconnect()
+        }
     }
 
     // MARK: - Test controls
 
     func setConnectBehavior(_ behavior: ConnectBehavior) async {
         await state.setConnectBehavior(behavior)
+    }
+
+    func setDisconnectBehavior(_ behavior: DisconnectBehavior) async {
+        await state.setDisconnectBehavior(behavior)
+    }
+
+    /// Unblock any `disconnect()` call parked on the `.manual`
+    /// behaviour. Safe to call when nothing is parked.
+    func releaseManualDisconnect() async {
+        await state.releaseManualDisconnect()
     }
 
     func finishManualConnect(success: Bool) async {
@@ -116,13 +139,19 @@ final class MockLiveStreamSession: LiveStreamSession, @unchecked Sendable {
 
 private actor MockState {
     var connectBehavior: MockLiveStreamSession.ConnectBehavior = .succeed
+    var disconnectBehavior: MockLiveStreamSession.DisconnectBehavior = .immediate
     var connectCount: Int = 0
     var disconnectCount: Int = 0
     var lastCredentials: LiveStreamCredentials?
     private var manualContinuation: CheckedContinuation<Result<Void, any Error>, any Error>?
+    private var manualDisconnectContinuations: [CheckedContinuation<Void, Never>] = []
 
     func setConnectBehavior(_ behavior: MockLiveStreamSession.ConnectBehavior) {
         self.connectBehavior = behavior
+    }
+
+    func setDisconnectBehavior(_ behavior: MockLiveStreamSession.DisconnectBehavior) {
+        self.disconnectBehavior = behavior
     }
 
     func recordConnect(credentials: LiveStreamCredentials) {
@@ -143,6 +172,23 @@ private actor MockState {
     func finishManual(outcome: Result<Void, any Error>) {
         manualContinuation?.resume(returning: outcome)
         manualContinuation = nil
+    }
+
+    /// Park the current ``disconnect()`` call until the test
+    /// releases it. Multiple concurrent disconnects each get their
+    /// own continuation so the release is broadcast cleanly.
+    func awaitManualDisconnect() async {
+        await withCheckedContinuation { continuation in
+            manualDisconnectContinuations.append(continuation)
+        }
+    }
+
+    func releaseManualDisconnect() {
+        let pending = manualDisconnectContinuations
+        manualDisconnectContinuations.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }
 

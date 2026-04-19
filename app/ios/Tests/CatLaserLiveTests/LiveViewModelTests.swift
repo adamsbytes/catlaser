@@ -593,6 +593,149 @@ struct LiveViewModelTests {
         #expect(await session.disconnectCount == 0)
     }
 
+    /// If ``LiveStreamSession.disconnect()`` hangs (wedged LiveKit
+    /// room, dead media server), ``stop()`` MUST still return within
+    /// the ``stopTimeout`` wall clock so the user is not pinned on
+    /// the disconnecting spinner. The watchdog races the teardown
+    /// against a short deadline; if the deadline wins the teardown
+    /// finishes in the background while the UI moves on.
+    @Test
+    func stopWatchdogUnsticksWhenDisconnectHangs() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        let session = MockLiveStreamSession()
+        // Block the device-side StopStreamRequest alongside the
+        // session disconnect so both phases of teardown would hang
+        // without the watchdog.
+        let server = ScriptedDeviceServer(transport: transport, handler: { request in
+            switch request.request {
+            case .startStream:
+                var offer = Catlaser_App_V1_StreamOffer()
+                offer.livekitURL = "wss://livekit.test"
+                offer.subscriberToken = "tok"
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.streamOffer = offer
+                return .reply(event)
+            case .stopStream:
+                return .silent
+            default:
+                return .error(code: 2, message: "unexpected")
+            }
+        })
+        try await client.connect()
+        await server.run()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { session },
+            stopTimeout: 0.25,
+        )
+        await session.setDisconnectBehavior(.manual)
+
+        await vm.start()
+        session.emitStreaming(trackID: "t-wedge")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-wedge")) }
+
+        // Stop must return even though the mock session's disconnect
+        // is parked AND the scripted server never acks stopStream.
+        // If the watchdog is missing, this call blocks forever and
+        // the test times out.
+        let clock = ContinuousClock()
+        let start = clock.now
+        await vm.stop()
+        let elapsed = clock.now - start
+
+        #expect(vm.state == .disconnected)
+        // Elapsed should be close to the 0.25s watchdog, not the
+        // indefinite hang. A generous ceiling absorbs CI scheduling
+        // jitter without making the assertion meaningless.
+        #expect(elapsed < .seconds(2))
+        // The VM must have released its session reference so a
+        // subsequent start cannot collide with the stuck teardown.
+        #expect(!vm.hasActiveSession)
+
+        // Let the manual disconnect complete so the background task
+        // exits cleanly before the test harness tears down.
+        await session.releaseManualDisconnect()
+    }
+
+    /// After the watchdog fires, a subsequent ``start()`` must
+    /// produce a fresh session whose reference is NOT nulled out
+    /// when the stuck prior teardown finally completes. This is
+    /// the load-bearing reason ``tearDownSession`` captures the
+    /// session locally and nulls ``currentSession`` before
+    /// awaiting disconnect.
+    @Test
+    func startAfterWatchdogExpiryDoesNotRaceStaleTeardown() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        let collector = SessionCollector()
+        let server = ScriptedDeviceServer(transport: transport, handler: { request in
+            switch request.request {
+            case .startStream:
+                var offer = Catlaser_App_V1_StreamOffer()
+                offer.livekitURL = "wss://livekit.test"
+                offer.subscriberToken = "tok"
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.streamOffer = offer
+                return .reply(event)
+            case .stopStream:
+                return .silent
+            default:
+                return .error(code: 2, message: "unexpected")
+            }
+        })
+        try await client.connect()
+        await server.run()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: {
+                let session = MockLiveStreamSession()
+                collector.add(session)
+                return session
+            },
+            stopTimeout: 0.15,
+        )
+
+        // First start: session #0 parks its disconnect.
+        await vm.start()
+        let stuck = collector.latest()
+        await stuck.setDisconnectBehavior(.manual)
+        stuck.emitStreaming(trackID: "t-stuck")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-stuck")) }
+
+        await vm.stop()
+        #expect(vm.state == .disconnected)
+
+        // Second start: session #1. If the stale teardown finishes
+        // after this and nulls currentSession, the new stream will
+        // appear torn down; ``hasActiveSession`` would flip back to
+        // false.
+        await vm.start()
+        let fresh = collector.latest()
+        fresh.emitStreaming(trackID: "t-fresh")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-fresh")) }
+
+        // Unblock the stale disconnect. After it completes, the VM
+        // must still consider the fresh session active.
+        await stuck.releaseManualDisconnect()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(vm.hasActiveSession,
+                "a late-arriving stale teardown must not null the fresh session")
+        #expect(vm.state == .streaming(MockTrack(id: "t-fresh")))
+
+        // Clean up the fresh session so the harness exits cleanly.
+        await vm.stop()
+    }
+
     // MARK: - Unsolicited disconnects
 
     @Test
@@ -782,9 +925,59 @@ struct LiveViewModelTests {
 
         await vm.start()
         #expect(vm.state == .disconnected)
+        #expect(vm.didCancelAuthGate,
+                "the transient cancel flag must flip so the view can soften its subtitle")
         #expect(await session.connectCount == 0)
         #expect(handlerCalled.get() == false)
         #expect(!vm.hasActiveSession)
+    }
+
+    /// The transient cancel flag must clear the moment the user taps
+    /// "Watch live" again so the softened subtitle does not persist
+    /// past the next attempt. Even a second cancel re-raises the
+    /// flag freshly; an allowed start clears it and never re-sets.
+    @Test
+    func authGateCancelFlagClearsOnNextStart() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            switch request.request {
+            case .startStream: return self.validOfferResponse()
+            default: return .error(code: 2, message: "unknown")
+            }
+        }
+        try await client.connect()
+        await server.run()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        let counter = AuthGateSequence(outcomes: [.cancelled, .cancelled, .allowed])
+        let collector = SessionCollector()
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: { counter.next() },
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: {
+                let session = MockLiveStreamSession()
+                collector.add(session)
+                return session
+            },
+        )
+
+        // First cancel raises the flag.
+        await vm.start()
+        #expect(vm.didCancelAuthGate)
+
+        // Second cancel: flag stays raised (it was reset at the top
+        // of start() then re-raised on the cancel branch).
+        await vm.start()
+        #expect(vm.didCancelAuthGate)
+
+        // Allow path clears the flag.
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+        #expect(!vm.didCancelAuthGate)
+        await vm.stop()
     }
 
     /// A `denied` result from the gate lands on
@@ -1172,6 +1365,28 @@ struct LiveViewModelTests {
         #expect(LiveViewState.connecting(creds).canStop)
         #expect(!LiveViewState.disconnected.canStop)
         #expect(!LiveViewState.disconnecting.canStop)
+    }
+}
+
+/// Deterministic ordered outcomes for the pre-stream auth gate.
+/// Drives tests that need to walk the gate through a specific
+/// sequence of results (cancel, cancel, allow — for example).
+final class AuthGateSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcomes: [LiveAuthGateOutcome]
+    private var index = 0
+
+    init(outcomes: [LiveAuthGateOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func next() -> LiveAuthGateOutcome {
+        lock.lock()
+        defer { lock.unlock() }
+        guard index < outcomes.count else { return .denied("sequence exhausted") }
+        let outcome = outcomes[index]
+        index += 1
+        return outcome
     }
 }
 

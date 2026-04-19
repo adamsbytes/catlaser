@@ -149,7 +149,7 @@ public struct LiveView: View {
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.white)
                 .accessibilityHeader()
-            Text(LiveViewStrings.disconnectedSubtitle)
+            Text(disconnectedSubtitle)
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.75))
                 .multilineTextAlignment(.center)
@@ -172,6 +172,17 @@ public struct LiveView: View {
         }
         .frame(maxWidth: 420)
         .padding()
+    }
+
+    /// Subtitle shown on the disconnected pane. Normally reads the
+    /// first-time "tap Watch live" copy; after a biometric-cancel
+    /// it reads the softened "couldn't confirm your identity" copy
+    /// so the user knows the cancelled prompt — not a dead button —
+    /// was what blocked the stream.
+    private var disconnectedSubtitle: String {
+        viewModel.didCancelAuthGate
+            ? LiveViewStrings.disconnectedAuthCancelledSubtitle
+            : LiveViewStrings.disconnectedSubtitle
     }
 
     private var loadingContent: some View {
@@ -281,24 +292,22 @@ public struct LiveView: View {
 
     /// Session pill with an animated elapsed-time counter. A
     /// `TimelineView` ticks once per second for the "Playing now"
-    /// phase; the idle / unknown phases render a static label with
-    /// no timer — `TimelineView.explicit` with an empty schedule is
-    /// used so the reduce-motion branch never animates.
+    /// phase; the idle / unknown phases render nothing — the chrome
+    /// stays minimal when a session is not active so the feed reads
+    /// as the primary content.
     @ViewBuilder
     private var sessionStatusPill: some View {
         let status = viewModel.sessionStatus
         switch status.phase {
-        case .unknown:
-            // Nothing yet — hide the pill rather than render "Unknown"
-            // chrome. The connection-status overlay in the tab shell
-            // covers "connecting / waiting" states already.
+        case .unknown, .idle:
+            // Hide the pill for non-playing phases. ``idle`` used to
+            // render an "Idle" label, but a status string leaking out
+            // of the state machine into the production chrome reads
+            // as a loading or half-working screen — Ring / Nest /
+            // Eero all show no chrome when the feed is up but no
+            // session is active. The only pill that should draw is
+            // the ``playing`` counter.
             EmptyView()
-        case .idle:
-            playingPillLabel(
-                label: LiveSessionStatusStrings.idleLabel,
-                dotColor: SemanticColor.textSecondary,
-                accessibility: LiveSessionStatusStrings.idleLabel,
-            )
         case .playing:
             TimelineView(.periodic(from: .now, by: 1.0)) { context in
                 let elapsed = status.sessionStartedAt.map { start in

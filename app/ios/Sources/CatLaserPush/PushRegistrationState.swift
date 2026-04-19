@@ -16,6 +16,18 @@ public enum PushRegistrationState: Sendable, Equatable {
     /// authorization in this session; the view shows a primer screen.
     case idle
 
+    /// User explicitly tapped "Not now" on the primer. The OS has
+    /// never been asked — so ``authorization`` stays
+    /// ``.notDetermined`` and the one-shot OS prompt is still
+    /// available — but the view collapses the primer to a compact
+    /// re-engage row so the surface is not forcing a decision. A
+    /// fresh app launch restarts at ``.idle`` (the VM is rebuilt
+    /// per-session and re-reads authorisation); a tap on the
+    /// re-engage row transitions back to
+    /// ``.requestingAuthorization`` via
+    /// ``PushViewModel/requestAuthorization()``.
+    case postponed
+
     /// OS permission sheet is on-screen. Terminal values land in
     /// ``authorized(not-yet-registered)``, ``authorizationDenied``, or
     /// ``failed``.
@@ -55,7 +67,7 @@ extension PushRegistrationState {
         switch self {
         case .requestingAuthorization, .awaitingAPNsToken, .registering:
             true
-        case .idle, .registered, .authorizationDenied, .failed:
+        case .idle, .postponed, .registered, .authorizationDenied, .failed:
             false
         }
     }
@@ -67,7 +79,7 @@ extension PushRegistrationState {
         switch self {
         case let .registering(token), let .registered(token):
             token
-        case .idle, .requestingAuthorization, .awaitingAPNsToken, .authorizationDenied, .failed:
+        case .idle, .postponed, .requestingAuthorization, .awaitingAPNsToken, .authorizationDenied, .failed:
             nil
         }
     }

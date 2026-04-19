@@ -8,8 +8,8 @@ enum PrivacyConsentStrings {
     )
     static let subtitle = NSLocalizedString(
         "privacy.consent.subtitle",
-        value: "Choose what you want to share. You can change these any time in Settings.",
-        comment: "Subtitle on the privacy consent screen explaining the toggles can be changed later.",
+        value: "Both are off by default — turn on what you're comfortable sharing. You can change these any time in Settings.",
+        comment: "Subtitle on the privacy consent screen; names the opt-out-by-default posture and notes the toggles can be changed later.",
     )
 
     static let crashToggleTitle = NSLocalizedString(

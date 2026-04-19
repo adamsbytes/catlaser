@@ -33,7 +33,13 @@ public struct SignInView: View {
         ZStack {
             SemanticColor.background.ignoresSafeArea()
             mainContent
-                .opacity(emailSentAddress == nil ? 1 : 0)
+                .opacity(isCoverPaneVisible ? 0 : 1)
+                // The cover pane blocks taps on the buttons behind it.
+                // Without this, a user who tapped a Universal Link
+                // while the app was running could still send a second
+                // Apple/Google tap before the verification returned —
+                // a legitimate but accidental double-commit.
+                .allowsHitTesting(!isCoverPaneVisible)
 
             if let address = emailSentAddress {
                 EmailSentView(
@@ -46,13 +52,16 @@ public struct SignInView: View {
                     onUseDifferentEmail: { viewModel.useDifferentEmail() },
                 )
                 .transition(.opacity)
+            } else if isVerifyingMagicLink {
+                VerifyingMagicLinkView()
+                    .transition(.opacity)
             }
         }
         .accessibilityID(.signInRoot)
         .catlaserDynamicTypeBounds()
         .animation(
             CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
-            value: emailSentAddress,
+            value: coverPaneTag,
         )
         .sheet(isPresented: $viewModel.emailSheetPresented) {
             EmailEntrySheet(viewModel: viewModel)
@@ -83,6 +92,37 @@ public struct SignInView: View {
 
     private var isResendingMagicLink: Bool {
         if case .resendingMagicLink = viewModel.phase { true } else { false }
+    }
+
+    /// True while the VM is verifying a Universal-Link-tapped magic
+    /// link. Covers both the in-session case (transition from
+    /// ``.emailSent`` → ``.verifyingMagicLink``) AND the cold-start
+    /// case (app launches off a tapped link; VM starts in ``.idle``
+    /// and ``completeMagicLink(url:)`` flips the phase before the
+    /// main content would otherwise render the sign-in buttons).
+    private var isVerifyingMagicLink: Bool {
+        if case .verifyingMagicLink = viewModel.phase { true } else { false }
+    }
+
+    /// Whether a full-screen cover pane is drawn on top of
+    /// ``mainContent``. Used to both hide the buttons and disable
+    /// their hit-testing so an in-flight verification cannot be
+    /// raced by a stray social-button tap.
+    private var isCoverPaneVisible: Bool {
+        emailSentAddress != nil || isVerifyingMagicLink
+    }
+
+    /// Stable tag for the cover-pane animation. Distinguishes
+    /// "email sent for address X" from "verifying" from "main
+    /// content" so SwiftUI cross-fades cleanly across transitions.
+    private var coverPaneTag: String {
+        if let emailSentAddress {
+            return "emailSent:\(emailSentAddress)"
+        }
+        if isVerifyingMagicLink {
+            return "verifying"
+        }
+        return "main"
     }
 
     private var mainContent: some View {
@@ -311,7 +351,10 @@ private struct EmailEntrySheet: View {
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(SemanticColor.textPrimary)
                     .accessibilityHeader()
-                Text(SignInStrings.emailSentHint)
+                // Pre-send: value statement, not post-send expiry
+                // warning. The "link expires" copy is post-send
+                // context and lives on ``EmailSentView``.
+                Text(SignInStrings.emailSheetPrompt)
                     .font(.callout)
                     .foregroundStyle(SemanticColor.textSecondary)
 
@@ -466,6 +509,45 @@ private struct EmailSentView: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Cover pane rendered while the VM is verifying a tapped Universal
+/// Link. Runs over the main sign-in content so a user who tapped the
+/// email link and returned to the app sees progress instead of the
+/// sign-in buttons apparently still inviting a tap.
+private struct VerifyingMagicLinkView: View {
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            ProgressView()
+                .scaleEffect(1.4)
+                .tint(SemanticColor.accent)
+                .accessibilityLabel(Text(SignInStrings.verifyingMagicLinkTitle))
+                .accessibilityAddTraits(.updatesFrequently)
+
+            VStack(spacing: 8) {
+                Text(SignInStrings.verifyingMagicLinkTitle)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityHeader()
+                Text(SignInStrings.verifyingMagicLinkSubtitle)
+                    .font(.callout)
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Combine the spinner + title into one accessibility element
+        // so VoiceOver reads the state once per focus rather than
+        // three times (spinner / title / subtitle).
+        .accessibilityElement(children: .combine)
     }
 }
 

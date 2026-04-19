@@ -12,6 +12,13 @@ public enum PairingStrings {
     public static let manualEntryPlaceholder = "catlaser://pair?code=..."
     public static let manualSubmitButton = "Pair"
     public static let exchangingLabel = "Connecting to your Catlaser…"
+    /// Busy-state copy for ``PairingPhase.checkingExisting``. The VM
+    /// is doing a keychain read plus a Secure-Enclave-signed ownership
+    /// re-verification against the server; on a cold cellular launch
+    /// that takes noticeable wall time. Labelling the spinner removes
+    /// the "is anything happening?" ambiguity a bare ``ProgressView``
+    /// would create on the paired-launch path.
+    public static let checkingExistingLabel = "Looking for your Catlaser…"
     public static let pairedTitle = "Paired"
     public static let pairedSubtitle = "Your Catlaser is linked to this account."
     public static let unpairButton = "Unpair this Catlaser"

@@ -17,16 +17,6 @@ public enum LiveSessionStatusStrings {
         comment: "Label in the live-view overlay when the device is running a play session.",
     )
 
-    /// Overlay label when the device is connected and idle. Rarely
-    /// shown (the overlay collapses to invisible when idle) but
-    /// surfaced for the tap-to-reveal path when the user explicitly
-    /// brings up the chrome.
-    public static let idleLabel = NSLocalizedString(
-        "live.status.idle",
-        value: "Idle",
-        comment: "Label in the live-view overlay when the device is connected but not running a session.",
-    )
-
     /// Accessibility-friendly long form of the "playing now" state.
     /// Used as the overlay's ``accessibilityLabel`` with an interpolated
     /// elapsed string; VoiceOver reads it rather than the visual

@@ -20,6 +20,17 @@ public enum LiveViewStrings {
         comment: "Subtitle shown on the live-view screen when no stream is active.",
     )
 
+    /// Variant subtitle shown on the disconnected screen right after
+    /// the user cancelled the Face ID / passcode prompt. A common
+    /// cause of cancel is a Face ID misfire (sunglasses, bad angle,
+    /// wet fingers); the copy tells the user the system prompt was
+    /// the blocker, not a tap on "Watch live" that did nothing.
+    public static let disconnectedAuthCancelledSubtitle = NSLocalizedString(
+        "live.disconnected.auth_cancelled.subtitle",
+        value: "Couldn't confirm your identity. Tap Watch live to try again.",
+        comment: "Subtitle shown after the user cancelled the biometric / passcode prompt on the live-view screen.",
+    )
+
     public static let watchLiveButton = NSLocalizedString(
         "live.watch_live.button",
         value: "Watch live",

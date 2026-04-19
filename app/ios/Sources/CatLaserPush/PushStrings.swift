@@ -34,6 +34,26 @@ public enum PushStrings {
         comment: "Dismiss button on the push-notification primer screen.",
     )
 
+    // MARK: - Postponed (user tapped "Not now")
+
+    public static let postponedTitle = NSLocalizedString(
+        "push.postponed.title",
+        value: "Notifications are off",
+        comment: "Title shown after the user tapped \"Not now\" on the primer.",
+    )
+
+    public static let postponedBody = NSLocalizedString(
+        "push.postponed.body",
+        value: "Turn them on any time from here.",
+        comment: "Body copy on the postponed push-notification pane, pointing the user at the re-engage button.",
+    )
+
+    public static let postponedTurnOnButton = NSLocalizedString(
+        "push.postponed.turn_on",
+        value: "Turn on notifications",
+        comment: "Button on the postponed pane that re-opens the primer and triggers the OS permission prompt.",
+    )
+
     // MARK: - In-flight state copy
 
     public static let awaitingTokenLabel = NSLocalizedString(
