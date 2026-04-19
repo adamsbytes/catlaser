@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
 import struct
 import time
@@ -14,9 +15,15 @@ from typing import NamedTuple
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from catlaser_brain.auth.acl import AclStore
 from catlaser_brain.auth.coord_client import AclGrant, AclSnapshot
+from catlaser_brain.auth.handshake_response import (
+    NONCE_LENGTH,
+    build_auth_response_transcript,
+)
+from catlaser_brain.auth.identity import DeviceIdentity
 from catlaser_brain.network.handler import DeviceState, RequestHandler
 from catlaser_brain.network.server import ERR_AUTH_REVOKED, MAX_CLIENTS, AppServer
 from catlaser_brain.network.wire import (
@@ -106,6 +113,21 @@ def _primed_acl(*, grants: tuple[str, ...]) -> AclStore:
     return store
 
 
+def _fresh_nonce() -> bytes:
+    """16-byte cryptographic-random nonce matching the iOS client."""
+    return os.urandom(NONCE_LENGTH)
+
+
+def _make_device_identity() -> DeviceIdentity:
+    """Ephemeral DeviceIdentity for tests.
+
+    Generates a fresh Ed25519 keypair in-memory without touching disk
+    — production uses :class:`DeviceIdentityStore` for persistence
+    but the server only needs the in-memory handle.
+    """
+    return DeviceIdentity.from_private_key(Ed25519PrivateKey.generate())
+
+
 def _build_attestation_header(
     *,
     client: ClientAuth,
@@ -143,6 +165,7 @@ def _perform_handshake(
     *,
     client: ClientAuth,
     timestamp: int | None = None,
+    nonce: bytes | None = None,
 ) -> pb.AuthResponse:
     """Send an AuthRequest, consume the AuthResponse, return it.
 
@@ -150,11 +173,16 @@ def _perform_handshake(
     chance to process the frame — test sockets are non-blocking from
     the server's side, so without the poll the response never lands
     in the client's recv buffer.
+
+    ``nonce`` defaults to a fresh 16-byte value. Tests that want to
+    exercise invalid-nonce behaviour (wrong length, all-zero,
+    attacker-controlled) override it.
     """
     ts = int(time.time()) if timestamp is None else timestamp
     header = _build_attestation_header(client=client, timestamp=ts)
     request = pb.AppRequest()
     request.auth.attestation_header = header
+    request.auth.nonce = _fresh_nonce() if nonce is None else nonce
     _send_request(sock, request)
     server.poll()
     response_event = _recv_event(sock)
@@ -189,8 +217,30 @@ def acl(client_auth: ClientAuth) -> AclStore:
 
 
 @pytest.fixture
-def server(handler: RequestHandler, acl: AclStore) -> Iterator[AppServer]:
-    srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+def device_identity() -> DeviceIdentity:
+    """Fresh DeviceIdentity (Ed25519 keypair) for the default server.
+
+    Constructed per-test so tests that want to assert cross-handshake
+    signature determinism against a stable key can still inject their
+    own; the default covers the common case where the key's value
+    doesn't matter but must exist.
+    """
+    return _make_device_identity()
+
+
+@pytest.fixture
+def server(
+    handler: RequestHandler,
+    acl: AclStore,
+    device_identity: DeviceIdentity,
+) -> Iterator[AppServer]:
+    srv = AppServer(
+        handler,
+        acl=acl,
+        device_identity=device_identity,
+        bind_addr="127.0.0.1",
+        port=0,
+    )
     srv.start()
     yield srv
     srv.close()
@@ -690,7 +740,13 @@ class TestHandlerErrors:
 
 class TestServerConnection:
     def test_start_and_close(self, handler: RequestHandler, acl: AclStore):
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         assert srv.client_count == 0
         _, port = srv.address
@@ -731,7 +787,13 @@ class TestServerConnection:
         assert server.client_count == 0
 
     def test_context_manager(self, handler: RequestHandler, acl: AclStore):
-        with AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0) as srv:
+        with AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        ) as srv:
             srv.start()
             client = _connect(srv)
             srv.poll()
@@ -740,7 +802,13 @@ class TestServerConnection:
         assert srv.client_count == 0
 
     def test_address_before_start_raises(self, handler: RequestHandler, acl: AclStore):
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         with pytest.raises(RuntimeError, match="not started"):
             _ = srv.address
 
@@ -765,6 +833,7 @@ class TestServerConnection:
         srv = AppServer(
             handler,
             acl=acl,
+            device_identity=_make_device_identity(),
             bind_addr="127.0.0.1",
             port=0,
             bind_interface="this-interface-does-not-exist",
@@ -822,7 +891,13 @@ class TestServerRequestResponse:
         # that cover cross-user isolation live in the dedicated
         # handshake suite below.
         acl = _primed_acl(grants=(client_auth.spki_b64,))
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             c1 = _connect_authenticated(srv, client_auth)
@@ -855,7 +930,13 @@ class TestServerBroadcast:
         client_auth: ClientAuth,
     ):
         acl = _primed_acl(grants=(client_auth.spki_b64,))
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             c1 = _connect_authenticated(srv, client_auth)
@@ -885,7 +966,13 @@ class TestServerBroadcast:
         client_auth: ClientAuth,
     ):
         acl = _primed_acl(grants=(client_auth.spki_b64,))
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             c1 = _connect_authenticated(srv, client_auth)
@@ -998,7 +1085,13 @@ class TestServerHandshake:
         # Client's SPKI is not seeded into the ACL.
         client = _make_client_auth()
         acl = _primed_acl(grants=())
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             sock = _connect(srv)
@@ -1017,7 +1110,13 @@ class TestServerHandshake:
     ):
         # Unprimed store: no snapshot has been applied yet.
         unprimed = AclStore()
-        srv = AppServer(handler, acl=unprimed, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=unprimed,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             sock = _connect(srv)
@@ -1080,6 +1179,7 @@ class TestServerHandshake:
         server.poll()
         request = pb.AppRequest()
         request.auth.attestation_header = header
+        request.auth.nonce = _fresh_nonce()
         _send_request(sock, request)
         server.poll()
         event = _recv_event(sock)
@@ -1119,6 +1219,7 @@ class TestServerHandshake:
         server.poll()
         request = pb.AppRequest()
         request.auth.attestation_header = header
+        request.auth.nonce = _fresh_nonce()
         _send_request(sock, request)
         server.poll()
         event = _recv_event(sock)
@@ -1161,12 +1262,188 @@ class TestServerHandshake:
             client=client_auth,
             timestamp=int(time.time()),
         )
+        second.auth.nonce = _fresh_nonce()
         _send_request(sock, second)
         server.poll()
         event = _recv_event(sock)
         assert event.auth_response.ok is False
         assert event.auth_response.reason == "DEVICE_AUTH_ALREADY_AUTHORIZED"
         sock.close()
+
+
+class TestServerHandshakeResponseSigning:
+    """Device signs AuthResponse with its Ed25519 key.
+
+    The one-way handshake (app attests to device) is not enough for a
+    feed-into-the-home camera: an impostor server sitting where the
+    Tailscale endpoint should be could accept any client without
+    proving its own identity. The device's AuthResponse is now signed
+    over a transcript the app can verify against the public key the
+    coordination server published at pairing time.
+    """
+
+    def test_accept_response_carries_valid_signature(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+        device_identity: DeviceIdentity,
+    ) -> None:
+        # Happy path: the AuthResponse echoes the request nonce,
+        # carries a non-empty signature over the canonical transcript,
+        # and a signed_at timestamp within a reasonable skew of now.
+        nonce = _fresh_nonce()
+        before_ns = time.time_ns()
+        sock = _connect(server)
+        server.poll()
+        response = _perform_handshake(sock, server, client=client_auth, nonce=nonce)
+        after_ns = time.time_ns()
+        assert response.ok is True
+        assert response.nonce == nonce
+        assert len(response.signature) == 64
+        assert before_ns <= response.signed_at_unix_ns <= after_ns
+
+        transcript = build_auth_response_transcript(
+            nonce=nonce,
+            signed_at_unix_ns=response.signed_at_unix_ns,
+            ok=True,
+            reason="",
+        )
+        # Verify raises InvalidSignature on failure; success is the
+        # absence of an exception.
+        device_identity.private_key.public_key().verify(response.signature, transcript)
+        sock.close()
+
+    def test_reject_response_also_carries_valid_signature(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+        device_identity: DeviceIdentity,
+    ) -> None:
+        # A rejection path (skew exceeded) also signs so the app can
+        # distinguish "the real device refused me" from "an impostor
+        # refused me" — only the real device's signature validates.
+        nonce = _fresh_nonce()
+        stale_ts = int(time.time()) - 120
+        sock = _connect(server)
+        server.poll()
+        response = _perform_handshake(
+            sock,
+            server,
+            client=client_auth,
+            timestamp=stale_ts,
+            nonce=nonce,
+        )
+        assert response.ok is False
+        assert response.reason == "DEVICE_AUTH_SKEW_EXCEEDED"
+        assert response.nonce == nonce
+        assert len(response.signature) == 64
+
+        transcript = build_auth_response_transcript(
+            nonce=nonce,
+            signed_at_unix_ns=response.signed_at_unix_ns,
+            ok=False,
+            reason="DEVICE_AUTH_SKEW_EXCEEDED",
+        )
+        device_identity.private_key.public_key().verify(response.signature, transcript)
+        sock.close()
+
+    def test_wrong_length_nonce_rejected_before_crypto(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+        device_identity: DeviceIdentity,
+    ) -> None:
+        # A 15-byte nonce never lets the device sign a full-width
+        # transcript. The server returns NONCE_INVALID and echoes the
+        # truncated value verbatim so the app's verifier sees "this
+        # was the server's complaint" rather than a dangling response
+        # with no nonce.
+        short_nonce = b"\x00" * (NONCE_LENGTH - 1)
+        sock = _connect(server)
+        server.poll()
+        response = _perform_handshake(
+            sock,
+            server,
+            client=client_auth,
+            nonce=short_nonce,
+        )
+        assert response.ok is False
+        assert response.reason == "DEVICE_AUTH_NONCE_INVALID"
+        assert response.nonce == short_nonce
+        transcript = build_auth_response_transcript(
+            nonce=short_nonce,
+            signed_at_unix_ns=response.signed_at_unix_ns,
+            ok=False,
+            reason="DEVICE_AUTH_NONCE_INVALID",
+        )
+        device_identity.private_key.public_key().verify(response.signature, transcript)
+        sock.close()
+
+    def test_empty_nonce_rejected(
+        self,
+        server: AppServer,
+        client_auth: ClientAuth,
+    ) -> None:
+        # Omitting the nonce entirely (same as the pre-v4 wire shape)
+        # is rejected — no legitimate client can produce an empty
+        # field because the iOS SecRandomCopyBytes call is sized to
+        # NONCE_LENGTH.
+        sock = _connect(server)
+        server.poll()
+        response = _perform_handshake(
+            sock,
+            server,
+            client=client_auth,
+            nonce=b"",
+        )
+        assert response.ok is False
+        assert response.reason == "DEVICE_AUTH_NONCE_INVALID"
+        assert response.nonce == b""
+        sock.close()
+
+    def test_signature_distinguishes_between_device_keys(
+        self,
+        handler: RequestHandler,
+        client_auth: ClientAuth,
+    ) -> None:
+        # Two servers carrying different Ed25519 keys produce
+        # signatures that validate under *their own* public key only.
+        # This is the invariant the app relies on when verifying: a
+        # response signed by any key other than the one the
+        # coordination server published at pairing time fails.
+        acl = _primed_acl(grants=(client_auth.spki_b64,))
+        identity_a = _make_device_identity()
+        identity_b = _make_device_identity()
+        srv_a = AppServer(
+            handler,
+            acl=acl,
+            device_identity=identity_a,
+            bind_addr="127.0.0.1",
+            port=0,
+        )
+        srv_a.start()
+        try:
+            nonce = _fresh_nonce()
+            sock = _connect(srv_a)
+            srv_a.poll()
+            response = _perform_handshake(sock, srv_a, client=client_auth, nonce=nonce)
+            assert response.ok is True
+            transcript = build_auth_response_transcript(
+                nonce=nonce,
+                signed_at_unix_ns=response.signed_at_unix_ns,
+                ok=True,
+                reason="",
+            )
+            # Identity A verifies.
+            identity_a.private_key.public_key().verify(response.signature, transcript)
+            # Identity B rejects.
+            from cryptography.exceptions import InvalidSignature  # noqa: PLC0415
+
+            with pytest.raises(InvalidSignature):
+                identity_b.private_key.public_key().verify(response.signature, transcript)
+            sock.close()
+        finally:
+            srv_a.close()
 
 
 class TestServerAclRevocation:
@@ -1216,7 +1493,13 @@ class TestServerAclRevocation:
         alice = _make_client_auth()
         bob = _make_client_auth()
         acl = _primed_acl(grants=(alice.spki_b64, bob.spki_b64))
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             alice_sock = _connect_authenticated(srv, alice)
@@ -1331,6 +1614,7 @@ class TestServerHandshakeReplay:
         header = _build_attestation_header(client=client_auth, timestamp=timestamp)
         auth_request = pb.AppRequest()
         auth_request.auth.attestation_header = header
+        auth_request.auth.nonce = _fresh_nonce()
         frame_bytes = encode_frame(auth_request.SerializeToString())
 
         # First connection succeeds.
@@ -1400,7 +1684,13 @@ class TestServerHandshakeReplay:
         alice = _make_client_auth()
         bob = _make_client_auth()
         acl = _primed_acl(grants=(alice.spki_b64, bob.spki_b64))
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             timestamp = int(time.time())
@@ -1440,7 +1730,13 @@ class TestServerHandshakeReplay:
         # This is a correctness assertion about layering, not about
         # the cache itself.
         acl = _primed_acl(grants=(client_auth.spki_b64,))
-        srv = AppServer(handler, acl=acl, bind_addr="127.0.0.1", port=0)
+        srv = AppServer(
+            handler,
+            acl=acl,
+            device_identity=_make_device_identity(),
+            bind_addr="127.0.0.1",
+            port=0,
+        )
         srv.start()
         try:
             sock = _connect(srv)
@@ -1474,6 +1770,7 @@ class TestServerHandshakeReplay:
         srv = AppServer(
             handler,
             acl=acl,
+            device_identity=_make_device_identity(),
             bind_addr="127.0.0.1",
             port=0,
             replay_cache=cache,
@@ -1484,6 +1781,7 @@ class TestServerHandshakeReplay:
             header = _build_attestation_header(client=client_auth, timestamp=timestamp)
             auth_request = pb.AppRequest()
             auth_request.auth.attestation_header = header
+            auth_request.auth.nonce = _fresh_nonce()
             frame_bytes = encode_frame(auth_request.SerializeToString())
 
             sock_a = _connect(srv)

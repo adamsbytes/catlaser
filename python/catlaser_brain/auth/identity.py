@@ -74,6 +74,21 @@ class DeviceIdentity:
         """Sign ``message`` with the device's Ed25519 key."""
         return self.private_key.sign(message)
 
+    @classmethod
+    def from_private_key(cls, private_key: Ed25519PrivateKey) -> DeviceIdentity:
+        """Build an in-memory :class:`DeviceIdentity` from a private key.
+
+        Callers that already hold an :class:`Ed25519PrivateKey` — fresh
+        from :meth:`Ed25519PrivateKey.generate` in a test, or loaded
+        from a bespoke storage path — bypass the on-disk
+        :class:`DeviceIdentityStore` entirely. Production code goes
+        through :class:`DeviceIdentityStore.load_or_create` so the
+        file-mode + atomic-write invariants hold; this classmethod
+        exists for tests and for coord-client integration code that
+        receives a key through other means.
+        """
+        return _identity_from_private(private_key)
+
 
 class DeviceIdentityStore:
     """Load or generate the device's Ed25519 keypair on disk.

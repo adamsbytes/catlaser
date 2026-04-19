@@ -29,17 +29,29 @@ import logging
 import select
 import socket
 import threading
+import time
 from typing import TYPE_CHECKING, Final, Self
 
 from google.protobuf.message import DecodeError
 
-from catlaser_brain.auth.handshake import HandshakeError, verify_auth_request
+from catlaser_brain.auth.handshake import (
+    HandshakeError,
+    HandshakeReason,
+    verify_auth_request,
+)
+from catlaser_brain.auth.handshake_response import (
+    NONCE_LENGTH,
+    build_auth_response_transcript,
+)
 from catlaser_brain.auth.replay_cache import ReplayCache
 from catlaser_brain.network.wire import FrameReader, encode_frame
 from catlaser_brain.proto.catlaser.app.v1 import app_pb2 as pb
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from catlaser_brain.auth.acl import AclStore
+    from catlaser_brain.auth.identity import DeviceIdentity
     from catlaser_brain.network.handler import RequestHandler
 
 _logger = logging.getLogger(__name__)
@@ -146,26 +158,31 @@ class AppServer:
         "_bind_addr",
         "_bind_interface",
         "_clients",
+        "_device_identity",
         "_handler",
         "_listen_sock",
+        "_now_ns",
         "_pending_revocations",
         "_pending_revocations_lock",
         "_port",
         "_replay_cache",
     )
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — every kwarg is a distinct dependency
         self,
         handler: RequestHandler,
         *,
         acl: AclStore,
+        device_identity: DeviceIdentity,
         bind_addr: str,
         port: int = 9820,
         bind_interface: str | None = None,
         replay_cache: ReplayCache | None = None,
+        now_ns: Callable[[], int] | None = None,
     ) -> None:
         self._handler = handler
         self._acl = acl
+        self._device_identity = device_identity
         self._bind_addr = bind_addr
         self._bind_interface = bind_interface
         self._port = port
@@ -177,6 +194,11 @@ class AppServer:
         # size, reject on the second handshake) inject one; production
         # callers rely on the default.
         self._replay_cache = replay_cache if replay_cache is not None else ReplayCache()
+        # Clock reader for the `signed_at_unix_ns` field on every
+        # AuthResponse. The default uses the monotonic wall clock
+        # (:func:`time.time_ns`); tests override so the app-side skew
+        # assertions are deterministic.
+        self._now_ns = now_ns if now_ns is not None else time.time_ns
         # Set of SPKIs the ACL poller has flagged as revoked since the
         # last :meth:`poll` tick. The poller runs on its own thread;
         # the queue + lock pair lets it notify us asynchronously while
@@ -455,6 +477,7 @@ class AppServer:
                 ok=False,
                 reason="DEVICE_AUTH_ALREADY_AUTHORIZED",
                 request_id=request.request_id,
+                nonce=bytes(request.auth.nonce),
             )
             self._disconnect(fd)
             return
@@ -486,6 +509,30 @@ class AppServer:
             )
             self._disconnect(fd)
             return
+        nonce = bytes(request.auth.nonce)
+        # Nonce validation is upfront, before any crypto or ACL work.
+        # A wrong-length nonce cannot bind a legitimate signature to a
+        # fresh challenge, so the device refuses to sign *any*
+        # transcript for it — otherwise an attacker could coax the
+        # device into minting a signature over a shorter prefix that
+        # happens to serialize inside a replayed response for a
+        # different exchange.
+        if len(nonce) != NONCE_LENGTH:
+            _logger.info(
+                "app client handshake failed: %s (got %d bytes) from %s",
+                HandshakeReason.NONCE_INVALID.value,
+                len(nonce),
+                client.addr,
+            )
+            self._send_auth_response(
+                client,
+                ok=False,
+                reason=HandshakeReason.NONCE_INVALID.value,
+                request_id=request.request_id,
+                nonce=nonce,
+            )
+            self._disconnect(fd)
+            return
         attestation_header = request.auth.attestation_header
         try:
             authorized = verify_auth_request(
@@ -504,6 +551,7 @@ class AppServer:
                 ok=False,
                 reason=error.reason.value,
                 request_id=request.request_id,
+                nonce=nonce,
             )
             self._disconnect(fd)
             return
@@ -513,6 +561,7 @@ class AppServer:
             ok=True,
             reason="",
             request_id=request.request_id,
+            nonce=nonce,
         )
 
     def _send_auth_response(
@@ -522,6 +571,7 @@ class AppServer:
         ok: bool,
         reason: str,
         request_id: int,
+        nonce: bytes,
     ) -> None:
         """Emit a single AuthResponse frame back to ``client``.
 
@@ -531,15 +581,42 @@ class AppServer:
         to correlate, in which case the frame lands on its
         unsolicited-event stream).
 
+        ``nonce`` is the raw bytes the client sent in
+        :attr:`AuthRequest.nonce`. It is echoed verbatim and covered
+        by the Ed25519 signature below. Every reject path (malformed
+        attestation, ACL mismatch, replay, wrong-length nonce)
+        re-uses the received bytes as-is — a shorter or longer value
+        is still returned byte-for-byte so the app's verifier can
+        distinguish "my request got rejected" from "an impostor
+        injected a response."
+
+        The signed transcript commits to (nonce, signed_at_unix_ns,
+        ok, reason) under the device's Ed25519 key. The app verifies
+        the signature using the public key the coordination server
+        republished at pairing time; a signature from any other key
+        (or a tampered transcript) fails verification and the app
+        tears the connection down.
+
         Failures to write are swallowed here — the caller that knows
         the handshake outcome is the one that decides whether to
         disconnect afterward, and a socket that can't accept a
-        40-byte response is about to be dropped anyway.
+        response is about to be dropped anyway.
         """
+        signed_at_unix_ns = self._now_ns()
+        transcript = build_auth_response_transcript(
+            nonce=nonce,
+            signed_at_unix_ns=signed_at_unix_ns,
+            ok=ok,
+            reason=reason,
+        )
+        signature = self._device_identity.sign(transcript)
         event = pb.DeviceEvent()
         event.request_id = request_id
         event.auth_response.ok = ok
         event.auth_response.reason = reason
+        event.auth_response.nonce = nonce
+        event.auth_response.signature = signature
+        event.auth_response.signed_at_unix_ns = signed_at_unix_ns
         frame = encode_frame(event.SerializeToString())
         if not self._send_to(client, frame):
             # Send failures land the client in `_send_to`'s error

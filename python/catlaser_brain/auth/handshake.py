@@ -82,6 +82,14 @@ class HandshakeReason(StrEnum):
     # connection manager's next reconnect signs a fresh attestation
     # with a new timestamp and proceeds.
     REPLAY_DETECTED = "DEVICE_AUTH_REPLAY_DETECTED"
+    # ``AuthRequest.nonce`` was absent, empty, or not exactly
+    # :data:`~catlaser_brain.auth.handshake_response.NONCE_LENGTH`
+    # bytes. A legitimate app generates a fresh 16-byte challenge
+    # from ``SecRandomCopyBytes`` and never omits it; any other
+    # shape is either a stale client or an on-path attacker stripping
+    # the field to coerce the device into signing an empty-nonce
+    # transcript (which would still bind to nothing useful).
+    NONCE_INVALID = "DEVICE_AUTH_NONCE_INVALID"
 
 
 class HandshakeError(Exception):

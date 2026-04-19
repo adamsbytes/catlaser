@@ -109,18 +109,35 @@ class AppRequest(_message.Message):
     ) -> None: ...
 
 class AuthRequest(_message.Message):
-    __slots__ = ["attestation_header"]
+    __slots__ = ["attestation_header", "nonce"]
     ATTESTATION_HEADER_FIELD_NUMBER: _ClassVar[int]
+    NONCE_FIELD_NUMBER: _ClassVar[int]
     attestation_header: str
-    def __init__(self, attestation_header: _Optional[str] = ...) -> None: ...
+    nonce: bytes
+    def __init__(
+        self, attestation_header: _Optional[str] = ..., nonce: _Optional[bytes] = ...
+    ) -> None: ...
 
 class AuthResponse(_message.Message):
-    __slots__ = ["ok", "reason"]
+    __slots__ = ["nonce", "ok", "reason", "signature", "signed_at_unix_ns"]
+    NONCE_FIELD_NUMBER: _ClassVar[int]
     OK_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    SIGNATURE_FIELD_NUMBER: _ClassVar[int]
+    SIGNED_AT_UNIX_NS_FIELD_NUMBER: _ClassVar[int]
+    nonce: bytes
     ok: bool
     reason: str
-    def __init__(self, ok: bool = ..., reason: _Optional[str] = ...) -> None: ...
+    signature: bytes
+    signed_at_unix_ns: int
+    def __init__(
+        self,
+        ok: bool = ...,
+        reason: _Optional[str] = ...,
+        nonce: _Optional[bytes] = ...,
+        signature: _Optional[bytes] = ...,
+        signed_at_unix_ns: _Optional[int] = ...,
+    ) -> None: ...
 
 class CatProfile(_message.Message):
     __slots__ = [
