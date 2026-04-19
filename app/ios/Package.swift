@@ -30,6 +30,10 @@ let package = Package(
             targets: ["CatLaserPairing"],
         ),
         .library(
+            name: "CatLaserHistory",
+            targets: ["CatLaserHistory"],
+        ),
+        .library(
             name: "CatLaserApp",
             targets: ["CatLaserApp"],
         ),
@@ -214,11 +218,37 @@ let package = Package(
             ],
             path: "Tests/CatLaserPairingTests",
         ),
+        // History + cat profiles. Owns the Cats / Sessions screen,
+        // the rename / identify-new sheets, and the unsolicited
+        // ``NewCatDetected`` event subscription. Depends only on
+        // ``CatLaserDevice`` (for ``DeviceClient``) and
+        // ``CatLaserProto``; no UI framework imports outside the
+        // ``HistoryView.swift`` SwiftUI gate, so tests run on Linux
+        // SPM the same as on Darwin.
+        .target(
+            name: "CatLaserHistory",
+            dependencies: [
+                "CatLaserDevice",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserHistory",
+        ),
+        .testTarget(
+            name: "CatLaserHistoryTests",
+            dependencies: [
+                "CatLaserHistory",
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Tests/CatLaserHistoryTests",
+        ),
         .target(
             name: "CatLaserApp",
             dependencies: [
                 "CatLaserAuth",
                 "CatLaserDevice",
+                "CatLaserHistory",
                 "CatLaserLive",
                 "CatLaserPairing",
             ],
@@ -239,6 +269,7 @@ let package = Package(
                 // the handshake builder producing a device-bound
                 // attestation). Without these deps the invariant
                 // suite cannot exercise the wiring end-to-end.
+                "CatLaserHistory",
                 "CatLaserLive",
                 "CatLaserPairing",
                 // Pairing test support brings the

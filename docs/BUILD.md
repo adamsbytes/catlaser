@@ -83,7 +83,7 @@
   - [X] Signed HTTP client wrapper (SE-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
   - [X] Live view (LiveKit iOS SDK, WebRTC)
   - [X] Device pairing + endpoint persistence (QR pair flow, coordination-server-brokered Tailscale endpoint lookup, Keychain-persisted endpoint, auto-reconnect on network change, connection heartbeat, signed-out → endpoint wipe)
-  - [ ] History + cat profiles (stats, naming, management)
+  - [X] History + cat profiles (stats, naming, management)
   - [ ] Schedule setup (auto-play times, quiet hours)
   - [ ] Push notifications (APNs: play summaries, session alerts, hopper empty)
 

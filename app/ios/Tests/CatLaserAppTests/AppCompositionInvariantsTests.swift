@@ -1,6 +1,7 @@
 import CatLaserAuthTestSupport
 import CatLaserDevice
 import CatLaserDeviceTestSupport
+import CatLaserHistory
 import CatLaserLive
 import CatLaserPairingTestSupport
 import CatLaserProto
@@ -602,6 +603,106 @@ struct AppCompositionInvariantsTests {
             LiveStreamIdentity.expectedPublisherIdentity(forDeviceSlug: "abc-123")
                 == "catlaser-device-abc-123",
         )
+    }
+
+    // MARK: - historyViewModel factory
+
+    /// The history factory must hand back a fresh, idle VM bound to
+    /// the supplied ``DeviceClient``. The VM's events watcher is
+    /// constructed lazily inside ``start()`` so the factory call
+    /// itself is side-effect free — important because the host
+    /// constructs the VM on the main thread before the screen
+    /// appears, and we don't want a network round-trip until then.
+    @MainActor
+    @Test
+    func historyViewModelFactoryReturnsIdleVM() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        let vm = composition.historyViewModel(deviceClient: client)
+        #expect(vm.catsState == .idle)
+        #expect(vm.historyState == .idle)
+        #expect(vm.pendingNewCats.isEmpty)
+        #expect(vm.lastActionError == nil)
+    }
+
+    /// The VM the factory returns must use the SAME clock the
+    /// composition wired in. A divergence between the handshake
+    /// builder's clock and the history VM's clock would surface as
+    /// nonsense default-history ranges (the "30 days from when?"
+    /// question) and as replay-cache misalignment between the two
+    /// surfaces.
+    ///
+    /// We assert by reading the history VM's default range — the
+    /// ``defaultHistoryWindow`` is 30 days, the upper bound MUST be
+    /// the composition's ``fixedClockTimestamp``, and the lower
+    /// bound MUST be 30 days before that. Routing through the
+    /// public ``loadHistory(range:)`` would also work, but reading
+    /// the default range from a freshly-built VM keeps the test
+    /// off the wire.
+    @MainActor
+    @Test
+    func historyViewModelFactoryUsesCompositionClock() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 0.5)
+        try await client.connect()
+        let server = ScriptedDeviceServer(transport: transport) { req in
+            switch req.request {
+            case let .getPlayHistory(query):
+                // Reply OK and capture the bounds via the ack
+                // mechanism below.
+                CapturedRange.shared.set(start: query.startTime, end: query.endTime)
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.playHistory = Catlaser_App_V1_PlayHistoryResponse()
+                return .reply(event)
+            case .getCatProfiles:
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.catProfileList = Catlaser_App_V1_CatProfileList()
+                return .reply(event)
+            default:
+                return .error(code: 99, message: "unexpected")
+            }
+        }
+        await server.run()
+        defer {
+            Task {
+                await server.stop()
+                await client.disconnect()
+            }
+        }
+
+        let vm = composition.historyViewModel(deviceClient: client)
+        await vm.start()
+        let observed = CapturedRange.shared.get()
+        // Composition's fixedClockTimestamp is captured by the
+        // history VM. defaultHistoryWindow is 30 days = 2,592,000s.
+        #expect(observed.end == UInt64(Self.fixedClockTimestamp))
+        #expect(
+            observed.start
+                == UInt64(Self.fixedClockTimestamp)
+                - UInt64(HistoryViewModel.defaultHistoryWindow),
+        )
+    }
+}
+
+/// Process-wide capture for the history-clock invariant test. Lives
+/// at file scope so the scripted server's `@Sendable` handler closure
+/// can write to it without capturing a non-Sendable test fixture.
+private final class CapturedRange: @unchecked Sendable {
+    static let shared = CapturedRange()
+    private let lock = NSLock()
+    private var start: UInt64 = 0
+    private var end: UInt64 = 0
+    func set(start: UInt64, end: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        self.start = start
+        self.end = end
+    }
+
+    func get() -> (start: UInt64, end: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        return (start, end)
     }
 }
 

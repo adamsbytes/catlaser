@@ -1,5 +1,6 @@
 import CatLaserAuth
 import CatLaserDevice
+import CatLaserHistory
 import CatLaserLive
 import CatLaserPairing
 import Foundation
@@ -188,6 +189,24 @@ public struct AppComposition: Sendable {
             liveKitAllowlist: liveKitAllowlist,
             sessionFactory: sessionFactory,
         )
+    }
+
+    /// Construct a ``HistoryViewModel`` wired to the supplied
+    /// ``DeviceClient``. The same client instance threaded through
+    /// ``liveViewModel(pairedDevice:deviceClient:)`` MUST be passed
+    /// here so both screens share the single-consumer event stream
+    /// surface. A second client built behind the back of the
+    /// composition would race the supervisor's reconnect logic and
+    /// silently drop unsolicited ``NewCatDetected`` pushes against
+    /// whichever VM lost the race.
+    ///
+    /// ``@MainActor`` because ``HistoryViewModel`` is MainActor-
+    /// isolated: constructing it off the main thread would require a
+    /// hop anyway, so we surface the constraint at the factory
+    /// boundary.
+    @MainActor
+    public func historyViewModel(deviceClient: DeviceClient) -> HistoryViewModel {
+        HistoryViewModel(deviceClient: deviceClient, clock: clock)
     }
 
     /// Concrete session factory used by ``liveViewModel``. Lives in
@@ -381,6 +400,7 @@ public struct AppComposition: Sendable {
             deviceTransportFactory: deviceTransportFactory,
             pathMonitorFactory: pathMonitorFactory,
             connectionConfiguration: connectionConfiguration,
+            clock: clock,
         )
     }
 
@@ -448,6 +468,12 @@ public struct AppComposition: Sendable {
     private let deviceTransportFactory: DeviceTransportFactory
     private let pathMonitorFactory: @Sendable () -> any NetworkPathMonitor
     private let connectionConfiguration: ConnectionManager.Configuration
+    /// Shared clock source. Captured on the composition so the
+    /// ``handshakeBuilder`` and ``historyViewModel(deviceClient:)``
+    /// factory both observe the same wall-clock — a divergence
+    /// between the two would manifest as nonsense session-history
+    /// ranges or replay-cache misses on slow-clock builds.
+    private let clock: @Sendable () -> Date
 
     private init(
         authCoordinator: AuthCoordinator,
@@ -461,6 +487,7 @@ public struct AppComposition: Sendable {
         deviceTransportFactory: @escaping DeviceTransportFactory,
         pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
         connectionConfiguration: ConnectionManager.Configuration,
+        clock: @escaping @Sendable () -> Date,
     ) {
         self.authCoordinator = authCoordinator
         self.pairingClient = pairingClient
@@ -473,6 +500,7 @@ public struct AppComposition: Sendable {
         self.deviceTransportFactory = deviceTransportFactory
         self.pathMonitorFactory = pathMonitorFactory
         self.connectionConfiguration = connectionConfiguration
+        self.clock = clock
     }
 }
 
