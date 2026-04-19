@@ -51,6 +51,18 @@ public enum DeviceClientError: Error, Equatable, Sendable {
     case wrongEventKind(expected: String, got: String)
     case handshakeFailed(reason: String)
     case authRevoked(message: String)
+    /// `connect(handshake:)` was called with a non-nil handshake builder
+    /// but the client was constructed without a `responseVerifier`. This
+    /// is a programmer error: a production handshake without a
+    /// signature-verification step would silently accept a forged
+    /// `AuthResponse` from any party that can speak the wire framing
+    /// against the Tailscale endpoint, defeating the entire
+    /// impostor-at-the-endpoint defense. The runtime guard is a
+    /// belt-and-braces check on top of the composition-root invariant
+    /// that always wires both — surfaced as a typed error so a refactor
+    /// that drops the verifier crashes loudly on the first connect
+    /// attempt instead of silently weakening the security posture.
+    case handshakeVerifierMissing
     /// The device's AuthResponse carried a `nonce` that did not
     /// match the 16 bytes the app sent in its AuthRequest. A live
     /// device echoes the challenge verbatim; a mismatch means an

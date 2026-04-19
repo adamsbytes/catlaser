@@ -169,14 +169,19 @@ struct LiveStreamCredentialsTests {
     @Test
     func allowlistMatchIsCaseInsensitive() throws {
         // DNS names are case-insensitive; the allowlist must not
-        // turn a legitimate UPPERCASE hostname into a rejection.
+        // turn a legitimate UPPERCASE hostname into a rejection. The
+        // canonical form the LiveKit SDK is handed is lowercased so a
+        // URL parser disagreement on case (some libraries treat the
+        // host case-sensitively) cannot drive a host the allowlist
+        // didn't see — see the parser-disagreement defense in
+        // ``LiveStreamCredentials``.
         let allow = try makeAllowlist(hosts: ["livekit.example.com"])
         let creds = try LiveStreamCredentials(
             url: URL(string: "wss://LiveKit.Example.COM")!,
             token: "abc",
             allowlist: allow,
         )
-        #expect(creds.url.host == "LiveKit.Example.COM")
+        #expect(creds.url.host == "livekit.example.com")
     }
 
     @Test
@@ -233,5 +238,153 @@ struct LiveStreamCredentialsTests {
         #expect(allow.contains("LIVEKIT.EXAMPLE.COM"))
         #expect(!allow.contains("other.example.com"))
         #expect(!allow.contains(""))
+    }
+
+    // MARK: - Parser-disagreement defense (Finding 4)
+    //
+    // The LiveKit SDK re-parses the URL string we hand it. If
+    // Foundation's `URL.host` extracts a different host than
+    // LiveKit's parser, an attacker-supplied StreamOffer can pass
+    // the allowlist check while the SDK dials a different host.
+    // The fix: refuse URLs containing userinfo / fragment, and
+    // rebuild the URL from individually-validated components so the
+    // string we hand the SDK contains exactly the scheme/host/port/
+    // path/query we approved.
+
+    /// Userinfo (`user:pass@host`) is the canonical parser-
+    /// disagreement vector. RFC 3986-strict parsers extract
+    /// `host` from after the `@`; some lenient parsers take
+    /// `host` from before. We refuse the URL outright rather than
+    /// trust either interpretation.
+    @Test
+    func rejectsURLWithUserinfo() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        // Foundation parses this with `user = "livekit.example.com"`
+        // and `host = "attacker.com"`; without the userinfo gate the
+        // app would correctly reject (host fails allowlist), but the
+        // explicit refusal catches every case (including ones where
+        // Foundation might extract `host = "livekit.example.com"`
+        // and pass the URL to LiveKit verbatim).
+        var offer = Catlaser_App_V1_StreamOffer()
+        offer.livekitURL = "wss://livekit.example.com:443@attacker.com/"
+        offer.subscriberToken = "x"
+        do {
+            _ = try LiveStreamCredentials(offer: offer, allowlist: allow)
+            Issue.record("expected userinfo URL to be rejected")
+        } catch let error {
+            // ``LiveStreamCredentials`` uses typed throws, so the
+            // bare catch already binds a typed
+            // ``LiveStreamCredentialsError``. Either rejection mode
+            // is acceptable: the structural refusal (.invalidURL) or
+            // the host-not-allowed branch. Both close the
+            // parser-disagreement gap.
+            switch error {
+            case .invalidURL, .hostNotAllowed:
+                break
+            default:
+                Issue.record("expected .invalidURL or .hostNotAllowed, got \(error)")
+            }
+        }
+    }
+
+    /// URL fragments have no place in a `wss://` dial target —
+    /// LiveKit ignores them but they're a documented vector for
+    /// smuggling additional state into URL parsers (some treat
+    /// `#@host` as host-shifting). Refuse outright.
+    @Test
+    func rejectsURLWithFragment() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        var offer = Catlaser_App_V1_StreamOffer()
+        offer.livekitURL = "wss://livekit.example.com/#@attacker.com"
+        offer.subscriberToken = "x"
+        #expect(throws: LiveStreamCredentialsError.invalidURL) {
+            _ = try LiveStreamCredentials(offer: offer, allowlist: allow)
+        }
+    }
+
+    /// The URL handed to the LiveKit SDK MUST be the rebuilt
+    /// canonical form, NOT the raw input. This test asserts the
+    /// canonicalisation: a mixed-case host is lowercased, and the
+    /// resulting `absoluteString` matches the expected canonical
+    /// shape byte-for-byte.
+    @Test
+    func handsCanonicalLowercaseURLToTheSDK() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        let creds = try LiveStreamCredentials(
+            url: URL(string: "wss://LiveKit.Example.COM/path?room=abc")!,
+            token: "abc",
+            allowlist: allow,
+        )
+        // Lowercased host. The reconstruction guarantees the LiveKit
+        // SDK sees the host the allowlist approved, not whatever
+        // case the offer carried.
+        #expect(creds.url.host == "livekit.example.com")
+        // Path and query survived the rebuild.
+        #expect(creds.url.path == "/path")
+        #expect(creds.url.query == "room=abc")
+        // Scheme is the operator-mandated wss:// only.
+        #expect(creds.url.scheme == "wss")
+    }
+
+    /// The trailing-dot-FQDN form `host.` is equivalent to `host`
+    /// in DNS but `URL.host` may include the dot, breaking the
+    /// allowlist's exact match. The validator strips a single
+    /// trailing dot before the allowlist lookup so the canonical
+    /// form survives.
+    @Test
+    func acceptsTrailingDotHostAsCanonical() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        let creds = try LiveStreamCredentials(
+            url: URL(string: "wss://livekit.example.com./room")!,
+            token: "abc",
+            allowlist: allow,
+        )
+        // The canonicalised host has the dot stripped — what the
+        // SDK receives matches the allowlist entry byte-for-byte.
+        #expect(creds.url.host == "livekit.example.com")
+    }
+
+    /// Port survives the rebuild — operators can host LiveKit on a
+    /// non-default port and we must not silently drop it.
+    @Test
+    func preservesExplicitPort() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        let creds = try LiveStreamCredentials(
+            url: URL(string: "wss://livekit.example.com:8443/")!,
+            token: "abc",
+            allowlist: allow,
+        )
+        #expect(creds.url.port == 8443)
+        #expect(creds.url.host == "livekit.example.com")
+    }
+
+    /// Subdomain that is NOT in the allowlist must be refused even
+    /// though the suffix matches. This documents that the allowlist
+    /// is exact (no wildcarding); the parser-defense rebuild does
+    /// not soften the membership check.
+    @Test
+    func rejectsSubdomainOfAllowedHost() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        var offer = Catlaser_App_V1_StreamOffer()
+        offer.livekitURL = "wss://attacker.livekit.example.com/"
+        offer.subscriberToken = "x"
+        #expect(throws: LiveStreamCredentialsError.hostNotAllowed("attacker.livekit.example.com")) {
+            _ = try LiveStreamCredentials(offer: offer, allowlist: allow)
+        }
+    }
+
+    /// Path traversal in the URL must not change the host. The
+    /// rebuild preserves the path as-is (LiveKit dials whatever
+    /// path the offer specified), but the host the allowlist
+    /// approved is always the host the SDK sees.
+    @Test
+    func pathContentDoesNotInfluenceAllowlist() throws {
+        let allow = try makeAllowlist(hosts: ["livekit.example.com"])
+        let creds = try LiveStreamCredentials(
+            url: URL(string: "wss://livekit.example.com/../@attacker.com/x")!,
+            token: "abc",
+            allowlist: allow,
+        )
+        #expect(creds.url.host == "livekit.example.com")
     }
 }

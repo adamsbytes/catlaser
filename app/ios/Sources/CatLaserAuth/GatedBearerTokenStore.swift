@@ -39,6 +39,7 @@ public actor GatedBearerTokenStore: BearerTokenStore, SessionInvalidating {
     private let gate: SessionAccessGate
     private let unlockReason: String
     private let liveVideoReason: String
+    private let pairingReason: String
 
     private var cached: AuthSession?
 
@@ -47,11 +48,13 @@ public actor GatedBearerTokenStore: BearerTokenStore, SessionInvalidating {
         gate: SessionAccessGate,
         unlockReason: String = "Unlock your Catlaser session",
         liveVideoReason: String = "Confirm to view live video",
+        pairingReason: String = "Confirm to pair this device",
     ) {
         self.underlying = underlying
         self.gate = gate
         self.unlockReason = unlockReason
         self.liveVideoReason = liveVideoReason
+        self.pairingReason = pairingReason
     }
 
     public func save(_ session: AuthSession) async throws {
@@ -92,6 +95,19 @@ public actor GatedBearerTokenStore: BearerTokenStore, SessionInvalidating {
     /// initiate the protected action.
     public func requireLiveVideo() async throws {
         _ = try await gate.requireStrict(reason: liveVideoReason)
+    }
+
+    /// Hard re-authentication gate for the pairing-confirmation step.
+    /// Same mechanics as ``requireLiveVideo`` — always prompts, throws
+    /// on cancel/failure — but with a pairing-specific reason string
+    /// rendered on the OS biometric sheet so the user understands what
+    /// they are authorising. The pairing view model invokes this BEFORE
+    /// the HTTP exchange that adds a device to the user's account, so
+    /// a momentarily-unlocked phone whose idle window is still fresh
+    /// cannot be coerced into silently pairing an attacker-controlled
+    /// device.
+    public func requirePairing() async throws {
+        _ = try await gate.requireStrict(reason: pairingReason)
     }
 
     /// Drop the in-memory token cache and gate freshness. Next `load`

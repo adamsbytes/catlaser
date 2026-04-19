@@ -1,10 +1,11 @@
 import CatLaserAuth
 import CatLaserDevice
 import CatLaserDeviceTestSupport
-import CatLaserPairing
 import CatLaserPairingTestSupport
 import Foundation
 import Testing
+
+@testable import CatLaserPairing
 
 @Suite("PairingViewModel", .serialized)
 @MainActor
@@ -77,6 +78,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         #expect(vm.phase == .scanning)
@@ -92,6 +94,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         #expect(vm.phase == .needsCameraPermission(.notDetermined))
@@ -108,6 +111,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case let .paired(loaded) = vm.phase {
@@ -133,6 +137,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         #expect(vm.phase == .needsCameraPermission(.notDetermined))
@@ -151,6 +156,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         await vm.requestCameraPermission()
@@ -181,6 +187,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
             clock: { Date(timeIntervalSince1970: 1_712_345_678) },
         )
         await vm.start()
@@ -240,6 +247,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
@@ -282,6 +290,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
@@ -315,6 +324,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         // Skip the confirming hop entirely — we're still in .scanning.
@@ -345,6 +355,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         vm.switchToManualEntry()
@@ -374,6 +385,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
@@ -414,6 +426,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
@@ -437,6 +450,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         // Pretend we're mid-check; scan should drop on the floor.
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
@@ -457,6 +471,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         vm.switchToManualEntry()
@@ -493,6 +508,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         vm.switchToManualEntry()
@@ -522,6 +538,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         #expect({
@@ -554,6 +571,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         // start → .paired(device)
@@ -594,6 +612,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
@@ -616,6 +635,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case .failed = vm.phase {
@@ -637,6 +657,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         vm.switchToManualEntry()
@@ -695,6 +716,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case let .paired(loaded) = vm.phase {
@@ -730,6 +752,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         #expect(vm.phase == .scanning)
@@ -773,6 +796,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case let .paired(loaded) = vm.phase {
@@ -811,6 +835,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case let .paired(loaded) = vm.phase {
@@ -840,6 +865,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case let .paired(loaded) = vm.phase {
@@ -876,6 +902,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
             reverifyInterval: 60,
         )
         await vm.start()
@@ -914,6 +941,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
             reverifyInterval: 0,
         )
         await vm.start()
@@ -954,6 +982,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
             reverifyInterval: 0,
         )
         await vm.start()
@@ -997,6 +1026,7 @@ struct PairingViewModelTests {
             store: store,
             permissionGate: gate,
             connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
         )
         await vm.start()
         if case let .paired(loaded) = vm.phase {
@@ -1011,4 +1041,310 @@ struct PairingViewModelTests {
             await m.stop()
         }
     }
+
+    // MARK: - Server-confirmed unpair on terminal AUTH_REVOKED (Finding 1)
+
+    /// SECURITY-CRITICAL: When the supervisor declares
+    /// `.failed(.authRevoked)`, the keychain pairing is wiped ONLY
+    /// after the coordination server's authoritative paired-devices
+    /// list confirms the revocation. A forged AUTH_REVOKED frame
+    /// from a tunnel-internal MitM (the only attacker model that can
+    /// reach the post-handshake AUTH_REVOKED gate) cannot wipe the
+    /// pairing as long as the server still recognises it.
+    ///
+    /// This test simulates the supervisor-side terminal auth-revoked
+    /// signal directly (via the `@testable`-internal
+    /// `unpairAfterRevocation` entry point, bypassing the full
+    /// `ConnectionManager` round-trip) and asserts the keychain
+    /// survives when the server responds with the device still in
+    /// the list.
+    @Test
+    func authRevokedSurvivesWhenServerStillReportsOwnership() async throws {
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        // Server's paired list still contains the device — refuse the
+        // wipe even though the device-side wire signal demanded it.
+        let http = MockHTTPClient(outcomes: [
+            // First call: start() ownership check confirms.
+            .response(makePairedListResponse(for: [device])),
+            // Second call: post-revocation confirmation also
+            // confirms (server hasn't caught up, OR the AUTH_REVOKED
+            // was forged by an in-tunnel attacker).
+            .response(makePairedListResponse(for: [device])),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
+            reverifyInterval: 0,
+        )
+        await vm.start()
+        // VM is now `.paired(device)` — drive the auth-revoked unpair
+        // path directly. The internal entry consults the server; the
+        // mock returns "still owned" so the keychain row MUST stay.
+        await vm.unpairAfterRevocation()
+        #expect(try await store.load() == device,
+                "server says still-owned: keychain pairing must survive a forged AUTH_REVOKED")
+        if case .paired = vm.phase {
+            // expected
+        } else {
+            Issue.record("phase should remain .paired when server confirms ownership; got \(vm.phase)")
+        }
+    }
+
+    /// Companion to the above: when the server's paired list omits
+    /// the device id, the wipe goes through. This is the legitimate-
+    /// revocation path — both wire signal AND authoritative server
+    /// state agree.
+    @Test
+    func authRevokedWipesWhenServerConfirmsRevocation() async throws {
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            // start() ownership check confirms.
+            .response(makePairedListResponse(for: [device])),
+            // Post-revocation confirmation: device is gone.
+            .response(makePairedListResponse(for: [])),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
+            reverifyInterval: 0,
+        )
+        await vm.start()
+        await vm.unpairAfterRevocation()
+        #expect(try await store.load() == nil,
+                "server confirms revocation: keychain row must be wiped")
+        #expect(vm.phase == .scanning,
+                "phase should advance to scanner after a confirmed revocation; got \(vm.phase)")
+    }
+
+    /// When the server check is indeterminate (network down, 5xx,
+    /// session expired, attestation failure), the keychain pairing
+    /// MUST survive. The supervisor has terminated; the user can
+    /// retry by relaunching, at which point `start()` re-runs the
+    /// ownership check with a fresh attempt.
+    @Test
+    func authRevokedSurvivesWhenServerCheckIsIndeterminate() async throws {
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let http = MockHTTPClient(outcomes: [
+            // start() ownership check confirms.
+            .response(makePairedListResponse(for: [device])),
+            // Post-revocation confirmation: server fails (5xx).
+            .response(HTTPResponse.json(
+                ["ok": false, "error": ["code": "INTERNAL", "message": "boom"]],
+                status: 500,
+            )),
+        ])
+        let pairedList = PairedDevicesClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: pairedList,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
+            reverifyInterval: 0,
+        )
+        await vm.start()
+        await vm.unpairAfterRevocation()
+        #expect(try await store.load() == device,
+                "server check indeterminate: keychain pairing must survive")
+    }
+
+    /// The defensive bottom of the stack: if no
+    /// `PairedDevicesClient` is wired (unusual in production but
+    /// possible in test/migration setups), the server check resolves
+    /// to `.indeterminate` and the pairing survives. The alternative
+    /// — defaulting to "wipe" when no server check is possible —
+    /// would let any forged AUTH_REVOKED frame succeed in
+    /// denying-of-pairing on a misconfigured composition.
+    @Test
+    func authRevokedSurvivesWhenNoPairedDevicesClientWired() async throws {
+        let device = try makeDevice()
+        let store = PublicInMemoryEndpointStore(initial: device)
+        let (_, pairingClient) = makeClient(outcomes: [])
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            pairedDevicesClient: nil, // <-- no client wired
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .allowed },
+        )
+        await vm.start()
+        await vm.unpairAfterRevocation()
+        #expect(try await store.load() == device,
+                "missing pairedDevicesClient resolves to .indeterminate; pairing must survive")
+    }
+
+    // MARK: - Pairing-confirmation gate (Finding 5)
+
+    /// SECURITY-CRITICAL: `confirmPairing` MUST consult the
+    /// user-presence gate BEFORE issuing the HTTP exchange that
+    /// adds a device to the user's account. A momentarily-unlocked
+    /// phone whose `GatedBearerTokenStore` idle window is fresh
+    /// would otherwise let an opportunistic attacker scan a malicious
+    /// QR and silently pair the user's account to an
+    /// attacker-controlled device.
+    ///
+    /// This test wires a gate that records every invocation and
+    /// returns `.cancelled`; on cancel, NO HTTP call must fire and
+    /// the VM must stay parked in `.confirming(code)` so the user
+    /// can re-confirm if it was their cancellation.
+    @Test
+    func confirmPairingSkipsExchangeWhenGateCancels() async throws {
+        let http = MockHTTPClient()
+        let pairingClient = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let gateCalls = GateInvocationCounter()
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: {
+                await gateCalls.increment()
+                return .cancelled
+            },
+        )
+        await vm.start()
+        let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
+        await vm.submitScannedCode(code)
+        await vm.confirmPairing()
+        // Gate WAS called (we didn't bypass it).
+        #expect(await gateCalls.count == 1,
+                "gate must be invoked exactly once per confirmPairing")
+        // No HTTP fired.
+        #expect(await http.requests().isEmpty,
+                "cancelled gate must skip the wire exchange entirely")
+        // Phase is parked in `.confirming` so the user can re-confirm.
+        if case let .confirming(parked) = vm.phase {
+            #expect(parked == code)
+        } else {
+            Issue.record("expected .confirming after cancelled gate, got \(vm.phase)")
+        }
+    }
+
+    /// Companion: when the gate denies (biometric unavailable,
+    /// lockout, anything not a deliberate cancel), the VM MUST surface
+    /// a typed failure rather than silently default-allowing the
+    /// exchange.
+    @Test
+    func confirmPairingSurfacesFailureWhenGateDenies() async throws {
+        let http = MockHTTPClient()
+        let pairingClient = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: { .denied("biometric unavailable") },
+        )
+        await vm.start()
+        let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
+        await vm.submitScannedCode(code)
+        await vm.confirmPairing()
+        // No HTTP fired.
+        #expect(await http.requests().isEmpty)
+        // VM lands on .failed(.attestation(...)).
+        if case let .failed(error) = vm.phase, case let .attestation(reason) = error {
+            #expect(reason.contains("biometric unavailable"))
+        } else {
+            Issue.record("expected .failed(.attestation) after denied gate, got \(vm.phase)")
+        }
+    }
+
+    /// Happy path: gate returns `.allowed`, exchange proceeds, VM
+    /// reaches `.paired`. Confirms the gate is positioned BEFORE
+    /// the HTTP call (we observe the gate count first, then the
+    /// exchange-success outcome).
+    @Test
+    func confirmPairingProceedsWhenGateAllows() async throws {
+        let http = MockHTTPClient()
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "device_name": "Kitchen",
+            "host": "100.64.1.7",
+            "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
+        ])))
+        let pairingClient = PairingClient(
+            baseURL: URL(string: "https://api.example.com")!,
+            http: signedTestClient(wrapping: http),
+        )
+        let store = PublicInMemoryEndpointStore()
+        let gate = FakeCameraPermissionGate(initial: .authorized)
+        let gateCalls = GateInvocationCounter()
+        let vm = PairingViewModel(
+            pairingClient: pairingClient,
+            store: store,
+            permissionGate: gate,
+            connectionManagerFactory: makeFactory(),
+            pairingAuthGate: {
+                await gateCalls.increment()
+                return .allowed
+            },
+            clock: { Date(timeIntervalSince1970: 1_712_345_678) },
+        )
+        await vm.start()
+        let code = try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
+        await vm.submitScannedCode(code)
+        await vm.confirmPairing()
+        #expect(await gateCalls.count == 1)
+        if case let .paired(device) = vm.phase {
+            #expect(device.id == "cat-001")
+        } else {
+            Issue.record("expected .paired after allowed gate, got \(vm.phase)")
+        }
+        // The HTTP exchange ran (gate was a precondition, not a
+        // bypass).
+        #expect(await http.requests().count == 1)
+        if let m = vm.currentConnectionManager {
+            await m.stop()
+        }
+    }
+}
+
+/// Sendable counter for tests that need to observe how many times
+/// the pairing gate closure fired. Captured into the `@Sendable`
+/// closure by reference.
+private actor GateInvocationCounter {
+    private(set) var count: Int = 0
+    func increment() { count += 1 }
 }

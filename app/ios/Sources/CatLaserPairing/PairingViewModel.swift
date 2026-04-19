@@ -47,6 +47,7 @@ public final class PairingViewModel {
     private let store: any EndpointStore
     private let permissionGate: any CameraPermissionGate
     private let connectionManagerFactory: @Sendable (PairedDevice) -> ConnectionManager
+    private let pairingAuthGate: PairingAuthGate
     private let clock: @Sendable () -> Date
     private let reverifyInterval: TimeInterval
 
@@ -60,6 +61,7 @@ public final class PairingViewModel {
         store: any EndpointStore,
         permissionGate: any CameraPermissionGate,
         connectionManagerFactory: @escaping @Sendable (PairedDevice) -> ConnectionManager,
+        pairingAuthGate: @escaping PairingAuthGate,
         clock: @escaping @Sendable () -> Date = { Date() },
         reverifyInterval: TimeInterval = PairingViewModel.defaultReverifyInterval,
     ) {
@@ -68,6 +70,7 @@ public final class PairingViewModel {
         self.store = store
         self.permissionGate = permissionGate
         self.connectionManagerFactory = connectionManagerFactory
+        self.pairingAuthGate = pairingAuthGate
         self.clock = clock
         self.reverifyInterval = reverifyInterval
     }
@@ -199,9 +202,38 @@ public final class PairingViewModel {
 
     /// Consume the `.confirming(code)` phase and run the pair
     /// exchange. No-op from any other phase.
+    ///
+    /// The strict user-presence gate runs FIRST, before any HTTP call
+    /// fires. A momentarily-unlocked phone whose
+    /// ``GatedBearerTokenStore`` idle window is still fresh would
+    /// otherwise let an opportunistic attacker scan a malicious QR
+    /// and silently add an attacker-controlled device to the user's
+    /// account — the bearer comes from the in-memory cache without a
+    /// biometric prompt, the attestation is signed by the resident
+    /// Secure-Enclave key, and the coordination server happily
+    /// records the new pairing. Gating the confirmation on a fresh
+    /// biometric/passcode prompt closes that window.
+    ///
+    /// Outcomes:
+    ///
+    /// * `.allowed` — proceed to ``runExchange``.
+    /// * `.cancelled` — return to ``.confirming(code)`` so the user
+    ///   can re-attempt or back out without an error banner.
+    /// * `.denied(reason)` — surface as ``.failed(.attestation(...))``
+    ///   so the UI offers a recoverable retry path with a typed
+    ///   diagnostic.
     public func confirmPairing() async {
         guard case let .confirming(code) = phase else { return }
-        await runExchange(code: code)
+        switch await pairingAuthGate() {
+        case .allowed:
+            await runExchange(code: code)
+        case .cancelled:
+            // Preserve the parked code so the user can re-confirm
+            // without scanning again.
+            phase = .confirming(code)
+        case let .denied(reason):
+            phase = .failed(.attestation(reason))
+        }
     }
 
     /// Cancel a pending `.confirming(code)` and return to the
@@ -326,12 +358,17 @@ public final class PairingViewModel {
 
     private func applyConnectionState(_ next: ConnectionState) {
         connectionState = next
-        // Device-side revocation is terminal — the supervisor has
-        // already given up and the server will reject any retry with
-        // the same SPKI. Wipe the Keychain row and route the user
-        // through the pairing flow automatically; anything else
-        // would leave the app spinning against an endpoint that is
-        // guaranteed to keep kicking it off.
+        // Device-side revocation is terminal at the supervisor layer
+        // — it has already given up and will not retry — but the
+        // wire signal is NOT cryptographically authenticated by
+        // itself: an impostor that compromises the WireGuard tunnel
+        // (or a forged frame the pre-handshake gate in
+        // ``DeviceClient`` did not catch) could in principle drive
+        // the supervisor here without the real device having revoked
+        // anything. Wiping the Keychain row on a forged signal would
+        // be a permanent denial-of-pairing. Defer the actual wipe to
+        // ``unpairAfterRevocation``, which corroborates with the
+        // coordination server before destroying local state.
         if case let .failed(error) = next, case .authRevoked = error {
             Task { [weak self] in
                 await self?.unpairAfterRevocation()
@@ -339,17 +376,67 @@ public final class PairingViewModel {
         }
     }
 
-    /// Wipe local pairing state after the device declared our SPKI
-    /// revoked. Synchronous analogue of `unpair()` but avoids a
-    /// second stop-and-cleanup pass on the supervisor, which has
-    /// already transitioned itself to `.failed(.authRevoked)`.
-    private func unpairAfterRevocation() async {
-        connectionStateTask?.cancel()
-        connectionStateTask = nil
-        manager = nil
-        connectionState = .idle
-        try? await store.delete()
-        await advanceToScanningOrPermission()
+    /// Handle the supervisor's terminal `.failed(.authRevoked)` by
+    /// confirming with the coordination server BEFORE wiping the
+    /// keychain pairing.
+    ///
+    /// Three outcomes:
+    ///
+    /// * `.noLongerOwned` — the server's authoritative paired-devices
+    ///   list omits this device id. The revocation is real; wipe and
+    ///   route the user back through the pairing flow.
+    /// * `.indeterminate` — the server check failed (network down,
+    ///   5xx, attestation hiccup, no client wired). The device's wire
+    ///   signal is unconfirmed; KEEP the keychain row. The supervisor
+    ///   has already terminated, so the connection state remains at
+    ///   `.failed(.authRevoked)` for the UI to surface; the user can
+    ///   re-attempt by relaunching, at which point ``start()`` runs
+    ///   the ownership check again with a fresh attempt.
+    /// * `.stillOwned` — the server says we ARE still owned but the
+    ///   device says revoked. The two are out of sync; treat as
+    ///   `.indeterminate` (keep the row). On the legitimate-but-lagging
+    ///   server case, the next launch will catch up and the wipe
+    ///   happens then. On the impostor case, the row survives.
+    ///
+    /// Tear down the supervisor reference regardless of outcome — it
+    /// has already transitioned itself to `.failed(.authRevoked)`
+    /// and is no longer running.
+    ///
+    /// Internal (not private) so tests in the same module can reach
+    /// this entry point via `@testable import` to exercise the
+    /// server-confirmation policy without having to drive a full
+    /// `ConnectionManager` round-trip from the supervisor layer.
+    func unpairAfterRevocation() async {
+        guard case let .paired(device) = phase else {
+            // The phase moved on while the server check was in flight
+            // (user navigated away, unpair fired, etc.). Nothing to
+            // do — leave the existing state alone.
+            connectionStateTask?.cancel()
+            connectionStateTask = nil
+            manager = nil
+            return
+        }
+        let outcome = await reverifyOwnership(of: device)
+        switch outcome {
+        case .noLongerOwned:
+            connectionStateTask?.cancel()
+            connectionStateTask = nil
+            manager = nil
+            connectionState = .idle
+            try? await store.delete()
+            await advanceToScanningOrPermission()
+        case .stillOwned, .indeterminate:
+            // KEEP the keychain row. Tear down the supervisor
+            // reference but leave `phase` as `.paired(device)` so
+            // the user still sees their device; `connectionState`
+            // is already `.failed(.authRevoked(...))` from the
+            // caller. The UI surfaces the auth-issue banner; the
+            // user can relaunch (re-runs ``start`` → ownership
+            // re-check) or explicitly tap Unpair.
+            connectionStateTask?.cancel()
+            connectionStateTask = nil
+            manager = nil
+        }
     }
 
     private func advanceToScanningOrPermission() async {

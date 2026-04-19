@@ -37,7 +37,20 @@ import Foundation
 /// read the current `DeviceClient` from the `.connected` state and
 /// treat any other state as "not available, wait".
 public actor ConnectionManager {
-    public typealias DeviceClientFactory = @Sendable (DeviceEndpoint) -> DeviceClient
+    /// Builder for the per-attempt `DeviceClient`.
+    ///
+    /// Throws so the production wiring (which constructs a
+    /// `NetworkDeviceTransport`) can surface the
+    /// `TailscaleInterfaceError.noTailscaleInterfaceAvailable` case
+    /// without smuggling the failure through a half-built transport.
+    /// `runSupervisor` catches a thrown factory and routes it through
+    /// the standard backoff path — Tailscale-still-booting is treated
+    /// the same as a TCP refusal, which is exactly the right
+    /// behaviour: retry with backoff until the interface comes up.
+    /// Non-throwing closures still conform (Swift covariance), so
+    /// existing tests that use `InMemoryDeviceTransport` need no
+    /// change at the call site.
+    public typealias DeviceClientFactory = @Sendable (DeviceEndpoint) throws -> DeviceClient
     public typealias JitterSource = @Sendable (ClosedRange<Double>) -> Double
     public typealias HandshakeBuilder = @Sendable () async throws -> String
 
@@ -270,7 +283,20 @@ public actor ConnectionManager {
             attempt += 1
             transition(to: .connecting(attempt: attempt))
 
-            let client = clientFactory(endpoint)
+            let client: DeviceClient
+            do {
+                client = try clientFactory(endpoint)
+            } catch {
+                // Factory failure (e.g. Tailscale interface not yet
+                // available): treat as a transient connect failure.
+                // Identical handling to a `connectFailed` from the
+                // underlying transport so the supervisor's retry
+                // semantics are uniform regardless of which layer
+                // refused.
+                if stopped { return }
+                await scheduleBackoff()
+                continue
+            }
             do {
                 try await client.connect(handshake: handshakeBuilder)
             } catch let clientError as DeviceClientError where clientError.isTerminalAuthRevocation {

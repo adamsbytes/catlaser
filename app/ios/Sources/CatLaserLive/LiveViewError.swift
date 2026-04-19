@@ -120,6 +120,14 @@ public enum LiveViewError: Error, Equatable, Sendable {
             // clock-drift or nonce-collision blip recovers without
             // forcing a re-pair.
             .transportFailure("device handshake verification failed")
+        case .handshakeVerifierMissing:
+            // Composition wiring bug — the handshake builder was
+            // supplied but the verifier slot was nil. Treat as an
+            // internal failure so the diagnostic propagates clearly
+            // (production never reaches this branch because
+            // ``AppComposition/connectionManager(for:)`` always wires
+            // the verifier from the trusted ``PairedDevice`` row).
+            .internalFailure("handshake verifier missing")
         }
     }
 }

@@ -24,6 +24,61 @@ public struct LiveStreamCredentials: Sendable, Equatable {
         token: String,
         allowlist: LiveKitHostAllowlist,
     ) throws(LiveStreamCredentialsError) {
+        try self.init(rawURLString: url.absoluteString, token: token, allowlist: allowlist)
+    }
+
+    /// Convenience initializer from the proto envelope.
+    public init(
+        offer: Catlaser_App_V1_StreamOffer,
+        allowlist: LiveKitHostAllowlist,
+    ) throws(LiveStreamCredentialsError) {
+        try self.init(
+            rawURLString: offer.livekitURL,
+            token: offer.subscriberToken,
+            allowlist: allowlist,
+        )
+    }
+
+    /// Validate a raw LiveKit URL string and rebuild the canonical
+    /// `wss://host[:port]/path[?query]` form from its validated
+    /// components.
+    ///
+    /// ## Why we don't pass the raw URL through
+    ///
+    /// `LiveKitStreamSession` hands the LiveKit SDK
+    /// `credentials.url.absoluteString`. The SDK re-parses that string
+    /// with its own URL logic, which is not guaranteed to agree with
+    /// Foundation's `URL(string:)` on edge-case inputs:
+    ///
+    /// * userinfo: `wss://allowed.example.com\@attacker.com/`
+    ///   — Foundation may extract `allowed.example.com` as host, but a
+    ///   different parser may take `attacker.com`.
+    /// * percent-encoded host bytes: `wss://allowed%2eexample%2ecom/`
+    ///   — some parsers normalise; some don't.
+    /// * trailing dot: `wss://allowed.example.com./`
+    ///   — `URL.host` may include the dot; the allowlist's exact match
+    ///   then fails locally but the SDK might still resolve it.
+    /// * IPv6 with embedded port + userinfo: `wss://[::1]:443@attacker/`.
+    /// * fragment: `wss://allowed.example.com/#@attacker.com`
+    ///   — fragments have no place in a `wss://` dial target.
+    ///
+    /// The allowlist check is meaningful only if the host the app
+    /// validated is the host the SDK ultimately dials. Reconstructing
+    /// the URL from individually-validated `URLComponents` fields
+    /// closes the gap: the string we hand the SDK contains exactly
+    /// the scheme, host, port, path, and query we approved — no
+    /// userinfo, no fragment, no smuggled authority.
+    private init(
+        rawURLString: String,
+        token: String,
+        allowlist: LiveKitHostAllowlist,
+    ) throws(LiveStreamCredentialsError) {
+        guard !rawURLString.isEmpty,
+              let components = URLComponents(string: rawURLString)
+        else {
+            throw .invalidURL
+        }
+
         // Signaling must be TLS-encrypted. LiveKit's subscriber JWT grants
         // room-join rights for the duration of the token; on a plaintext
         // `ws://` connection that JWT — and the signaling channel that
@@ -33,12 +88,39 @@ public struct LiveStreamCredentials: Sendable, Equatable {
         // scheme. No http, no ws, no local-dev escape hatch compiled into
         // shipping code — a debug build that needs plaintext must patch
         // this file, not flip a flag.
-        guard let scheme = url.scheme?.lowercased(), scheme == "wss" else {
+        guard let scheme = components.scheme?.lowercased(), scheme == "wss" else {
             throw .invalidURLScheme
         }
-        guard let host = url.host, !host.isEmpty else {
+
+        // No userinfo and no fragment — both are suspicious in a wss
+        // dial target and are the most common parser-disagreement
+        // vector. Refuse rather than try to sanitise.
+        guard components.user == nil, components.password == nil else {
             throw .invalidURL
         }
+        guard components.fragment == nil else {
+            throw .invalidURL
+        }
+
+        // `URLComponents.host` is the authoritative host according to
+        // Foundation's RFC 3986 parser. Lowercasing matches the
+        // case-insensitive DNS contract and the allowlist's
+        // normalisation.
+        guard let rawHost = components.host?.lowercased(), !rawHost.isEmpty else {
+            throw .invalidURL
+        }
+        // Strip a trailing root-domain dot before checking the
+        // allowlist — `example.com.` and `example.com` resolve to the
+        // same hostname but exact-string match would otherwise reject
+        // the FQDN form. Stripping at this single boundary keeps the
+        // allowlist a finite, auditable list of bare hostnames.
+        let host: String
+        if rawHost.hasSuffix("."), rawHost.count > 1 {
+            host = String(rawHost.dropLast())
+        } else {
+            host = rawHost
+        }
+
         // The host MUST be in the operator-provisioned allowlist.
         // Without this check a compromised device could hand the app
         // an attacker-controlled `wss://` URL; the LiveKit SDK has
@@ -48,23 +130,32 @@ public struct LiveStreamCredentials: Sendable, Equatable {
         guard allowlist.contains(host) else {
             throw .hostNotAllowed(host)
         }
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else {
             throw .missingToken
         }
-        self.url = url
-        self.token = trimmed
-    }
 
-    /// Convenience initializer from the proto envelope.
-    public init(
-        offer: Catlaser_App_V1_StreamOffer,
-        allowlist: LiveKitHostAllowlist,
-    ) throws(LiveStreamCredentialsError) {
-        guard let url = URL(string: offer.livekitURL), !offer.livekitURL.isEmpty else {
+        // Rebuild from scratch using only validated components. The
+        // resulting URL string is what `LiveKitStreamSession` hands
+        // the SDK — guaranteed not to contain any field that didn't
+        // pass through this validator.
+        var rebuilt = URLComponents()
+        rebuilt.scheme = "wss"
+        rebuilt.host = host
+        if let port = components.port {
+            rebuilt.port = port
+        }
+        rebuilt.path = components.path
+        if let queryItems = components.queryItems, !queryItems.isEmpty {
+            rebuilt.queryItems = queryItems
+        }
+        guard let rebuiltURL = rebuilt.url else {
             throw .invalidURL
         }
-        try self.init(url: url, token: offer.subscriberToken, allowlist: allowlist)
+
+        self.url = rebuiltURL
+        self.token = trimmedToken
     }
 }
 

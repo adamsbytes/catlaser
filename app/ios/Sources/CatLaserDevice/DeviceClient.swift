@@ -199,6 +199,23 @@ public actor DeviceClient {
             state = .connected
             return
         }
+        // Production-shape handshake: refuse to proceed without a
+        // signature verifier. A nil verifier here would cause
+        // `performHandshake` to skip Ed25519 verification and trust
+        // the remote `ok` flag verbatim — exactly the failure mode an
+        // impostor at the Tailscale endpoint exploits. Failing closed
+        // before any wire traffic ensures a misconfigured composition
+        // is detected on the first connect attempt rather than after
+        // a successful "handshake" with an attacker.
+        guard responseVerifier != nil else {
+            state = .closed
+            receiveTask?.cancel()
+            receiveTask = nil
+            await transport.close()
+            await failAllPending(.cancelled)
+            eventContinuation.finish()
+            throw DeviceClientError.handshakeVerifierMissing
+        }
         // Enter the handshake-only state. ``request`` / ``send`` from
         // the public API refuse to transmit in this state — the only
         // path to the wire is the internal handshake request below.
@@ -279,28 +296,37 @@ public actor DeviceClient {
         // VERIFY the device-side signature BEFORE trusting `ok`. A
         // forged AuthResponse with `ok=true` from an impostor at the
         // Tailscale endpoint cannot produce a signature that
-        // validates against the paired device's public key. If the
-        // caller did not wire a verifier (legacy test transport, or
-        // the one-shot in-memory path), the signature field is
-        // skipped — production callers always supply one. Verifying
-        // on the reject path too guards against an impostor that
-        // forged `ok=false` to trick the client into tearing down a
+        // validates against the paired device's public key. The
+        // verifier is guaranteed non-nil here by the
+        // ``handshakeVerifierMissing`` gate at the top of `connect`;
+        // we re-check defensively so a future refactor that bypasses
+        // the gate (or introduces a third internal entry point into
+        // the handshake) crashes loudly with a typed error rather
+        // than silently skipping verification. Verifying on the
+        // reject path too guards against an impostor that forged
+        // `ok=false` to trick the client into tearing down a
         // legitimate session; only a signed `ok=false` from the real
         // device is honoured as terminal.
-        if let verifier = responseVerifier {
-            do {
-                try verifier.verify(
-                    response: response,
-                    expectedNonce: nonce,
-                    now: clock(),
-                )
-            } catch let error as DeviceClientError {
-                await shutdownForHandshakeFailure()
-                throw error
-            } catch {
-                await shutdownForHandshakeFailure()
-                throw DeviceClientError.handshakeSignatureInvalid
-            }
+        guard let verifier = responseVerifier else {
+            await shutdownForHandshakeFailure()
+            throw DeviceClientError.handshakeVerifierMissing
+        }
+        do {
+            try verifier.verify(
+                response: response,
+                expectedNonce: nonce,
+                now: clock(),
+            )
+        } catch {
+            // ``HandshakeResponseVerifier.verify`` is `throws(DeviceClientError)`,
+            // so the bare catch already binds a typed
+            // ``DeviceClientError``. Tear the transport down and
+            // re-throw with no remapping — the verifier's typed
+            // cases (`handshakeNonceMismatch`,
+            // `handshakeSkewExceeded`, `handshakeSignatureInvalid`)
+            // carry the right diagnostic for the caller.
+            await shutdownForHandshakeFailure()
+            throw error
         }
         if !response.ok {
             await shutdownForHandshakeFailure()
@@ -500,15 +526,32 @@ public actor DeviceClient {
             return
         }
         // Intercept the device daemon's ACL-revocation sentinel
-        // BEFORE the ordinary request-id routing. The daemon emits
-        // a `DeviceError(AUTH_REVOKED, ...)` with request_id == 0 on
-        // the way to closing the socket; treating it as a terminal
-        // error here lets `ConnectionManager` see the typed reason
-        // rather than a bare `.closedByPeer`, which would trigger
-        // an endless reconnect loop against the now-unauthorized
-        // endpoint.
+        // BEFORE the ordinary request-id routing — but ONLY after the
+        // handshake has completed. Pre-handshake the connection is
+        // not yet authenticated: any party that can write bytes to
+        // the Tailscale endpoint (an impostor that wins the TCP-accept
+        // race, a tunnel-internal attacker, a misconfigured second
+        // utun) could otherwise send a forged `AUTH_REVOKED` frame
+        // before the device has a chance to identify itself, and the
+        // ``ConnectionManager`` -> ``PairingViewModel`` chain would
+        // wipe the keychain pairing in response — a permanent
+        // denial-of-pairing with no cryptographic gate. Honouring the
+        // signal only after ``state == .connected`` means it has been
+        // preceded by a successful Ed25519 verification of the
+        // device's `AuthResponse` against the pairing-time public key,
+        // so the source of the AUTH_REVOKED is at minimum someone who
+        // also successfully completed the device-bound handshake (i.e.
+        // the device, or an attacker who has compromised the WireGuard
+        // tunnel — a substantially higher bar that is also defended by
+        // the second-layer server-confirmation check in
+        // ``PairingViewModel/unpairAfterRevocation``). Pre-handshake
+        // AUTH_REVOKED frames flow through to the events stream as
+        // unsolicited input; `ConnectionManager`'s events watcher does
+        // not start until after handshake completes, so they are
+        // discarded.
         if case let .error(remote) = event.event,
-           remote.code == DeviceClientError.authRevokedCode
+           remote.code == DeviceClientError.authRevokedCode,
+           state == .connected
         {
             await closeWithError(.authRevoked(message: remote.message))
             return

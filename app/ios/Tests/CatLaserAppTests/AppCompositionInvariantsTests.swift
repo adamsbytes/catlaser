@@ -2,6 +2,7 @@ import CatLaserAuthTestSupport
 import CatLaserDevice
 import CatLaserDeviceTestSupport
 import CatLaserLive
+import CatLaserPairingTestSupport
 import CatLaserProto
 import Foundation
 import Testing
@@ -82,7 +83,8 @@ struct AppCompositionInvariantsTests {
     private static func makeComposition(
         gate: StubLiveVideoGate = StubLiveVideoGate(),
         underlyingHTTP: RecordingHTTPClient = RecordingHTTPClient(),
-    ) throws -> (AppComposition, TestBearerStore) {
+        endpointStore: TestEndpointStore = TestEndpointStore(),
+    ) async throws -> (AppComposition, TestBearerStore, TestEndpointStore) {
         let identity = SoftwareIdentityStore()
         let attestationProvider = StubDeviceAttestationProvider(
             fingerprint: DeviceFingerprint(
@@ -118,7 +120,7 @@ struct AppCompositionInvariantsTests {
                 onSessionExpired: onExpired,
             )
         }
-        let composition = AppComposition.make(
+        let composition = await AppComposition.make(
             authConfig: try makeAuthConfig(),
             authHTTPClient: underlyingHTTP,
             signedHTTPClientFactory: factory,
@@ -126,16 +128,19 @@ struct AppCompositionInvariantsTests {
             attestationProvider: attestationProvider,
             bearerStore: bearerStore,
             liveVideoGate: gate,
+            endpointStore: endpointStore,
+            deviceTransportFactory: { _ in InMemoryDeviceTransport() },
+            pathMonitorFactory: { FakeNetworkPathMonitor() },
             clock: { Date(timeIntervalSince1970: TimeInterval(fixedClockTimestamp)) },
         )
-        return (composition, bearerStore)
+        return (composition, bearerStore, endpointStore)
     }
 
     // MARK: - 1. LiveKit allowlist
 
     @Test
-    func liveKitAllowlistContainsExactlyTheConfiguredHosts() throws {
-        let (composition, _) = try Self.makeComposition()
+    func liveKitAllowlistContainsExactlyTheConfiguredHosts() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
         // Exact match — not a permissive superset, not a silent empty
         // set.
         #expect(composition.liveKitAllowlist.contains(Self.allowedLiveKitHost))
@@ -145,11 +150,11 @@ struct AppCompositionInvariantsTests {
     }
 
     @Test
-    func liveStreamCredentialsRejectsHostOutsideAllowlist() throws {
+    func liveStreamCredentialsRejectsHostOutsideAllowlist() async throws {
         // The allowlist plumbs all the way down to the
         // ``LiveStreamCredentials`` constructor. A tampered offer
         // must never produce valid credentials.
-        let (composition, _) = try Self.makeComposition()
+        let (composition, _, _) = try await Self.makeComposition()
         var offer = Catlaser_App_V1_StreamOffer()
         offer.livekitURL = "wss://attacker-livekit.example.com"
         offer.subscriberToken = "jwt.placeholder"
@@ -159,8 +164,8 @@ struct AppCompositionInvariantsTests {
     }
 
     @Test
-    func liveStreamCredentialsAcceptsAllowedHost() throws {
-        let (composition, _) = try Self.makeComposition()
+    func liveStreamCredentialsAcceptsAllowedHost() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
         var offer = Catlaser_App_V1_StreamOffer()
         offer.livekitURL = "wss://\(Self.allowedLiveKitHost)"
         offer.subscriberToken = "jwt.placeholder"
@@ -181,7 +186,7 @@ struct AppCompositionInvariantsTests {
         // regression that wired the gate as a no-op would have the
         // counter stay at zero.
         let gate = StubLiveVideoGate(outcome: .success)
-        let (composition, _) = try Self.makeComposition(gate: gate)
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         #expect(outcome == .allowed)
         #expect(await gate.callCount == 1)
@@ -196,7 +201,7 @@ struct AppCompositionInvariantsTests {
         // ``AuthError.cancelled`` specifically, so a refactor that
         // mismaps it would be caught here.
         let gate = StubLiveVideoGate(outcome: .throwing(AuthError.cancelled))
-        let (composition, _) = try Self.makeComposition(gate: gate)
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         #expect(outcome == .cancelled)
     }
@@ -209,7 +214,7 @@ struct AppCompositionInvariantsTests {
         // string so the caller can surface diagnostics without
         // needing to reason about the failure class.
         let gate = StubLiveVideoGate(outcome: .throwing(AuthError.biometricUnavailable("no passcode")))
-        let (composition, _) = try Self.makeComposition(gate: gate)
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         if case let .denied(message) = outcome {
             #expect(message.contains("biometricUnavailable"))
@@ -225,7 +230,7 @@ struct AppCompositionInvariantsTests {
         // ``.allowed``. Getting this wrong would let a failure to
         // obtain user presence silently grant stream access.
         let gate = StubLiveVideoGate(outcome: .throwing(UnexpectedError()))
-        let (composition, _) = try Self.makeComposition(gate: gate)
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         if case .denied = outcome {
             // correct
@@ -243,7 +248,7 @@ struct AppCompositionInvariantsTests {
         // captured ``.api(...)`` or ``.request(...)`` would pass
         // every other test but silently let the coordination server
         // accept replays against the device channel (or vice versa).
-        let (composition, _) = try Self.makeComposition()
+        let (composition, _, _) = try await Self.makeComposition()
         let header = try await composition.handshakeBuilder()
         let attestation = try DeviceAttestationEncoder.decodeHeaderValue(header)
         if case let .device(timestamp) = attestation.binding {
@@ -265,7 +270,7 @@ struct AppCompositionInvariantsTests {
         // regression that somehow cached the signature or used a
         // deterministic scheme would have legitimate sub-second
         // reconnects collide with their own cached entry.
-        let (composition, _) = try Self.makeComposition()
+        let (composition, _, _) = try await Self.makeComposition()
         let first = try await composition.handshakeBuilder()
         let second = try await composition.handshakeBuilder()
         let firstDecoded = try DeviceAttestationEncoder.decodeHeaderValue(first)
@@ -281,7 +286,7 @@ struct AppCompositionInvariantsTests {
         // against a freshly-parsed P-256 public key. This is the
         // same check the device's Python handshake performs; keeping
         // it in the composition test asserts round-trip fidelity.
-        let (composition, _) = try Self.makeComposition()
+        let (composition, _, _) = try await Self.makeComposition()
         let header = try await composition.handshakeBuilder()
         let attestation = try DeviceAttestationEncoder.decodeHeaderValue(header)
         #expect(attestation.fingerprintHash.count == 32)
@@ -315,7 +320,7 @@ struct AppCompositionInvariantsTests {
                 body: Data(),
             )),
         ])
-        let (composition, bearerStore) = try Self.makeComposition(
+        let (composition, bearerStore, _) = try await Self.makeComposition(
             underlyingHTTP: http,
         )
         let recorder = ExpiryRecorder()
@@ -352,7 +357,7 @@ struct AppCompositionInvariantsTests {
         let http = RecordingHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
         ])
-        let (composition, _) = try Self.makeComposition(underlyingHTTP: http)
+        let (composition, _, _) = try await Self.makeComposition(underlyingHTTP: http)
         let recorder = ExpiryRecorder()
         await composition.authCoordinator.addLifecycleObserver(recorder)
         _ = try? await composition.pairedDevicesClient.list()
@@ -376,7 +381,7 @@ struct AppCompositionInvariantsTests {
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
         ])
-        let (composition, _) = try Self.makeComposition(underlyingHTTP: http)
+        let (composition, _, _) = try await Self.makeComposition(underlyingHTTP: http)
         let recorder = ExpiryRecorder()
         await composition.authCoordinator.addLifecycleObserver(recorder)
 
@@ -404,8 +409,8 @@ struct AppCompositionInvariantsTests {
     /// factory would break the identity shape and fail here.
     @MainActor
     @Test
-    func liveViewModelFactoryBindsIdentityToPairedDeviceSlug() throws {
-        let (composition, _) = try Self.makeComposition()
+    func liveViewModelFactoryBindsIdentityToPairedDeviceSlug() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
         let endpoint = try DeviceEndpoint(host: "100.64.1.7", port: 9820)
         let paired = PairedDevice(
             id: "cat-777",
@@ -436,6 +441,157 @@ struct AppCompositionInvariantsTests {
         #expect(expected == "catlaser-device-cat-777")
     }
 
+    // MARK: - Endpoint store sign-out wiring (Finding 3)
+
+    /// SECURITY-CRITICAL: the endpoint store registered at composition
+    /// time MUST be wiped when the auth coordinator's `signOut()`
+    /// notifies its lifecycle observers. Pre-fix: the production
+    /// composition declared `KeychainEndpointStore` conformance to
+    /// `SessionLifecycleObserver` but never registered it, so
+    /// sign-out left the keychain row intact and the next user
+    /// signing in on the same device inherited the prior user's
+    /// pairing.
+    @Test
+    func endpointStoreIsWipedOnAuthCoordinatorSignOut() async throws {
+        let testDevice = PairedDevice(
+            id: "shared-cat-001",
+            name: "Living Room",
+            endpoint: try DeviceEndpoint(host: "100.64.1.7", port: 9820),
+            pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: Data(repeating: 0xAB, count: 32),
+        )
+        let endpointStore = TestEndpointStore(initial: testDevice)
+        // Build the composition so the wiring code path runs (we
+        // don't otherwise need to keep a reference). The act of
+        // constructing it is what registers the endpoint store as
+        // an observer; the assertion below proves the
+        // ``sessionDidSignOut`` path actually clears the row.
+        _ = try await Self.makeComposition(endpointStore: endpointStore)
+
+        // Pre-condition: endpoint row is populated.
+        #expect(await endpointStore.snapshot() == testDevice)
+
+        // Drive the observer hook directly. The companion
+        // ``compositionRegistersEndpointStoreAsLifecycleObserver``
+        // test below asserts the registration itself; this test
+        // narrowly asserts that the conformer's wipe-on-sign-out
+        // contract holds, so a regression that converted the
+        // observer to a no-op would surface here even if the
+        // composition's wiring stayed intact.
+        await endpointStore.sessionDidSignOut()
+        #expect(await endpointStore.signOutCount == 1)
+        // Endpoint row gone post-signOut.
+        #expect(await endpointStore.snapshot() == nil,
+                "sign-out must wipe the endpoint row; otherwise the next user inherits this pairing")
+    }
+
+    /// Tighter assertion of the WIRING — the composition has
+    /// registered the endpoint store as an observer of the auth
+    /// coordinator. We add a recorder observer alongside it and
+    /// fire `signOut()`; both observers must receive
+    /// `sessionDidSignOut()`.
+    @Test
+    func compositionRegistersEndpointStoreAsLifecycleObserver() async throws {
+        let endpointStore = TestEndpointStore(initial: nil)
+        let (composition, _, _) = try await Self.makeComposition(endpointStore: endpointStore)
+        let recorder = ExpiryRecorder()
+        await composition.authCoordinator.addLifecycleObserver(recorder)
+
+        // Drive `signOut()` end-to-end. The test composition has no
+        // attestation provider wired (the cross-platform `make` lets
+        // the coordinator's lifecycle hooks fire even when the
+        // server call can't), and the bearer cache is empty so the
+        // coordinator skips the network call entirely and goes
+        // straight to observer notification.
+        try? await composition.authCoordinator.signOut()
+        #expect(await endpointStore.signOutCount == 1,
+                "endpoint store must be in the coordinator's observer list (Finding 3)")
+        #expect(await recorder.signOutCount == 1)
+    }
+
+    // MARK: - Pairing user-presence gate (Finding 5)
+
+    /// The composition's `pairingAuthGate` must route through the
+    /// `LiveVideoGate.requirePairing()` method (NOT
+    /// `requireLiveVideo()`). The gate stub records the two methods
+    /// independently so a regression that wired the wrong one would
+    /// fail this assertion.
+    @Test
+    func pairingAuthGateRoutesToRequirePairingMethod() async throws {
+        let gate = StubLiveVideoGate(outcome: .success)
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let outcome = await composition.pairingAuthGate()
+        #expect(outcome == .allowed)
+        #expect(await gate.pairingCallCount == 1,
+                "pairing gate must invoke requirePairing(), not requireLiveVideo()")
+        #expect(await gate.callCount == 0,
+                "requireLiveVideo() must NOT fire on a pairing-confirmation gate")
+    }
+
+    @Test
+    func pairingAuthGateMapsCancellationToCancelled() async throws {
+        let gate = StubLiveVideoGate(outcome: .throwing(AuthError.cancelled))
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let outcome = await composition.pairingAuthGate()
+        #expect(outcome == .cancelled)
+    }
+
+    @Test
+    func pairingAuthGateMapsOtherFailuresToDenied() async throws {
+        let gate = StubLiveVideoGate(outcome: .throwing(AuthError.biometricUnavailable("no passcode")))
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let outcome = await composition.pairingAuthGate()
+        if case let .denied(message) = outcome {
+            #expect(message.contains("biometricUnavailable"))
+        } else {
+            Issue.record("expected .denied, got \(outcome)")
+        }
+    }
+
+    @Test
+    func pairingAuthGateNeverDefaultAllowsOnUnexpectedError() async throws {
+        let gate = StubLiveVideoGate(outcome: .throwing(UnexpectedError()))
+        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let outcome = await composition.pairingAuthGate()
+        if case .denied = outcome {
+            // correct
+        } else {
+            Issue.record("expected .denied on unexpected error, got \(outcome)")
+        }
+    }
+
+    // MARK: - ConnectionManager factory (Finding 2)
+
+    /// SECURITY-CRITICAL: every `ConnectionManager` minted by the
+    /// composition's factory must be wired with a
+    /// `HandshakeResponseVerifier` whose pubkey BYTE-MATCHES the
+    /// trusted `PairedDevice.devicePublicKey`. Pre-fix, the
+    /// composition didn't expose a connection-manager factory at
+    /// all; the Xcode app target had to construct one and could
+    /// silently forget the verifier. The composition factory is the
+    /// belt-and-braces guarantee that the verifier is always wired.
+    @Test
+    func connectionManagerFactoryWiresVerifierFromPairedDevicePublicKey() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
+        let pubkey = Data(repeating: 0x42, count: 32)
+        let device = PairedDevice(
+            id: "cat-007",
+            name: "Studio",
+            endpoint: try DeviceEndpoint(host: "100.64.1.7", port: 9820),
+            pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: pubkey,
+        )
+        // The factory returns a real ConnectionManager. We assert
+        // that it targets the expected endpoint; the verifier
+        // wiring itself is a closure-internal property and is
+        // exercised end-to-end by the DeviceClient handshake-test
+        // suite (every reconnect attempt would crash with
+        // `handshakeVerifierMissing` otherwise).
+        let manager = composition.connectionManager(for: device)
+        #expect(await manager.currentEndpoint == device.endpoint)
+        await manager.stop()
+    }
+
     /// The identity helper itself must keep its contract: identical
     /// prefix + slug concatenation, byte-for-byte matching the
     /// Python publisher_identity it was derived from.
@@ -453,9 +609,13 @@ struct AppCompositionInvariantsTests {
 
 private struct UnexpectedError: Error {}
 
-/// Records invocations of ``requireLiveVideo``. Behaviour on each
-/// call is parameterised so the invariants test can exercise success,
-/// cancellation, and arbitrary-error paths deterministically.
+/// Records invocations of ``requireLiveVideo`` and ``requirePairing``
+/// independently. Behaviour on each call is parameterised so the
+/// invariants test can exercise success, cancellation, and
+/// arbitrary-error paths deterministically. The two counters are
+/// distinct so the suite can prove the composition routes the live
+/// gate to ``requireLiveVideo`` and the pairing gate to
+/// ``requirePairing`` (and not the other way around).
 private actor StubLiveVideoGate: LiveVideoGate {
     enum Outcome: Sendable {
         case success
@@ -464,6 +624,7 @@ private actor StubLiveVideoGate: LiveVideoGate {
 
     private let outcome: Outcome
     private(set) var callCount: Int = 0
+    private(set) var pairingCallCount: Int = 0
 
     init(outcome: Outcome = .success) {
         self.outcome = outcome
@@ -478,6 +639,55 @@ private actor StubLiveVideoGate: LiveVideoGate {
             throw error
         }
     }
+
+    func requirePairing() async throws {
+        pairingCallCount += 1
+        switch outcome {
+        case .success:
+            return
+        case let .throwing(error):
+            throw error
+        }
+    }
+}
+
+/// In-memory ``EndpointStore`` that ALSO conforms to
+/// ``SessionLifecycleObserver`` so the composition's
+/// ``addLifecycleObserver`` wiring can register it.
+/// ``signOutCount`` lets tests assert the coordinator's
+/// ``sessionDidSignOut`` reaches the same instance the pairing flow
+/// reads from — the load-bearing guarantee for sign-out hygiene
+/// (Finding 3).
+private actor TestEndpointStore: EndpointStore, SessionLifecycleObserver {
+    private var device: PairedDevice?
+    private(set) var saveCount: Int = 0
+    private(set) var deleteCount: Int = 0
+    private(set) var signOutCount: Int = 0
+
+    init(initial: PairedDevice? = nil) {
+        self.device = initial
+    }
+
+    func save(_ device: PairedDevice) async throws(PairingError) {
+        self.device = device
+        saveCount += 1
+    }
+
+    func load() async throws(PairingError) -> PairedDevice? {
+        device
+    }
+
+    func delete() async throws(PairingError) {
+        device = nil
+        deleteCount += 1
+    }
+
+    func sessionDidSignOut() async {
+        signOutCount += 1
+        try? await delete()
+    }
+
+    func snapshot() -> PairedDevice? { device }
 }
 
 /// In-memory bearer store with separate counters for

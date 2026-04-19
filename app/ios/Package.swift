@@ -241,6 +241,12 @@ let package = Package(
                 // suite cannot exercise the wiring end-to-end.
                 "CatLaserLive",
                 "CatLaserPairing",
+                // Pairing test support brings the
+                // ``FakeNetworkPathMonitor`` the composition's
+                // production-shape ``connectionManager(for:)``
+                // factory needs to construct a supervisor without
+                // touching ``Network`` framework on Linux CI.
+                "CatLaserPairingTestSupport",
                 "CatLaserDevice",
                 "CatLaserDeviceTestSupport",
                 "CatLaserProto",

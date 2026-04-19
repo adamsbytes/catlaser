@@ -25,6 +25,57 @@ struct DeviceClientTests {
         return (client, transport)
     }
 
+    /// Build a (client, transport, signer) triple wired with a real
+    /// ``HandshakeResponseVerifier``. Tests that exercise the
+    /// handshake path use this so the production-shape contract
+    /// (handshake without verifier is forbidden) is honoured.
+    private func makeAuthenticatedClient(
+        requestTimeout: TimeInterval = 5.0,
+    ) -> (DeviceClient, InMemoryDeviceTransport, Curve25519.Signing.PrivateKey) {
+        let signer = Curve25519.Signing.PrivateKey()
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(
+            transport: transport,
+            requestTimeout: requestTimeout,
+            responseVerifier: HandshakeResponseVerifier(
+                devicePublicKey: signer.publicKey.rawRepresentation,
+            ),
+        )
+        return (client, transport, signer)
+    }
+
+    /// Build an ``AuthResponse`` `DeviceEvent` properly signed by
+    /// `signer` so a real ``HandshakeResponseVerifier`` accepts it.
+    /// Centralised so each handshake-path test does not have to
+    /// reimplement the transcript layout.
+    fileprivate static func signedAuthResponseEvent(
+        nonce: Data,
+        requestID: UInt32,
+        signer: Curve25519.Signing.PrivateKey,
+        ok: Bool = true,
+        reason: String = "",
+        signedAt: Date = Date(),
+    ) throws -> Catlaser_App_V1_DeviceEvent {
+        let signedAtNs = Int64(signedAt.timeIntervalSince1970 * 1_000_000_000)
+        let transcript = HandshakeResponseVerifier.buildTranscript(
+            nonce: nonce,
+            signedAtUnixNs: signedAtNs,
+            ok: ok,
+            reason: reason,
+        )
+        let signature = try signer.signature(for: transcript)
+        var event = Catlaser_App_V1_DeviceEvent()
+        event.requestID = requestID
+        var response = Catlaser_App_V1_AuthResponse()
+        response.ok = ok
+        response.reason = reason
+        response.nonce = nonce
+        response.signature = signature
+        response.signedAtUnixNs = signedAtNs
+        event.authResponse = response
+        return event
+    }
+
     private func catProfileListEvent(names: [String]) -> Catlaser_App_V1_DeviceEvent {
         var list = Catlaser_App_V1_CatProfileList()
         list.profiles = names.map { name in
@@ -388,15 +439,29 @@ struct DeviceClientTests {
     @Test
     func handshakeHappyPathSendsAuthRequestAndAcceptsResponse() async throws {
         // The client MUST send the handshake as its first frame. The
-        // scripted server echoes an AuthResponse(ok=true). After the
-        // handshake, normal request/response continues to work.
-        let (client, transport) = makeClient()
+        // scripted server echoes a properly-signed AuthResponse(ok=true)
+        // — production wiring requires a verifier whenever a handshake
+        // is supplied, so the response must validate under the
+        // verifier's pubkey or `connect` rejects with
+        // `.handshakeSignatureInvalid` regardless of the `ok` bit.
+        // After the handshake, normal request/response continues to
+        // work.
+        let (client, transport, signer) = makeAuthenticatedClient()
+        // ``Curve25519.Signing.PrivateKey`` is not ``Sendable``; capture
+        // its raw bytes (which are) and reconstruct the signer inside
+        // the handler closure.
+        let signerRaw = signer.rawRepresentation
         let server = ScriptedDeviceServer(transport: transport) { request in
-            if case .auth = request.request {
-                var event = Catlaser_App_V1_DeviceEvent()
-                var response = Catlaser_App_V1_AuthResponse()
-                response.ok = true
-                event.authResponse = response
+            if case let .auth(authReq) = request.request {
+                guard let signerCopy = try? Curve25519.Signing.PrivateKey(rawRepresentation: signerRaw),
+                      let event = try? Self.signedAuthResponseEvent(
+                          nonce: authReq.nonce,
+                          requestID: request.requestID,
+                          signer: signerCopy,
+                      )
+                else {
+                    return .silent
+                }
                 return .reply(event)
             }
             // The post-handshake GetStatus ping verifies the connection
@@ -426,18 +491,34 @@ struct DeviceClientTests {
 
     @Test
     func handshakeRejectedResponseThrowsHandshakeFailed() async throws {
-        // The server says ok=false with a specific reason. The client
-        // surfaces it as `.handshakeFailed(reason:)` and tears the
-        // transport down — `isConnected` must read false after the
-        // throw so callers can drive reconnect with backoff.
-        let (client, transport) = makeClient()
+        // The server says ok=false with a specific reason — but the
+        // response is signed by the genuine device key, so the verifier
+        // accepts the signature and the client honours the rejection.
+        // `isConnected` must read false after the throw so callers
+        // can drive reconnect with backoff.
+        //
+        // The signed-rejection path is load-bearing: a signed `ok=false`
+        // is the ONLY way an attacker can convince the client to give
+        // up on a session. An impostor cannot forge a signed `ok=false`
+        // (they don't have the device's private key), and a forged
+        // unsigned `ok=false` lands on `.handshakeSignatureInvalid`,
+        // which the supervisor treats as transient — preventing a
+        // denial-of-pairing attack from a tunnel-internal MitM.
+        let (client, transport, signer) = makeAuthenticatedClient()
+        let signerRaw = signer.rawRepresentation
         let server = ScriptedDeviceServer(transport: transport) { request in
-            if case .auth = request.request {
-                var event = Catlaser_App_V1_DeviceEvent()
-                var response = Catlaser_App_V1_AuthResponse()
-                response.ok = false
-                response.reason = "DEVICE_AUTH_NOT_AUTHORIZED"
-                event.authResponse = response
+            if case let .auth(authReq) = request.request {
+                guard let signerCopy = try? Curve25519.Signing.PrivateKey(rawRepresentation: signerRaw),
+                      let event = try? Self.signedAuthResponseEvent(
+                          nonce: authReq.nonce,
+                          requestID: request.requestID,
+                          signer: signerCopy,
+                          ok: false,
+                          reason: "DEVICE_AUTH_NOT_AUTHORIZED",
+                      )
+                else {
+                    return .silent
+                }
                 return .reply(event)
             }
             return .silent
@@ -465,8 +546,10 @@ struct DeviceClientTests {
         // The attestation builder itself can throw (e.g. SE key
         // unavailable, clock out of range). The error must be mapped
         // to `.handshakeFailed` so `ConnectionManager`'s reconnect
-        // loop handles it like a server rejection.
-        let (client, transport) = makeClient()
+        // loop handles it like a server rejection. The verifier is
+        // wired (production-shape), but the builder fails before any
+        // handshake frame is sent so the verifier is never consulted.
+        let (client, transport, _) = makeAuthenticatedClient()
         let server = ScriptedDeviceServer(transport: transport) { _ in .silent }
         await server.run()
 
@@ -492,8 +575,11 @@ struct DeviceClientTests {
         // The server's first reply is anything other than
         // AuthResponse (simulating a protocol regression). The
         // client must refuse to treat it as a successful handshake
-        // and must close the connection.
-        let (client, transport) = makeClient()
+        // and must close the connection. The verifier is wired
+        // (production-shape) but is never consulted because the
+        // event isn't an AuthResponse — the type-of-event check
+        // fires first.
+        let (client, transport, _) = makeAuthenticatedClient()
         let server = ScriptedDeviceServer(transport: transport) { request in
             if case .auth = request.request {
                 var event = Catlaser_App_V1_DeviceEvent()
@@ -564,6 +650,121 @@ struct DeviceClientTests {
         #expect(await !client.isConnected)
     }
 
+    /// PRE-HANDSHAKE AUTH_REVOKED MUST NOT BE HONOURED.
+    ///
+    /// Threat model: an impostor that wins the TCP-accept race on the
+    /// Tailscale endpoint (or a tunnel-internal MitM) can write a
+    /// `DeviceError(code: AUTH_REVOKED, request_id: 0)` frame onto the
+    /// connection BEFORE the handshake's Ed25519 verification has had
+    /// a chance to fail. The pre-fix behaviour took that signal at
+    /// face value and routed it through `ConnectionManager` to
+    /// `PairingViewModel.unpairAfterRevocation`, wiping the keychain
+    /// pairing — a permanent denial-of-pairing with no cryptographic
+    /// gate.
+    ///
+    /// The fix: `handleFrame` only honours `AUTH_REVOKED` when
+    /// `state == .connected`, i.e. AFTER the handshake has succeeded
+    /// and the device's `AuthResponse` has verified under the paired
+    /// public key. Pre-handshake the frame flows through normal
+    /// routing (request_id 0 → events stream) and is discarded.
+    /// This test forges the impostor's pre-handshake AUTH_REVOKED and
+    /// asserts the connect path surfaces a NON-terminal error
+    /// (handshake reply was wrong kind, not authRevoked) — the
+    /// supervisor's transient-failure path takes over and the pairing
+    /// survives.
+    @Test
+    func preHandshakeAuthRevokedFrameDoesNotTriggerTerminalRevocation() async throws {
+        // Production-shape client: verifier wired, handshake builder
+        // supplied. The scripted server sends an AUTH_REVOKED
+        // unsolicited frame INSTEAD of an AuthResponse — exactly what
+        // an impostor that doesn't have the device's private key would
+        // do (it can't sign a valid AuthResponse, but it can echo any
+        // unsigned bytes).
+        let (client, transport, _) = makeAuthenticatedClient(requestTimeout: 1.0)
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            if case .auth = request.request {
+                // Forge AUTH_REVOKED with request_id 0 — the wire shape
+                // a tunnel-internal attacker would push hoping to
+                // trigger the early-handle path. Because we are still
+                // in `.handshaking`, the early-handle gate refuses to
+                // honour it; the frame reaches the events stream and
+                // the handshake reply path eventually sees the absence
+                // of an AuthResponse for the request_id we sent.
+                var event = Catlaser_App_V1_DeviceEvent()
+                var err = Catlaser_App_V1_DeviceError()
+                err.code = DeviceClientError.authRevokedCode
+                err.message = "FORGED — should be ignored pre-handshake"
+                event.error = err
+                event.requestID = 0
+                return .reply(event)
+            }
+            return .silent
+        }
+        await server.run()
+
+        do {
+            try await client.connect { "header" }
+            Issue.record("expected handshake to fail on missing AuthResponse")
+        } catch let error as DeviceClientError {
+            // Critical assertion: the error is NOT
+            // `.authRevoked(...)` and is NOT
+            // `isTerminalAuthRevocation`. A request timeout (the
+            // handshake's pending `AuthRequest` was never answered
+            // with an AuthResponse) is the expected outcome — the
+            // forged AUTH_REVOKED with request_id 0 went to the
+            // events stream and the handshake's pending continuation
+            // timed out waiting for a properly-correlated reply.
+            #expect(!error.isTerminalAuthRevocation,
+                    "pre-handshake AUTH_REVOKED must NOT classify as terminal — got \(error)")
+            if case .authRevoked = error {
+                Issue.record("pre-handshake AUTH_REVOKED leaked into terminal path")
+            }
+        }
+        #expect(!(await client.isConnected))
+        await server.stop()
+    }
+
+    /// VERIFIER REQUIRED WHEN HANDSHAKE IS PROVIDED.
+    ///
+    /// A `connect(handshake:)` call without a verifier wired at
+    /// init MUST fail loudly with `.handshakeVerifierMissing` BEFORE
+    /// the builder closure runs (so no Secure-Enclave signing op
+    /// burns and no wire bytes leak). This is the type-system
+    /// invariant that prevents a refactor from accidentally
+    /// constructing a production-shape DeviceClient that would
+    /// silently accept a forged `AuthResponse` from any party that
+    /// can speak the wire framing.
+    @Test
+    func handshakeWithoutVerifierThrowsBeforeAnyWireWork() async throws {
+        let transport = InMemoryDeviceTransport()
+        // No verifier passed — production-shape contract violation.
+        let client = DeviceClient(
+            transport: transport,
+            requestTimeout: 1.0,
+        )
+        let builderCalls = BuilderCallCounter()
+        do {
+            try await client.connect { [builderCalls] in
+                await builderCalls.increment()
+                return "header"
+            }
+            Issue.record("expected throw on missing verifier")
+        } catch let error as DeviceClientError {
+            #expect(error == .handshakeVerifierMissing)
+        }
+        #expect(await builderCalls.count == 0,
+                "verifier-missing gate must reject BEFORE the builder is invoked — no SE signing op should burn")
+        #expect(!(await client.isConnected))
+    }
+
+    /// Tiny actor-backed counter used by the verifier-missing test
+    /// to observe whether the handshake builder was ever invoked.
+    /// Sendable so it can be captured in the `@Sendable` closure.
+    private actor BuilderCallCounter {
+        private(set) var count: Int = 0
+        func increment() { count += 1 }
+    }
+
     /// The terminal-auth classifier must stay in sync with the two
     /// wire signals that carry the revocation. A regression here would
     /// let `ConnectionManager` keep reconnecting against an endpoint
@@ -612,7 +813,7 @@ struct DeviceClientTests {
         // until the test explicitly unblocks it. Meanwhile, a
         // concurrent `request(_:)` call is issued — it must throw
         // synchronously, without ever seeing the wire.
-        let (client, transport) = makeClient()
+        let (client, transport, signer) = makeAuthenticatedClient()
         let gate = HandshakeGate()
         async let connectResult: Void = client.connect(handshake: {
             // Park until the test resumes us. Once resumed, return a
@@ -643,7 +844,7 @@ struct DeviceClientTests {
             #expect(error == .notConnected)
         }
 
-        // Unblock the handshake and complete it with a valid
+        // Unblock the handshake and complete it with a properly-signed
         // AuthResponse. The AuthRequest frame should be the FIRST and
         // ONLY frame on the outbound path at this point.
         await gate.release()
@@ -654,10 +855,11 @@ struct DeviceClientTests {
         } else {
             Issue.record("first outbound frame was not AuthRequest: \(String(describing: firstFrame.request))")
         }
-        var ok = Catlaser_App_V1_DeviceEvent()
-        ok.authResponse = Catlaser_App_V1_AuthResponse()
-        ok.authResponse.ok = true
-        ok.requestID = firstFrame.requestID
+        let ok = try Self.signedAuthResponseEvent(
+            nonce: firstFrame.auth.nonce,
+            requestID: firstFrame.requestID,
+            signer: signer,
+        )
         try transport.deliver(event: ok)
         try await connectResult
 
@@ -673,7 +875,7 @@ struct DeviceClientTests {
         // must also gate on `.connected`, not `.handshaking`, so an
         // attacker or buggy caller cannot smuggle a non-auth frame
         // past the handshake using the zero-request_id path.
-        let (client, transport) = makeClient()
+        let (client, transport, signer) = makeAuthenticatedClient()
         let gate = HandshakeGate()
         async let connectResult: Void = client.connect(handshake: {
             await gate.wait()
@@ -700,10 +902,11 @@ struct DeviceClientTests {
         } else {
             Issue.record("first frame after unblock was not AuthRequest")
         }
-        var ok = Catlaser_App_V1_DeviceEvent()
-        ok.authResponse = Catlaser_App_V1_AuthResponse()
-        ok.authResponse.ok = true
-        ok.requestID = first.requestID
+        let ok = try Self.signedAuthResponseEvent(
+            nonce: first.auth.nonce,
+            requestID: first.requestID,
+            signer: signer,
+        )
         try transport.deliver(event: ok)
         try await connectResult
 
@@ -717,17 +920,18 @@ struct DeviceClientTests {
         // lands. A prior implementation flipped the flag to true
         // before the handshake and relied on composition discipline
         // to keep callers out — the type system now enforces it.
-        let (client, transport) = makeClient()
+        let (client, transport, signer) = makeAuthenticatedClient()
         async let connectResult: Void = client.connect(handshake: { "header" })
 
         let auth = try await transport.nextAppRequest(timeout: 2.0)
         #expect(await client.isConnected == false,
                 "isConnected must remain false during .handshaking")
 
-        var reply = Catlaser_App_V1_DeviceEvent()
-        reply.authResponse = Catlaser_App_V1_AuthResponse()
-        reply.authResponse.ok = true
-        reply.requestID = auth.requestID
+        let reply = try Self.signedAuthResponseEvent(
+            nonce: auth.auth.nonce,
+            requestID: auth.requestID,
+            signer: signer,
+        )
         try transport.deliver(event: reply)
         try await connectResult
 
@@ -737,18 +941,20 @@ struct DeviceClientTests {
 
     @Test
     func handshakeRejectionClosesClientWithoutFlippingToConnected() async throws {
-        // A rejected handshake (ok=false) must surface the typed
+        // A signed `ok=false` AuthResponse must surface the typed
         // `handshakeFailed(reason:)` error and leave the client in a
         // terminal state — it must never transition to `.connected`.
-        let (client, transport) = makeClient()
+        let (client, transport, signer) = makeAuthenticatedClient()
         async let connectResult: Void = client.connect(handshake: { "header" })
 
         let auth = try await transport.nextAppRequest(timeout: 2.0)
-        var reply = Catlaser_App_V1_DeviceEvent()
-        reply.authResponse = Catlaser_App_V1_AuthResponse()
-        reply.authResponse.ok = false
-        reply.authResponse.reason = "DEVICE_AUTH_NOT_AUTHORIZED"
-        reply.requestID = auth.requestID
+        let reply = try Self.signedAuthResponseEvent(
+            nonce: auth.auth.nonce,
+            requestID: auth.requestID,
+            signer: signer,
+            ok: false,
+            reason: "DEVICE_AUTH_NOT_AUTHORIZED",
+        )
         try transport.deliver(event: reply)
 
         do {
@@ -782,19 +988,19 @@ struct DeviceClientTests {
         // The client-side nonce is 16 bytes — matches the device's
         // NONCE_LENGTH constant. A different length would make the
         // device reject the handshake with DEVICE_AUTH_NONCE_INVALID.
-        let (client, transport) = makeClient()
+        let (client, transport, signer) = makeAuthenticatedClient()
         async let connectResult: Void = client.connect(handshake: { "header" })
         let auth = try await transport.nextAppRequest(timeout: 2.0)
         #expect(auth.auth.nonce.count == 16)
 
-        // Reply with an ok response so the handshake completes (no
-        // verifier wired, so the signature on the response is
-        // ignored — the test is about the request-side nonce).
-        var reply = Catlaser_App_V1_DeviceEvent()
-        reply.authResponse = Catlaser_App_V1_AuthResponse()
-        reply.authResponse.ok = true
-        reply.authResponse.nonce = auth.auth.nonce
-        reply.requestID = auth.requestID
+        // Reply with a properly-signed ok response so the handshake
+        // completes — production-shape handshake requires a verifier
+        // and a verifying signature on the response.
+        let reply = try Self.signedAuthResponseEvent(
+            nonce: auth.auth.nonce,
+            requestID: auth.requestID,
+            signer: signer,
+        )
         try transport.deliver(event: reply)
         try await connectResult
         await client.disconnect()
