@@ -80,23 +80,23 @@ struct ConnectingView: View {
 
     private var title: String {
         switch connectionState {
-        case .waitingForNetwork: "Waiting for network"
-        case .backingOff: "Reconnecting to your Catlaser"
-        case .failed: "Can't reach your Catlaser"
-        default: "Connecting to your Catlaser"
+        case .waitingForNetwork: PairingStrings.waitingForNetworkTitle
+        case .backingOff: PairingStrings.backingOffTitle
+        case .failed: PairingStrings.connectionFailedTitle
+        default: PairingStrings.connectingTitle
         }
     }
 
     private var subtitle: String {
         switch connectionState {
         case .waitingForNetwork:
-            "We'll reconnect automatically once your phone is back online."
+            PairingStrings.waitingForNetworkSubtitle
         case .backingOff:
-            "Your device is reachable but the last attempt didn't land. Trying again…"
+            PairingStrings.backingOffSubtitle
         case let .failed(error):
             PairingStrings.errorMessage(for: error)
         default:
-            "Your phone and device are talking. This usually takes a second or two."
+            PairingStrings.connectingSubtitle
         }
     }
 

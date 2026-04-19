@@ -136,7 +136,16 @@ public struct HistoryView: View {
     private var catsPane: some View {
         switch viewModel.catsState {
         case .idle, .loading:
-            loadingPane(label: HistoryStrings.catListLoadingLabel)
+            // Skeleton rows feel ~2x faster than a centred spinner —
+            // the user sees the right shape immediately and the
+            // perceived load time collapses to the time it takes for
+            // the real rows to appear in place. Six rows is enough to
+            // fill a phone screen without reaching the bottom of the
+            // safe area on a Pro Max.
+            skeletonScroll {
+                CatProfileSkeletonRow()
+            }
+            .accessibilityLabel(Text(HistoryStrings.catListLoadingLabel))
         case let .loaded(profiles, isRefreshing):
             if profiles.isEmpty {
                 emptyPane(
@@ -159,19 +168,47 @@ public struct HistoryView: View {
         profiles: [Catlaser_App_V1_CatProfile],
         isRefreshing: Bool,
     ) -> some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                ForEach(profiles, id: \.catID) { profile in
-                    CatProfileRow(
-                        profile: profile,
-                        onEdit: { editingProfile = profile },
-                        onDelete: { pendingDeletion = profile },
-                    )
+        // Native ``List`` rather than the previous ``ScrollView`` so
+        // SwiftUI's ``.swipeActions`` modifier engages — that is the
+        // iOS-native gesture for row-level actions and what users
+        // reach for first on every other shipping app. The plain
+        // style + cleared row chrome preserves the previous card-on-
+        // background visual; ``.scrollContentBackground(.hidden)``
+        // lets the parent's ``SemanticColor.background`` show through.
+        List {
+            ForEach(profiles, id: \.catID) { profile in
+                CatProfileRow(
+                    profile: profile,
+                    onEdit: { editingProfile = profile },
+                    onDelete: { pendingDeletion = profile },
+                )
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        pendingDeletion = profile
+                    } label: {
+                        Label(
+                            HistoryStrings.catRowDeleteButton,
+                            systemImage: "trash",
+                        )
+                    }
+                    Button {
+                        editingProfile = profile
+                    } label: {
+                        Label(
+                            HistoryStrings.catRowEditButton,
+                            systemImage: "pencil",
+                        )
+                    }
+                    .tint(SemanticColor.accent)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(SemanticColor.background)
         .overlay(alignment: .top) {
             if isRefreshing {
                 ProgressView()
@@ -191,7 +228,10 @@ public struct HistoryView: View {
     private var sessionsPane: some View {
         switch viewModel.historyState {
         case .idle, .loading:
-            loadingPane(label: HistoryStrings.sessionsLoadingLabel)
+            skeletonScroll {
+                PlaySessionSkeletonRow()
+            }
+            .accessibilityLabel(Text(HistoryStrings.sessionsLoadingLabel))
         case let .loaded(sessions, _, isRefreshing):
             if sessions.isEmpty {
                 emptyPane(
@@ -244,19 +284,30 @@ public struct HistoryView: View {
 
     // MARK: - Pane chrome
 
-    private func loadingPane(label: String) -> some View {
-        VStack(spacing: 16) {
-            Spacer()
-            ProgressView()
-                .scaleEffect(1.4)
-                .accessibilityLabel(Text(label))
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(SemanticColor.textSecondary)
-                .accessibilityAddTraits(.updatesFrequently)
-            Spacer()
+    /// Skeleton placeholder list shown during initial loads. Renders
+    /// six instances of the supplied row inside the same scroll-view
+    /// chrome the real list uses, then applies a redacted-placeholder
+    /// reason so the system paints a uniform grey wash. The whole
+    /// container becomes a single combined accessibility element that
+    /// announces "Loading content" — VoiceOver users get one clean
+    /// announcement instead of six redundant readings of the
+    /// placeholder rows.
+    private func skeletonScroll<Row: View>(@ViewBuilder _ row: () -> Row) -> some View {
+        let prototypeRow = row()
+        return ScrollView {
+            VStack(spacing: 12) {
+                ForEach(0 ..< 6, id: \.self) { _ in
+                    prototypeRow
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .redacted(reason: .placeholder)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(Text(HistoryStrings.skeletonAccessibility))
+            .accessibilityAddTraits(.updatesFrequently)
         }
-        .accessibilityElement(children: .combine)
+        .scrollDisabled(true)
     }
 
     private func emptyPane(iconName: String, title: String, subtitle: String) -> some View {
@@ -487,6 +538,17 @@ private struct EditCatSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.words)
                     .autocorrectionDisabled(false)
+                    .submitLabel(.done)
+                    .onSubmit {
+                        // Keyboard return on the sole text field is
+                        // the obvious commit gesture; mirror what the
+                        // Save button does. The Save button stays the
+                        // canonical entry point — this is just a
+                        // shortcut for users on the keyboard.
+                        guard !isSubmitting, canSubmit else { return }
+                        Haptics.commit.play()
+                        Task { await submit() }
+                    }
                     .accessibilityID(.historyEditNameField)
                     .accessibilityLabel(Text(HistoryStrings.editNameLabel))
                 if let validationError {
@@ -523,6 +585,15 @@ private struct EditCatSheet: View {
                     #endif
                 }
         }
+        // Edit sheet is a single field + buttons — full-screen would
+        // hide the underlying list pointlessly. ``.medium`` brings up
+        // a half sheet that keeps context visible; ``.large`` lets
+        // the user expand if they want more breathing room or if
+        // dynamic-type pushes the layout.
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        #endif
     }
 
     private var saveButton: some View {
@@ -587,6 +658,12 @@ private struct NameNewCatSheet: View {
                 TextField(HistoryStrings.editNamePlaceholder, text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.words)
+                    .submitLabel(.done)
+                    .onSubmit {
+                        guard !isSubmitting, canSubmit else { return }
+                        Haptics.commit.play()
+                        Task { await submit() }
+                    }
                     .accessibilityID(.historyNewCatNameField)
                     .accessibilityLabel(Text(HistoryStrings.namingNameLabel))
                 if let validationError {
@@ -627,6 +704,14 @@ private struct NameNewCatSheet: View {
                     #endif
                 }
         }
+        // Naming sheet has a thumbnail + body copy + a single field —
+        // medium sheet keeps the underlying cat list visible at the
+        // top while the user names the cat, large is available for
+        // accessibility-size users.
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        #endif
     }
 
     private var saveButton: some View {
@@ -655,6 +740,80 @@ private struct NameNewCatSheet: View {
         // The VM removes the prompt on success and on `NOT_FOUND`;
         // the sheet binding observes ``pendingNewCats.first`` and
         // dismisses automatically when it changes.
+    }
+}
+
+// MARK: - Skeleton placeholder rows
+
+/// Cat-row skeleton used during the initial cats-pane load. The shape
+/// matches ``CatProfileRow`` exactly (thumbnail square + three text
+/// lines + two action chips on the trailing edge) so when the real
+/// rows arrive there is no visible jump in layout. Painted in a
+/// single neutral fill — the parent applies ``.redacted(reason:
+/// .placeholder)`` so SwiftUI takes care of the placeholder wash.
+private struct CatProfileSkeletonRow: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(SemanticColor.elevatedFill)
+                .frame(width: 64, height: 64)
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 140, height: 14)
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 96, height: 10)
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 180, height: 10)
+            }
+            Spacer()
+            VStack(spacing: 8) {
+                Capsule()
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 56, height: 22)
+                Capsule()
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 56, height: 22)
+            }
+        }
+        .padding(12)
+        .background(
+            SemanticColor.groupedBackground,
+            in: RoundedRectangle(cornerRadius: 16),
+        )
+    }
+}
+
+/// Sessions-row skeleton used during the initial sessions-pane load.
+/// Matches the layout of ``PlaySessionRow`` (header line with cat-
+/// summary + date, four stat blocks beneath).
+private struct PlaySessionSkeletonRow: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 140, height: 14)
+                Spacer()
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 80, height: 10)
+            }
+            HStack(spacing: 16) {
+                ForEach(0 ..< 4, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(SemanticColor.elevatedFill)
+                        .frame(width: 36, height: 10)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            SemanticColor.groupedBackground,
+            in: RoundedRectangle(cornerRadius: 16),
+        )
     }
 }
 

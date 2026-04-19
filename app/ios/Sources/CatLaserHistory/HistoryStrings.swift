@@ -50,6 +50,12 @@ public enum HistoryStrings {
         comment: "Spinner label shown while the cat-profile list loads from the device.",
     )
 
+    public static let skeletonAccessibility = NSLocalizedString(
+        "history.skeleton.accessibility",
+        value: "Loading content",
+        comment: "VoiceOver label for the placeholder skeleton rows shown during list loading.",
+    )
+
     public static let catRowEditButton = NSLocalizedString(
         "history.cats.row.edit",
         value: "Edit",

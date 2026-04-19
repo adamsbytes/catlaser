@@ -325,6 +325,19 @@ private struct EmailEntrySheet: View {
                 .autocapitalization(.none)
                 .autocorrectionDisabled(true)
                 #endif
+                .submitLabel(.send)
+                .onSubmit {
+                    // The keyboard's return key is the obvious commit
+                    // gesture for a single-field form; without
+                    // ``onSubmit`` it would do nothing and the user
+                    // would have to reach for the button. The same
+                    // VM-side validity gate the button uses applies
+                    // here so an invalid address does not silently
+                    // fire a network call.
+                    guard viewModel.canRequestMagicLink else { return }
+                    Haptics.commit.play()
+                    Task { await viewModel.requestMagicLink() }
+                }
                 .textFieldStyle(.roundedBorder)
                 .accessibilityID(.signInEmailField)
                 .accessibilityLabel(Text(SignInStrings.emailFieldLabel))

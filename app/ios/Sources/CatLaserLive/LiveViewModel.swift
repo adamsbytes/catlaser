@@ -81,7 +81,11 @@ public final class LiveViewModel {
     /// isn't left staring at a spinner that will never resolve.
     public static let connectTimeout: TimeInterval = 30
 
-    private let deviceClient: DeviceClient
+    /// The device control channel. ``var`` rather than ``let`` so a
+    /// supervisor reconnect on the SAME paired device can swap in a
+    /// fresh client without tearing down the user-visible streaming
+    /// state. See ``swapDeviceClient(_:eventBroker:)``.
+    private var deviceClient: DeviceClient
     private let sessionFactory: @Sendable () -> any LiveStreamSession
     private let authGate: AuthGate
     private let liveKitAllowlist: LiveKitHostAllowlist
@@ -223,6 +227,32 @@ public final class LiveViewModel {
         if case .failed = state {
             state = .disconnected
         }
+    }
+
+    /// Replace the device control channel and the unsolicited-event
+    /// broker without disturbing the user-visible streaming state.
+    ///
+    /// Called by the host's connection-supervisor reconcile loop when
+    /// a fresh transport lands against the SAME paired device — e.g.
+    /// after a brief network blip. The LiveKit session is independent
+    /// of the device control channel (the publisher → media-server →
+    /// subscriber path does not flow through the device's app-protocol
+    /// socket), so a transient supervisor swap need not throw away the
+    /// active video. If LiveKit also dropped, the events binder will
+    /// observe the underlying `.disconnected` event and transition
+    /// to `.failed` on its own — this method does not pre-judge.
+    ///
+    /// The status-observation task is re-armed against the new broker.
+    /// The previous broker is the caller's responsibility to ``stop()``;
+    /// this method does not own its lifecycle.
+    public func swapDeviceClient(
+        _ newClient: DeviceClient,
+        eventBroker newBroker: DeviceEventBroker,
+    ) {
+        deviceClient = newClient
+        statusObservationTask?.cancel()
+        statusObservationTask = nil
+        startStatusObservation(broker: newBroker)
     }
 
     // MARK: - Test hooks

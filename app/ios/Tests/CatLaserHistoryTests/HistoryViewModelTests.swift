@@ -879,6 +879,107 @@ struct HistoryViewModelTests {
         #expect(vm.pendingNewCats.isEmpty)
     }
 
+    // MARK: - swapDeviceClient (same-device reconnect)
+
+    /// After a same-device reconnect the host hands the VM a fresh
+    /// ``DeviceClient`` and ``DeviceEventBroker`` via ``swapDeviceClient``.
+    /// The loaded cat list and the queued naming prompts must survive
+    /// the swap; subsequent unsolicited pushes must route through the
+    /// NEW broker; subsequent device round-trips must hit the NEW
+    /// client.
+    @Test
+    func swapDeviceClientPreservesLoadedListAndRoutesToNewClient() async throws {
+        let oldFetchCount = LockedCounter()
+        let (vm, oldTransport, oldServer, oldClient) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles:
+                oldFetchCount.increment()
+                return self.reply(profiles: [self.makeProfile(id: "cat-old", name: "Old")])
+            case .getPlayHistory:
+                return self.reply(sessions: [])
+            default:
+                return .error(code: 2, message: "unexpected on old client")
+            }
+        }
+        await vm.start()
+        await eventually {
+            if case let .loaded(profiles, _) = vm.catsState {
+                return profiles.count == 1 && profiles[0].catID == "cat-old"
+            }
+            return false
+        }
+
+        // Queue a pending naming prompt before the swap; it must
+        // survive because in-flight UI state is the whole point of
+        // preserving the VM across the reconnect.
+        try oldTransport.deliver(event: makeNewCatEvent(trackID: 7, thumbnail: Data()))
+        await eventually { vm.pendingNewCats.count == 1 }
+
+        // Build the fresh client + broker, mirroring composition.
+        let newTransport = InMemoryDeviceTransport()
+        let newClient = DeviceClient(transport: newTransport, requestTimeout: 2.0)
+        let newRefreshCount = LockedCounter()
+        let newServer = ScriptedDeviceServer(transport: newTransport, handler: { request in
+            switch request.request {
+            case .getCatProfiles:
+                newRefreshCount.increment()
+                return self.reply(profiles: [
+                    self.makeProfile(id: "cat-old", name: "Old"),
+                    self.makeProfile(id: "cat-new", name: "New"),
+                ])
+            default:
+                return .error(code: 2, message: "unexpected on new client")
+            }
+        })
+        try await newClient.connect()
+        await newServer.run()
+        let newBroker = DeviceEventBroker(client: newClient)
+        newBroker.start()
+        defer {
+            Task {
+                newBroker.stop()
+                await newServer.stop()
+                await newClient.disconnect()
+                await oldServer.stop()
+                await oldClient.disconnect()
+            }
+        }
+
+        vm.swapDeviceClient(newClient, eventBroker: newBroker)
+
+        // Loaded state and pending prompts survived the swap.
+        if case let .loaded(profiles, _) = vm.catsState {
+            #expect(profiles.count == 1)
+            #expect(profiles[0].catID == "cat-old")
+        } else {
+            Issue.record("expected .loaded preserved across swap, got \(vm.catsState)")
+        }
+        #expect(vm.pendingNewCats.count == 1)
+        #expect(vm.pendingNewCats[0].trackIDHint == 7)
+
+        // A push on the OLD broker is now ignored by the VM (the
+        // events task was rebound to the new broker).
+        try oldTransport.deliver(event: makeNewCatEvent(trackID: 999, thumbnail: Data()))
+        try await Task.sleep(nanoseconds: 60_000_000)
+        #expect(vm.pendingNewCats.map(\.trackIDHint) == [7])
+
+        // A push on the NEW broker is observed.
+        try newTransport.deliver(event: makeNewCatEvent(trackID: 8, thumbnail: Data()))
+        await eventually { vm.pendingNewCats.count == 2 }
+        #expect(vm.pendingNewCats.map(\.trackIDHint).sorted() == [7, 8])
+
+        // A subsequent refresh routes to the new client.
+        await vm.refreshCats()
+        if case let .loaded(profiles, _) = vm.catsState {
+            #expect(profiles.map(\.catID).sorted() == ["cat-new", "cat-old"])
+        } else {
+            Issue.record("expected refreshed list, got \(vm.catsState)")
+        }
+        #expect(newRefreshCount.value == 1)
+        // Original load was the only request that hit the old server.
+        #expect(oldFetchCount.value == 1)
+    }
+
     // MARK: - Helpers (event factory)
 
     nonisolated private func makeNewCatEvent(

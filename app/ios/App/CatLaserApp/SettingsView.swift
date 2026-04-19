@@ -40,43 +40,43 @@ struct SettingsView: View {
                 accountSection
                 aboutSection
             }
-            .navigationTitle("Settings")
+            .navigationTitle(SettingsStrings.screenTitle)
             .scrollContentBackground(.hidden)
             .background(SemanticColor.background.ignoresSafeArea())
             .confirmationDialog(
-                "Unpair this Catlaser?",
+                SettingsStrings.confirmUnpairTitle,
                 isPresented: $confirmUnpair,
                 titleVisibility: .visible,
             ) {
-                Button("Unpair", role: .destructive) {
+                Button(SettingsStrings.confirmUnpairAction, role: .destructive) {
                     Haptics.warning.play()
                     Task { await pairingViewModel.unpair() }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button(SettingsStrings.cancelButton, role: .cancel) {}
             } message: {
-                Text("You'll need to scan the QR code on the device to pair again.")
+                Text(SettingsStrings.confirmUnpairMessage)
             }
             .confirmationDialog(
-                "Sign out?",
+                SettingsStrings.confirmSignOutTitle,
                 isPresented: $confirmSignOut,
                 titleVisibility: .visible,
             ) {
-                Button("Sign out", role: .destructive) {
+                Button(SettingsStrings.confirmSignOutAction, role: .destructive) {
                     Haptics.warning.play()
                     Task { await performSignOut() }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button(SettingsStrings.cancelButton, role: .cancel) {}
             } message: {
-                Text("Your Catlaser pairing stays on the device — signing in again restores it.")
+                Text(SettingsStrings.confirmSignOutMessage)
             }
             .alert(
-                "Sign-out issue",
+                SettingsStrings.signOutErrorTitle,
                 isPresented: Binding(
                     get: { signOutError != nil },
                     set: { if !$0 { signOutError = nil } },
                 ),
             ) {
-                Button("OK", role: .cancel) {}
+                Button(SettingsStrings.signOutErrorOK, role: .cancel) {}
             } message: {
                 if let signOutError {
                     Text(signOutError)
@@ -88,7 +88,7 @@ struct SettingsView: View {
     // MARK: - Sections
 
     private var pushSection: some View {
-        Section("Notifications") {
+        Section(SettingsStrings.notificationsSection) {
             // Embedded full push view. The VM's state machine renders
             // whichever pane is appropriate (primer / registered /
             // denied / failed); inside a Form section it sits as one
@@ -101,12 +101,12 @@ struct SettingsView: View {
     }
 
     private var deviceSection: some View {
-        Section("Catlaser device") {
+        Section(SettingsStrings.deviceSection) {
             if case let .paired(device) = pairingViewModel.phase {
-                LabeledRow(label: "Name", value: deviceDisplayName(device))
-                LabeledRow(label: "Device ID", value: device.id, monospaced: true)
+                LabeledRow(label: SettingsStrings.deviceNameLabel, value: deviceDisplayName(device))
+                LabeledRow(label: SettingsStrings.deviceIDLabel, value: device.id, monospaced: true)
                 LabeledRow(
-                    label: "Status",
+                    label: SettingsStrings.deviceStatusLabel,
                     value: PairingStrings.connectionStateLabel(pairingViewModel.connectionState),
                 )
                 Button(role: .destructive) {
@@ -116,27 +116,27 @@ struct SettingsView: View {
                 }
                 .accessibilityLabel(Text(PairingStrings.unpairButton))
             } else {
-                Text("No Catlaser paired.")
+                Text(SettingsStrings.deviceNotPaired)
                     .foregroundStyle(SemanticColor.textSecondary)
             }
         }
     }
 
     private var accountSection: some View {
-        Section("Account") {
+        Section(SettingsStrings.accountSection) {
             Button(role: .destructive) {
                 confirmSignOut = true
             } label: {
-                Text("Sign out")
+                Text(SettingsStrings.signOutButton)
             }
-            .accessibilityLabel(Text("Sign out"))
+            .accessibilityLabel(Text(SettingsStrings.signOutButton))
         }
     }
 
     private var aboutSection: some View {
-        Section("About") {
-            LabeledRow(label: "Version", value: appVersion)
-            LabeledRow(label: "Build", value: buildNumber)
+        Section(SettingsStrings.aboutSection) {
+            LabeledRow(label: SettingsStrings.versionLabel, value: appVersion)
+            LabeledRow(label: SettingsStrings.buildLabel, value: buildNumber)
         }
     }
 
@@ -144,7 +144,7 @@ struct SettingsView: View {
 
     private func deviceDisplayName(_ device: PairedDevice) -> String {
         let name = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "Catlaser" : name
+        return name.isEmpty ? SettingsStrings.deviceFallbackName : name
     }
 
     @MainActor
@@ -154,11 +154,11 @@ struct SettingsView: View {
         } catch {
             // Local state is wiped regardless of the server call's
             // outcome (see AuthCoordinator.signOut docstring); we
-            // surface the diagnostic so the user knows if the server
-            // couldn't be notified, but the app will still return to
-            // the sign-in flow because the lifecycle observer fires
-            // even on throw.
-            signOutError = String(describing: error)
+            // surface a presentable sentence — never the raw error
+            // description, which would leak Swift's structured error
+            // type into the UI. The lifecycle observer still fires on
+            // throw, so the app still returns to the sign-in flow.
+            signOutError = SettingsStrings.signOutErrorMessage(for: error)
         }
     }
 }

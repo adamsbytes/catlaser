@@ -14,6 +14,18 @@ public struct PairingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var errorFocus: Bool
 
+    /// Whether the device's flashlight is currently lit. The QR
+    /// scanner is the source of truth — it flips this back to false
+    /// if the device has no torch or if a torch-on attempt failed at
+    /// the AV layer. ``@State`` because the value is purely UI state
+    /// scoped to the scanning surface.
+    @State private var torchOn: Bool = false
+    /// Whether the active capture device exposes a torch. The scanner
+    /// writes this once on first configure; we hide the torch button
+    /// when no torch exists (front camera, simulator) so the user is
+    /// not offered a control that can't do anything.
+    @State private var torchAvailable: Bool = false
+
     public init(viewModel: PairingViewModel) {
         self.viewModel = viewModel
     }
@@ -92,11 +104,17 @@ public struct PairingView: View {
     }
 
     private var scanningView: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             #if canImport(AVFoundation) && canImport(UIKit) && os(iOS)
             QRScannerView(
+                torchOn: $torchOn,
+                torchAvailable: $torchAvailable,
                 onDecode: { code in
                     Haptics.light.play()
+                    // The user just pointed the camera at a QR — kill
+                    // the torch on the same beat so the bright LED is
+                    // not still on when the confirmation sheet appears.
+                    torchOn = false
                     Task { await viewModel.submitScannedCode(code) }
                 },
                 onRejected: { _ in
@@ -115,6 +133,78 @@ public struct PairingView: View {
                 .foregroundStyle(SemanticColor.textPrimary)
             #endif
 
+            scannerOverlay
+        }
+    }
+
+    /// Reticle + framing chrome painted on top of the camera preview.
+    ///
+    /// The scrim outside the reticle dims the rest of the frame so
+    /// the eye lands on the centre square — same affordance the
+    /// system Camera app's QR mode uses. The reticle's fractional
+    /// rect matches ``QRScannerViewController/reticleFractionalRect``
+    /// so the visible frame the user aligns the QR inside is exactly
+    /// where the metadata detector is looking.
+    @ViewBuilder
+    private var scannerOverlay: some View {
+        #if canImport(AVFoundation) && canImport(UIKit) && os(iOS)
+        let reticleFraction = QRScannerViewController.reticleFractionalRect
+        #else
+        let reticleFraction = CGRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7)
+        #endif
+        GeometryReader { proxy in
+            let reticleSide = min(proxy.size.width, proxy.size.height) * reticleFraction.width
+            let cornerRadius: CGFloat = 16
+            let reticleRect = CGRect(
+                x: (proxy.size.width - reticleSide) / 2,
+                y: (proxy.size.height - reticleSide) / 2,
+                width: reticleSide,
+                height: reticleSide,
+            )
+            ZStack {
+                // Scrim with the reticle area punched out via an
+                // even-odd fill rule. The outer rect contributes to
+                // the fill; the inner rounded rect's interior cancels
+                // against it, leaving the centre bright while the
+                // outside drops to ~45% black. Rendered as a single
+                // ``Path`` (rather than masked composites) because
+                // every SwiftUI version supports `eoFill` natively
+                // and there's no blend-group setup to get wrong.
+                Path { path in
+                    path.addRect(CGRect(origin: .zero, size: proxy.size))
+                    path.addRoundedRect(
+                        in: reticleRect,
+                        cornerSize: CGSize(width: cornerRadius, height: cornerRadius),
+                        style: .continuous,
+                    )
+                }
+                .fill(Color.black.opacity(0.45), style: FillStyle(eoFill: true))
+                .accessibilityHidden(true)
+
+                // Reticle frame stroke for clarity at the edges.
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(Color.white.opacity(0.8), lineWidth: 2)
+                    .frame(width: reticleSide, height: reticleSide)
+                    .accessibilityLabel(Text(PairingStrings.scannerReticleAccessibility))
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .ignoresSafeArea()
+
+        VStack {
+            // Top: torch toggle, only when the active camera supports it.
+            HStack {
+                Spacer()
+                if torchAvailable {
+                    torchToggleButton
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            Spacer()
+
+            // Bottom: prompt + manual-entry escape hatch.
             VStack(spacing: 12) {
                 Text(PairingStrings.scanningPrompt)
                     .font(.body.weight(.semibold))
@@ -144,6 +234,31 @@ public struct PairingView: View {
         }
     }
 
+    private var torchToggleButton: some View {
+        Button {
+            Haptics.selection.play()
+            torchOn.toggle()
+        } label: {
+            Image(systemName: torchOn ? "bolt.fill" : "bolt.slash.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(torchOn ? Color.yellow : .white)
+                .padding(12)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityID(.pairingTorchToggle)
+        .accessibilityLabel(Text(
+            torchOn
+                ? PairingStrings.scannerTorchOffAccessibility
+                : PairingStrings.scannerTorchOnAccessibility,
+        ))
+        .accessibilityValue(Text(
+            torchOn
+                ? PairingStrings.scannerTorchOnButton
+                : PairingStrings.scannerTorchOffButton,
+        ))
+    }
+
     private func manualEntryView(draft: String) -> some View {
         VStack(spacing: 16) {
             Text(PairingStrings.title)
@@ -159,6 +274,15 @@ public struct PairingView: View {
             )
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled(true)
+            .submitLabel(.go)
+            .onSubmit {
+                // The keyboard's return key is the obvious commit
+                // gesture for a one-field form. Mirror the explicit
+                // "Pair" button's behaviour exactly so the user has
+                // two equivalent paths.
+                Haptics.commit.play()
+                Task { await viewModel.submitManualCode() }
+            }
             .padding()
             .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
             .overlay(
@@ -303,6 +427,13 @@ public struct PairingView: View {
                 .padding(.horizontal, 24)
             HStack(spacing: 12) {
                 Button {
+                    // Light rather than warning: the user is backing
+                    // out of an explicit confirmation that has NOT
+                    // yet committed, so the feel should match the
+                    // light "ancillary" haptics elsewhere (Stop
+                    // stream, Dismiss) rather than the ``warning``
+                    // reserved for destructive confirmations.
+                    Haptics.light.play()
                     Task { await viewModel.cancelPairingConfirmation() }
                 } label: {
                     Text(PairingStrings.confirmCancelButton)

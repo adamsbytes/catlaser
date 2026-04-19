@@ -50,6 +50,19 @@ public enum LiveViewStrings {
         comment: "Button that ends the live stream.",
     )
 
+    /// Button shown beneath the connecting spinner so a user who
+    /// taps "Watch live" and gets stuck on a slow handshake (slow
+    /// cellular, sluggish device, server hiccup) can back out without
+    /// waiting for the 30-second connect watchdog. Uses ``stop()``
+    /// internally — the VM idempotently tears down whatever has been
+    /// set up so far (offer request in flight, partial LiveKit dial,
+    /// armed timeout task) and returns to ``.disconnected``.
+    public static let cancelConnectingButton = NSLocalizedString(
+        "live.connecting.cancel.button",
+        value: "Cancel",
+        comment: "Button shown under the connecting spinner that backs out of an in-flight stream connect.",
+    )
+
     public static let failedTitle = NSLocalizedString(
         "live.failed.title",
         value: "Couldn't start live view",

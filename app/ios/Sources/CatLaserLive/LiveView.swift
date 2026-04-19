@@ -98,24 +98,6 @@ public struct LiveView: View {
                 break
             }
         }
-        .task {
-            // If the view goes away mid-connect (user navigates out),
-            // cancel the stream to tear down the device-side and
-            // LiveKit-side resources cleanly.
-            await withTaskCancellationHandler {
-                for await _ in AsyncStream<Void> { continuation in
-                    continuation.onTermination = { _ in continuation.finish() }
-                } {}
-            } onCancel: {
-                Task { @MainActor in
-                    controlsHideTask?.cancel()
-                    controlsHideTask = nil
-                    if viewModel.state.canStop {
-                        await viewModel.stop()
-                    }
-                }
-            }
-        }
     }
 
     private var stateTag: String {
@@ -193,17 +175,40 @@ public struct LiveView: View {
     }
 
     private var loadingContent: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-                .scaleEffect(1.4)
-                .tint(.white)
-                .accessibilityLabel(Text(loadingLabel))
-            Text(loadingLabel)
-                .font(.callout)
-                .foregroundStyle(.white.opacity(0.85))
-                .accessibilityAddTraits(.updatesFrequently)
+        VStack(spacing: 24) {
+            VStack(spacing: 16) {
+                ProgressView()
+                    .scaleEffect(1.4)
+                    .tint(.white)
+                    .accessibilityLabel(Text(loadingLabel))
+                Text(loadingLabel)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+            .accessibilityElement(children: .combine)
+
+            // The VM exposes ``canStop`` as `true` throughout the
+            // busy phases so a user who got stuck on a slow handshake
+            // (slow cellular, sluggish device, server hiccup) can back
+            // out without waiting for the 30-second connect watchdog.
+            // Without this affordance the connecting state was a
+            // dead-end the user could only escape by killing the app.
+            Button {
+                Haptics.light.play()
+                Task { await viewModel.stop() }
+            } label: {
+                Text(LiveViewStrings.cancelConnectingButton)
+                    .font(.body.weight(.semibold))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .accessibilityID(.liveCancelConnectingButton)
+            .accessibilityLabel(Text(LiveViewStrings.cancelConnectingButton))
         }
-        .accessibilityElement(children: .combine)
     }
 
     private var loadingLabel: String {

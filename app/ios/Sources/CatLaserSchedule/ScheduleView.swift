@@ -190,25 +190,59 @@ public struct ScheduleView: View {
         if draftSet.entries.isEmpty {
             emptyPane()
         } else {
-            ScrollView {
-                VStack(spacing: 12) {
-                    ForEach(draftSet.entries) { entry in
-                        ScheduleEntryRow(
-                            entry: entry,
-                            onEdit: { editingEntryID = entry.id },
-                            onToggleEnabled: { viewModel.toggleEnabled(id: entry.id) },
-                        )
+            // Native ``List`` rather than ``ScrollView`` so the
+            // ``.swipeActions`` modifier engages — the iOS-native
+            // gesture for row-level actions. Plain style + cleared
+            // row chrome preserves the previous card-on-background
+            // look; ``scrollContentBackground(.hidden)`` lets the
+            // parent's ``SemanticColor.background`` show through.
+            List {
+                ForEach(draftSet.entries) { entry in
+                    ScheduleEntryRow(
+                        entry: entry,
+                        onEdit: { editingEntryID = entry.id },
+                        onToggleEnabled: { viewModel.toggleEnabled(id: entry.id) },
+                    )
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            // Local-draft mutation; no wire traffic
+                            // until the user hits Save. The warning
+                            // haptic acknowledges the destructive
+                            // commit at the gesture site.
+                            Haptics.warning.play()
+                            viewModel.deleteEntry(id: entry.id)
+                        } label: {
+                            Label(
+                                ScheduleStrings.entrySheetDeleteButton,
+                                systemImage: "trash",
+                            )
+                        }
+                        Button {
+                            editingEntryID = entry.id
+                        } label: {
+                            Label(
+                                ScheduleStrings.entrySheetEditTitle,
+                                systemImage: "pencil",
+                            )
+                        }
+                        .tint(SemanticColor.accent)
                     }
-                    Text(ScheduleStrings.quietHoursFootnote)
-                        .font(.footnote)
-                        .foregroundStyle(SemanticColor.textTertiary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                Text(ScheduleStrings.quietHoursFootnote)
+                    .font(.footnote)
+                    .foregroundStyle(SemanticColor.textTertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 12, trailing: 16))
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(SemanticColor.background)
             .overlay(alignment: .top) {
                 if isRefreshing {
                     ProgressView()
@@ -510,6 +544,15 @@ private struct ScheduleEntrySheet: View {
                     #endif
                 }
         }
+        // Entry sheet has a time picker, a stepper, seven day toggles,
+        // and an enabled switch. ``.large`` is the default because all
+        // those rows together push past ``.medium``; ``.medium`` is
+        // still offered so a user editing one specific field can
+        // collapse the sheet without dismissing.
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        #endif
     }
 
     private var startMinutePicker: some View {

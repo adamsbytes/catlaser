@@ -65,28 +65,26 @@ struct ConnectionStatusPill: View {
             Status(
                 label: PairingStrings.connectionStateWaitingForNetwork,
                 tint: SemanticColor.warning,
-                accessibilityLabel: "Connection: waiting for network",
+                accessibilityLabel: PairingStrings.pillAccessibilityWaitingForNetwork,
             )
         case let .connecting(attempt):
             Status(
-                label: attempt <= 1
-                    ? "Connecting…"
-                    : "Reconnecting (attempt \(attempt))…",
+                label: PairingStrings.pillConnectingLabel(attempt: attempt),
                 tint: SemanticColor.warning,
-                accessibilityLabel: "Connection: connecting",
+                accessibilityLabel: PairingStrings.pillAccessibilityConnecting,
             )
         case .backingOff:
             Status(
                 label: PairingStrings.connectionStateBackingOff,
                 tint: SemanticColor.warning,
-                accessibilityLabel: "Connection: reconnecting",
+                accessibilityLabel: PairingStrings.pillAccessibilityReconnecting,
             )
         case let .failed(error):
             Status(
-                label: "Disconnected",
+                label: PairingStrings.pillDisconnected,
                 tint: SemanticColor.destructive,
                 accessibilityLabel:
-                    "Connection failed. " + PairingStrings.errorMessage(for: error),
+                    PairingStrings.pillAccessibilityFailedPrefix + " " + PairingStrings.errorMessage(for: error),
             )
         }
     }

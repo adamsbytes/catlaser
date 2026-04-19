@@ -968,6 +968,190 @@ struct LiveViewModelTests {
         }
     }
 
+    // MARK: - swapDeviceClient (same-device reconnect)
+
+    /// A supervisor reconnect on the SAME paired device produces a
+    /// fresh ``DeviceClient``. The VM must accept the swap WITHOUT
+    /// tearing the active stream down — the user is mid-watch and a
+    /// momentary network blip should not yank the video. This test
+    /// drives the VM to ``.streaming``, swaps in a new client + new
+    /// broker, and asserts the streaming state survives.
+    @Test
+    func swapDeviceClientPreservesStreamingState() async throws {
+        let (vm, session, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .startStream: return self.validOfferResponse()
+            default: return .error(code: 2, message: "unknown")
+            }
+        }
+        defer {
+            Task {
+                await server.stop()
+                await client.disconnect()
+            }
+        }
+        await vm.start()
+        session.emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+
+        // Build a fresh client and broker, mirroring what the
+        // composition would supply on a same-device reconnect.
+        let newTransport = InMemoryDeviceTransport()
+        let newClient = DeviceClient(transport: newTransport, requestTimeout: 2.0)
+        try await newClient.connect()
+        let newBroker = DeviceEventBroker(client: newClient)
+        newBroker.start()
+        defer {
+            Task {
+                newBroker.stop()
+                await newClient.disconnect()
+                await newTransport.close()
+            }
+        }
+
+        vm.swapDeviceClient(newClient, eventBroker: newBroker)
+
+        // Streaming state preserved across the swap. The previously-
+        // attached LiveKit session is the same instance — nothing
+        // about the LiveKit subscription is tied to the device-control
+        // socket, so a transient transport rebuild does not interrupt
+        // the video.
+        if case let .streaming(track) = vm.state {
+            #expect(track.trackID == "t-1")
+        } else {
+            Issue.record("expected .streaming preserved across swap, got \(vm.state)")
+        }
+        #expect(vm.hasActiveSession)
+        #expect(vm.isObservingStatus)
+    }
+
+    /// After ``swapDeviceClient``, status updates must arrive via the
+    /// NEW broker — pushing on the OLD broker no longer mutates the
+    /// VM. Two failure modes to catch: the VM still subscribed to the
+    /// old broker (would respond to old pushes) or no broker at all
+    /// (would respond to neither). Drive both halves explicitly.
+    @Test
+    func swapDeviceClientReBindsStatusObservationToNewBroker() async throws {
+        let oldTransport = InMemoryDeviceTransport()
+        let oldClient = DeviceClient(transport: oldTransport, requestTimeout: 2.0)
+        try await oldClient.connect()
+        let oldBroker = DeviceEventBroker(client: oldClient)
+        oldBroker.start()
+
+        let vm = LiveViewModel(
+            deviceClient: oldClient,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { MockLiveStreamSession() },
+            eventBroker: oldBroker,
+        )
+
+        let newTransport = InMemoryDeviceTransport()
+        let newClient = DeviceClient(transport: newTransport, requestTimeout: 2.0)
+        try await newClient.connect()
+        let newBroker = DeviceEventBroker(client: newClient)
+        newBroker.start()
+
+        defer {
+            Task {
+                oldBroker.stop()
+                newBroker.stop()
+                await oldClient.disconnect()
+                await newClient.disconnect()
+                await oldTransport.close()
+                await newTransport.close()
+            }
+        }
+
+        vm.swapDeviceClient(newClient, eventBroker: newBroker)
+        #expect(vm.isObservingStatus)
+
+        // Push on the OLD transport. A correctly-rebound VM should
+        // ignore this — its observation task was cancelled when the
+        // swap re-bound to the new broker.
+        var oldStatus = Catlaser_App_V1_StatusUpdate()
+        oldStatus.sessionActive = true
+        oldStatus.activeCatIds = ["should-be-ignored"]
+        var oldEvent = Catlaser_App_V1_DeviceEvent()
+        oldEvent.statusUpdate = oldStatus
+        try oldTransport.deliver(event: oldEvent)
+        // Brief settle window — if the old subscription were still
+        // active the phase would have flipped by now.
+        try await Task.sleep(nanoseconds: 60_000_000)
+        #expect(vm.sessionStatus.phase == .unknown)
+
+        // Push on the NEW transport. The VM must observe this one.
+        var newStatus = Catlaser_App_V1_StatusUpdate()
+        newStatus.sessionActive = true
+        newStatus.activeCatIds = ["new-cat"]
+        newStatus.hopperLevel = .ok
+        var newEvent = Catlaser_App_V1_DeviceEvent()
+        newEvent.statusUpdate = newStatus
+        try newTransport.deliver(event: newEvent)
+
+        await eventually { vm.sessionStatus.phase == .playing }
+        #expect(vm.sessionStatus.activeCatCount == 1)
+    }
+
+    /// After ``swapDeviceClient``, subsequent device round-trips
+    /// (issued by user actions like ``stop``) must go to the NEW
+    /// client. The old client's transport sees zero traffic from this
+    /// VM after the swap.
+    @Test
+    func swapDeviceClientRoutesSubsequentRequestsToNewClient() async throws {
+        let (vm, session, oldServer, oldClient) = try await makeHarness { request in
+            switch request.request {
+            case .startStream: return self.validOfferResponse()
+            case .stopStream:
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            default: return .error(code: 2, message: "unknown")
+            }
+        }
+        await vm.start()
+        session.emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+
+        // Build a fresh transport that observes its own request
+        // arrivals. The new server's handler increments a counter on
+        // each StopStream so the test can assert the routing.
+        let newTransport = InMemoryDeviceTransport()
+        let newClient = DeviceClient(transport: newTransport, requestTimeout: 2.0)
+        let newStopFlag = LockedBool()
+        let newServer = ScriptedDeviceServer(transport: newTransport, handler: { request in
+            switch request.request {
+            case .stopStream:
+                newStopFlag.set(true)
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            default: return .error(code: 2, message: "unknown")
+            }
+        })
+        try await newClient.connect()
+        await newServer.run()
+        let newBroker = DeviceEventBroker(client: newClient)
+        newBroker.start()
+        defer {
+            Task {
+                newBroker.stop()
+                await newServer.stop()
+                await newClient.disconnect()
+                await oldServer.stop()
+                await oldClient.disconnect()
+            }
+        }
+
+        vm.swapDeviceClient(newClient, eventBroker: newBroker)
+
+        await vm.stop()
+        await eventually { vm.state == .disconnected }
+
+        // The user's Stop tap after the swap landed on the NEW client.
+        #expect(newStopFlag.get() == true)
+    }
+
     /// `canStop` must hold while the VM is still busy, so a user whose
     /// stream is hanging mid-connect can back out. Gating stop on
     /// `.streaming` alone used to trap the user behind a disabled

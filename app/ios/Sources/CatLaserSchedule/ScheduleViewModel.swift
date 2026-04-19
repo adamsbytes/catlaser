@@ -60,7 +60,11 @@ public final class ScheduleViewModel {
 
     // MARK: - Dependencies
 
-    private let deviceClient: DeviceClient
+    /// The device control channel. ``var`` rather than ``let`` so a
+    /// supervisor reconnect on the SAME paired device can swap in a
+    /// fresh client without throwing away the user's pending draft
+    /// edits. See ``swapDeviceClient(_:)``.
+    private var deviceClient: DeviceClient
     /// Id factory for fresh drafts. Defaults to a random UUID;
     /// tests inject a counter so the sequence is deterministic.
     private let idFactory: @Sendable () -> String
@@ -182,6 +186,17 @@ public final class ScheduleViewModel {
     /// failed screen drives ``refresh`` directly.
     public func dismissActionError() {
         lastActionError = nil
+    }
+
+    /// Replace the device control channel without throwing away the
+    /// user's pending draft edits.
+    ///
+    /// Called by the host's connection-supervisor reconcile loop when
+    /// a fresh transport lands against the SAME paired device (e.g.
+    /// after a brief network blip). Subsequent ``refresh`` /
+    /// ``save`` calls go to the new client.
+    public func swapDeviceClient(_ newClient: DeviceClient) {
+        deviceClient = newClient
     }
 
     // MARK: - Save

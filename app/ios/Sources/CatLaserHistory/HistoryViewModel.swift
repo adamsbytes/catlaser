@@ -83,8 +83,16 @@ public final class HistoryViewModel {
 
     // MARK: - Dependencies
 
-    private let deviceClient: DeviceClient
-    private let eventBroker: DeviceEventBroker?
+    /// The device control channel. ``var`` rather than ``let`` so a
+    /// supervisor reconnect on the SAME paired device can swap in a
+    /// fresh client without throwing away the user-visible cat list and
+    /// the queued ``NewCatPrompt``s. See
+    /// ``swapDeviceClient(_:eventBroker:)``.
+    private var deviceClient: DeviceClient
+    /// Currently-attached event broker. ``var`` for the same reason as
+    /// ``deviceClient`` — a fresh broker is built per supervisor cycle
+    /// and the VM has to re-bind on swap.
+    private var eventBroker: DeviceEventBroker?
     private let clock: @Sendable () -> Date
 
     // MARK: - Internal state
@@ -134,6 +142,30 @@ public final class HistoryViewModel {
     public func stop() {
         eventsTask?.cancel()
         eventsTask = nil
+    }
+
+    /// Replace the device control channel and the unsolicited-event
+    /// broker without throwing away the loaded cat list, the loaded
+    /// play history, or the queued ``NewCatPrompt`` sheets.
+    ///
+    /// Called by the host's connection-supervisor reconcile loop when
+    /// a fresh transport lands against the SAME paired device (e.g.
+    /// after a brief network blip). The previous broker is the
+    /// caller's responsibility to ``stop()``; this method does not own
+    /// its lifecycle.
+    public func swapDeviceClient(
+        _ newClient: DeviceClient,
+        eventBroker newBroker: DeviceEventBroker,
+    ) {
+        deviceClient = newClient
+        eventBroker = newBroker
+        // Re-bind the unsolicited-event subscription against the new
+        // broker. The previous task is cancelled so its for-await loop
+        // exits cleanly when the old broker stops; a fresh task picks
+        // up against the new broker on the next event.
+        eventsTask?.cancel()
+        eventsTask = nil
+        startEventsWatcherIfNeeded()
     }
 
     // MARK: - Cat profiles

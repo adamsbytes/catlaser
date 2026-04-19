@@ -24,19 +24,26 @@ import SwiftUI
 /// ## Session VM lifecycle
 ///
 /// ``LiveViewModel``, ``HistoryViewModel``, and ``ScheduleViewModel``
-/// each take a ``DeviceClient`` at construction and keep it as a
-/// `let`. A supervisor reconnect produces a NEW ``DeviceClient``
-/// instance even against the same endpoint, so the shell watches the
-/// ``ConnectionState`` stream and rebuilds all three VMs whenever the
-/// client identity changes. SwiftUI's `.id(_:)` modifier on
-/// ``MainTabView`` forces a clean re-mount on the swap, so transient
-/// in-flight requests on the old client do not race the new client's
-/// state. This is a documented tradeoff: a reconnect mid-edit drops
-/// any unsaved form state (the VM designs accept this because
-/// reconnects are expected to be rare and short).
+/// each take a ``DeviceClient`` at construction. A supervisor
+/// reconnect produces a NEW ``DeviceClient`` instance even against the
+/// same endpoint, so the shell watches the ``ConnectionState`` stream
+/// and reconciles in two distinct ways:
 ///
-/// The push-token registrar is also notified on every client swap so
-/// its in-actor ``(client, token)`` dedupe key is refreshed — without
+/// * **Same paired device, fresh client** — the user is mid-stream /
+///   mid-edit and the supervisor just rebuilt the transport (network
+///   blip, foregrounding from a stale socket). The shell hands each
+///   VM the new client via its `swapDeviceClient(_:eventBroker:)` API.
+///   The user-visible streaming state, the loaded cat list, the
+///   pending naming sheets, and the in-progress schedule draft are all
+///   preserved. SwiftUI's `.id(_:)` on ``MainTabView`` does NOT change
+///   on this path so the tab subtree stays mounted and `.task`-driven
+///   subscriptions on the live / history screens are not re-armed.
+/// * **First connect, or new paired device** — there is nothing to
+///   preserve; the shell mints fresh VMs against the new client and
+///   bumps `sessionID` so the tab subtree re-mounts cleanly.
+///
+/// The push-token registrar is notified on every client swap so its
+/// in-actor ``(client, token)`` dedupe key is refreshed — without
 /// this the registrar would keep trying to register against the dead
 /// client and the device would never receive the fresh token.
 struct PairedShell: View {
@@ -52,21 +59,29 @@ struct PairedShell: View {
     /// `.connected` event lands.
     @State private var currentClient: DeviceClient?
     /// Currently-bound event broker — the single consumer of the
-    /// current client's events stream. Rebuilt alongside the VMs on
-    /// every client swap; ``stop()``-ed when the supervisor leaves
-    /// the ``.connected`` state so its subscriber streams finish and
-    /// downstream for-await loops exit cleanly.
+    /// current client's events stream. Rebuilt alongside (or beside)
+    /// the VMs on every client swap; ``stop()``-ed when the supervisor
+    /// leaves the ``.connected`` state so its subscriber streams finish
+    /// and downstream for-await loops exit cleanly.
     @State private var currentBroker: DeviceEventBroker?
+    /// Identity of the paired device the current VMs were minted
+    /// against. Used by ``reconcile`` to decide whether a fresh
+    /// ``.connected(newClient)`` is "same device, new transport" (in
+    /// which case the existing VMs are kept and the new client is
+    /// swapped in) or "fresh device" (in which case the VMs are
+    /// rebuilt). Nil before the first connect.
+    @State private var lastPairedDeviceID: String?
     @State private var liveVM: LiveViewModel?
     @State private var historyVM: HistoryViewModel?
     @State private var scheduleVM: ScheduleViewModel?
 
-    /// Monotonic identifier that ticks on every client swap. Used as
-    /// the ``.id`` on ``MainTabView`` so SwiftUI tears down the tab
-    /// bar + subviews cleanly on reconnect. A mere rebind of the
-    /// underlying VMs would not cause SwiftUI to refresh
-    /// ``.task``-driven subscriptions on the live / history screens;
-    /// the identity bump is the load-bearing bit.
+    /// Monotonic identifier that ticks ONLY on a fresh-device build —
+    /// not on a same-device transport swap. Used as the ``.id`` on
+    /// ``MainTabView`` so SwiftUI tears down the tab bar + subviews
+    /// cleanly when the underlying VMs are replaced, but does NOT
+    /// re-mount on a same-device reconnect (which would throw away
+    /// the streaming + form state the swap is specifically intended
+    /// to preserve).
     @State private var sessionID: UUID = .init()
 
     var body: some View {
@@ -107,12 +122,22 @@ struct PairedShell: View {
 
     /// Fold an incoming ``ConnectionState`` into the session VMs.
     ///
-    /// Transitions into ``connected(newClient)`` rebuild the three
-    /// VMs against the new client. Transitions out of ``connected``
-    /// drop them so ``pairedContent`` falls back to the
-    /// ``ConnectingView``; a subsequent ``.connected`` rebuilds with
-    /// a fresh client instance. Any other transition is a no-op.
-    @MainActor
+    /// On ``connected(newClient)``:
+    ///
+    /// * If the new client lands against the SAME paired device as the
+    ///   current one, the existing VMs are kept and only the device
+    ///   client + event broker references are swapped in. The user's
+    ///   active stream, loaded data, and in-progress form edits all
+    ///   survive — a momentary network blip doesn't reset the screen.
+    /// * Otherwise (first connect after pairing, fresh paired device
+    ///   after re-pair) the VMs are rebuilt and ``sessionID`` ticks so
+    ///   ``MainTabView`` re-mounts cleanly.
+    ///
+    /// On any non-connected transition the broker is stopped, the VMs
+    /// are explicitly torn down (LiveStreamSession is teared via
+    /// ``LiveViewModel/stop`` so the LiveKit room finishes cleanly),
+    /// and the references are cleared so ``pairedContent`` falls back
+    /// to ``ConnectingView``.
     private func reconcile(connection: ConnectionState) {
         switch connection {
         case let .connected(newClient):
@@ -128,19 +153,43 @@ struct PairedShell: View {
             currentBroker?.stop()
             let broker = composition.deviceEventBroker(for: newClient)
             broker.start()
-            liveVM = composition.liveViewModel(
-                pairedDevice: pairedDevice,
-                deviceClient: newClient,
-                eventBroker: broker,
-            )
-            historyVM = composition.historyViewModel(
-                deviceClient: newClient,
-                eventBroker: broker,
-            )
-            scheduleVM = composition.scheduleViewModel(deviceClient: newClient)
+
+            let isSameDeviceReconnect =
+                lastPairedDeviceID == pairedDevice.id
+                    && liveVM != nil
+                    && historyVM != nil
+                    && scheduleVM != nil
+            if isSameDeviceReconnect,
+               let liveVM,
+               let historyVM,
+               let scheduleVM {
+                // Same paired device, new transport — preserve all
+                // user-visible state by swapping the client and broker
+                // into the existing VMs. ``sessionID`` deliberately
+                // does NOT change so ``MainTabView`` keeps its identity
+                // and the streaming chrome stays put.
+                liveVM.swapDeviceClient(newClient, eventBroker: broker)
+                historyVM.swapDeviceClient(newClient, eventBroker: broker)
+                scheduleVM.swapDeviceClient(newClient)
+            } else {
+                // Fresh build path: first-ever connect, or a re-pair
+                // landed against a different paired device. Either way
+                // there is nothing to preserve.
+                liveVM = composition.liveViewModel(
+                    pairedDevice: pairedDevice,
+                    deviceClient: newClient,
+                    eventBroker: broker,
+                )
+                historyVM = composition.historyViewModel(
+                    deviceClient: newClient,
+                    eventBroker: broker,
+                )
+                scheduleVM = composition.scheduleViewModel(deviceClient: newClient)
+                sessionID = UUID()
+            }
             currentClient = newClient
             currentBroker = broker
-            sessionID = UUID()
+            lastPairedDeviceID = pairedDevice.id
             // Fire-and-forget: refresh the push-token registrar
             // against the new client. The registrar's actor isolation
             // dedupes a second attempt against the same `(client,
@@ -149,12 +198,26 @@ struct PairedShell: View {
             Task { await registrar.setClient(newClient) }
         default:
             if currentClient != nil {
+                // Tear the live stream down explicitly before dropping
+                // the VM reference. ``LiveViewModel`` cannot do this
+                // from deinit (it is ``@MainActor`` and its events /
+                // status tasks are MainActor-isolated); the only
+                // authorised teardown path is ``stop()``. Without this
+                // call the LiveKit room would survive a sign-out /
+                // unpair until ARC eventually collected the VM, which
+                // is non-deterministic and visibly leaks audio/video
+                // bandwidth on the device side.
+                if let liveVM {
+                    Task { await liveVM.stop() }
+                }
+                if let historyVM { historyVM.stop() }
                 currentBroker?.stop()
                 currentBroker = nil
                 liveVM = nil
                 historyVM = nil
                 scheduleVM = nil
                 currentClient = nil
+                lastPairedDeviceID = nil
             }
         }
     }

@@ -38,6 +38,50 @@ public enum PairingStrings {
     public static let permissionRestrictedSubtitle = "Camera access is restricted on this device. Tap \"Enter code manually\" to finish pairing."
     public static let openSettingsButton = "Open Settings"
 
+    // MARK: - Scanner overlay
+
+    public static let scannerReticleAccessibility =
+        "Position the QR code from your Catlaser inside the framed area."
+    public static let scannerTorchOnButton = "Turn on flashlight"
+    public static let scannerTorchOffButton = "Turn off flashlight"
+    public static let scannerTorchOnAccessibility =
+        "Turn on flashlight to read the QR code in low light"
+    public static let scannerTorchOffAccessibility = "Turn off flashlight"
+
+    // MARK: - Connection status pill (paired-flow tab overlay)
+
+    public static let pillConnecting = "Connecting…"
+    public static let pillReconnectingPrefix = "Reconnecting"
+    public static let pillDisconnected = "Disconnected"
+    public static let pillAccessibilityWaitingForNetwork =
+        "Connection: waiting for network"
+    public static let pillAccessibilityConnecting = "Connection: connecting"
+    public static let pillAccessibilityReconnecting = "Connection: reconnecting"
+    public static let pillAccessibilityFailedPrefix = "Connection failed."
+
+    /// Pill copy for ``ConnectionState.connecting(attempt:)``. Suppresses
+    /// the attempt count on the first try so a healthy connect doesn't
+    /// surface scary "attempt 1" framing; subsequent attempts surface the
+    /// counter so a user diagnosing flakiness has a number to point at.
+    public static func pillConnectingLabel(attempt: Int) -> String {
+        attempt <= 1
+            ? pillConnecting
+            : String(format: "%@ (attempt %d)…", pillReconnectingPrefix, attempt)
+    }
+
+    // MARK: - Connecting-screen (full-screen between paired + live)
+
+    public static let connectingTitle = "Connecting to your Catlaser"
+    public static let connectingSubtitle =
+        "Your phone and device are talking. This usually takes a second or two."
+    public static let waitingForNetworkTitle = "Waiting for network"
+    public static let waitingForNetworkSubtitle =
+        "We'll reconnect automatically once your phone is back online."
+    public static let backingOffTitle = "Reconnecting to your Catlaser"
+    public static let backingOffSubtitle =
+        "Your device is reachable but the last attempt didn't land. Trying again…"
+    public static let connectionFailedTitle = "Can't reach your Catlaser"
+
     public static func connectionStateLabel(_ state: ConnectionState) -> String {
         switch state {
         case .idle: connectionStateIdle

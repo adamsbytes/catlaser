@@ -830,6 +830,83 @@ struct ScheduleViewModelTests {
         _ = await saveTask
     }
 
+    // MARK: - swapDeviceClient (same-device reconnect)
+
+    /// After a same-device reconnect the host hands the VM a fresh
+    /// ``DeviceClient`` via ``swapDeviceClient``. The user's pending
+    /// draft edits — added rows, toggled flags, edited durations —
+    /// must survive the swap because that is the entire point of
+    /// preserving the VM across the reconnect. Subsequent saves must
+    /// route to the NEW client.
+    @Test
+    func swapDeviceClientPreservesDraftAndRoutesSaveToNewClient() async throws {
+        let entry = makeEntry(id: "morning", startMinute: 480, durationMin: 30, days: [.monday])
+        let (vm, _, oldServer, oldClient) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule:
+                return self.reply(entries: [entry])
+            default:
+                return .error(code: 2, message: "unexpected on old client")
+            }
+        }
+        await vm.start()
+
+        // Edit the draft locally (toggle the existing window off).
+        vm.toggleEnabled(id: "morning")
+        guard case let .loaded(beforeSwap, _, _) = vm.state else {
+            Issue.record("expected loaded after start, got \(vm.state)")
+            return
+        }
+        #expect(beforeSwap.isDirty)
+
+        // Build the fresh client mirroring composition.
+        let newTransport = InMemoryDeviceTransport()
+        let newClient = DeviceClient(transport: newTransport, requestTimeout: 2.0)
+        let newSetCapture = LockedSetScheduleCapture()
+        let newServer = ScriptedDeviceServer(transport: newTransport, handler: { request in
+            switch request.request {
+            case let .setSchedule(req):
+                newSetCapture.set(req.entries)
+                return self.reply(entries: req.entries)
+            case .getSchedule:
+                return self.reply(entries: [entry])
+            default:
+                return .error(code: 2, message: "unexpected on new client")
+            }
+        })
+        try await newClient.connect()
+        await newServer.run()
+        defer {
+            Task {
+                await newServer.stop()
+                await newClient.disconnect()
+                await oldServer.stop()
+                await oldClient.disconnect()
+            }
+        }
+
+        vm.swapDeviceClient(newClient)
+
+        // Draft survived the swap.
+        guard case let .loaded(afterSwap, _, _) = vm.state else {
+            Issue.record("expected loaded preserved across swap, got \(vm.state)")
+            return
+        }
+        #expect(afterSwap.isDirty)
+        #expect(afterSwap.entries.first { $0.id == "morning" }?.enabled == false)
+
+        // Save routes to the NEW client and the captured request
+        // contains the toggled-off entry.
+        let outcome = await vm.save()
+        if case .success = outcome { /* good */ } else {
+            Issue.record("expected save success on new client, got \(outcome)")
+        }
+        let captured = newSetCapture.get()
+        #expect(captured.count == 1)
+        #expect(captured.first?.entryID == "morning")
+        #expect(captured.first?.enabled == false)
+    }
+
     // MARK: - Poll helper
 
     private func pollUntil(
