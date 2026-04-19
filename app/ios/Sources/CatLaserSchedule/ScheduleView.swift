@@ -1,4 +1,5 @@
 #if canImport(SwiftUI)
+import CatLaserDesign
 import CatLaserProto
 import Foundation
 import SwiftUI
@@ -13,6 +14,8 @@ import SwiftUI
 public struct ScheduleView: View {
     @Bindable private var viewModel: ScheduleViewModel
     @State private var editingEntryID: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var errorFocus: Bool
 
     public init(viewModel: ScheduleViewModel) {
         self.viewModel = viewModel
@@ -20,14 +23,22 @@ public struct ScheduleView: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            SemanticColor.background.ignoresSafeArea()
             content
             if let error = viewModel.lastActionError {
                 actionErrorOverlay(error: error)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: viewModel.lastActionError)
+        .accessibilityID(.scheduleRoot)
+        .catlaserDynamicTypeBounds()
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: viewModel.lastActionError,
+        )
+        .onChange(of: viewModel.lastActionError) { _, newValue in
+            if newValue != nil { errorFocus = true }
+        }
         .task {
             await viewModel.start()
         }
@@ -97,7 +108,13 @@ public struct ScheduleView: View {
             }
             .buttonStyle(.plain)
             .disabled(!draftSet.isDirty || isSaving)
-            .foregroundStyle(draftSet.isDirty && !isSaving ? Color.white : Color.white.opacity(0.4))
+            .foregroundStyle(
+                draftSet.isDirty && !isSaving
+                    ? SemanticColor.textPrimary
+                    : SemanticColor.textTertiary,
+            )
+            .accessibilityID(.scheduleDiscardButton)
+            .accessibilityLabel(Text(ScheduleStrings.discardButton))
             Spacer()
             Button {
                 Task { await viewModel.refresh() }
@@ -107,13 +124,14 @@ public struct ScheduleView: View {
             }
             .buttonStyle(.plain)
             .disabled(isSaving)
-            .foregroundStyle(.white)
+            .foregroundStyle(SemanticColor.textPrimary)
+            .accessibilityID(.scheduleRefreshButton)
             Button {
                 Task { await viewModel.save() }
             } label: {
                 if isSaving {
                     HStack(spacing: 8) {
-                        ProgressView().controlSize(.small).tint(.white)
+                        ProgressView().controlSize(.small)
                         Text(ScheduleStrings.savingLabel)
                     }
                 } else {
@@ -125,11 +143,19 @@ public struct ScheduleView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(
-                (draftSet.isDirty && !isSaving ? Color.accentColor : Color.white.opacity(0.12)),
+                (draftSet.isDirty && !isSaving
+                    ? SemanticColor.accent
+                    : SemanticColor.elevatedFill),
                 in: Capsule(),
             )
-            .foregroundStyle(.white)
+            .foregroundStyle(
+                draftSet.isDirty && !isSaving
+                    ? Color.white
+                    : SemanticColor.textSecondary,
+            )
             .disabled(!draftSet.isDirty || isSaving)
+            .accessibilityID(.scheduleSaveButton)
+            .accessibilityLabel(Text(ScheduleStrings.saveButton))
         }
     }
 
@@ -152,7 +178,7 @@ public struct ScheduleView: View {
                     }
                     Text(ScheduleStrings.quietHoursFootnote)
                         .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(SemanticColor.textTertiary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
@@ -164,7 +190,7 @@ public struct ScheduleView: View {
                 if isRefreshing {
                     ProgressView()
                         .controlSize(.small)
-                        .tint(.white)
+                        .accessibilityLabel(Text(ScheduleStrings.loadingLabel))
                         .padding(.top, 8)
                 }
             }
@@ -179,19 +205,20 @@ public struct ScheduleView: View {
             Spacer()
             Image(systemName: "calendar.badge.plus")
                 .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.white.opacity(0.55))
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.textTertiary)
+                .accessibilityDecorativeIcon()
             Text(ScheduleStrings.emptyTitle)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(ScheduleStrings.emptySubtitle)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Text(ScheduleStrings.alwaysOnHint)
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(SemanticColor.textTertiary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             Spacer()
@@ -212,11 +239,13 @@ public struct ScheduleView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
-            .background(Color.accentColor, in: Capsule())
+            .background(SemanticColor.accent, in: Capsule())
             .foregroundStyle(.white)
         }
         .buttonStyle(.plain)
         .disabled(isSaving)
+        .accessibilityID(.scheduleAddButton)
+        .accessibilityLabel(Text(ScheduleStrings.addButton))
     }
 
     private func loadingPane(label: String) -> some View {
@@ -224,12 +253,14 @@ public struct ScheduleView: View {
             Spacer()
             ProgressView()
                 .scaleEffect(1.4)
-                .tint(.white)
+                .accessibilityLabel(Text(label))
             Text(label)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
+                .accessibilityAddTraits(.updatesFrequently)
             Spacer()
         }
+        .accessibilityElement(children: .combine)
     }
 
     private func failedPane(error: ScheduleError, onRetry: @escaping () -> Void) -> some View {
@@ -237,22 +268,25 @@ public struct ScheduleView: View {
             Spacer()
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 44, weight: .regular))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.warning)
+                .accessibilityDecorativeIcon()
             Text(ScheduleStrings.errorBannerTitle)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(ScheduleStrings.message(for: error))
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Button(ScheduleStrings.retryButton, action: onRetry)
                 .buttonStyle(.plain)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Color.accentColor, in: Capsule())
+                .background(SemanticColor.accent, in: Capsule())
                 .foregroundStyle(.white)
+                .accessibilityID(.scheduleRetry)
+                .accessibilityLabel(Text(ScheduleStrings.retryButton))
             Spacer()
         }
     }
@@ -262,25 +296,29 @@ public struct ScheduleView: View {
             Spacer()
             HStack(spacing: 12) {
                 Image(systemName: "exclamationmark.octagon.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(SemanticColor.warning)
                     .accessibilityHidden(true)
                 Text(ScheduleStrings.message(for: error))
                     .font(.callout)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SemanticColor.textPrimary)
                     .lineLimit(3)
+                    .accessibilityFocused($errorFocus)
                 Spacer()
                 Button(ScheduleStrings.dismissButton) {
                     viewModel.dismissActionError()
                 }
                 .buttonStyle(.plain)
                 .font(.callout.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityID(.scheduleDismissError)
+                .accessibilityLabel(Text(ScheduleStrings.dismissButton))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
+            .accessibilityElement(children: .contain)
         }
     }
 
@@ -321,14 +359,22 @@ private struct ScheduleEntryRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(ScheduleStrings.timeOfDay(minute: entry.startMinute))
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SemanticColor.textPrimary)
                     .opacity(entry.enabled ? 1.0 : 0.5)
                 Text(ScheduleStrings.durationLabel(minutes: entry.durationMinutes))
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(entry.enabled ? 0.75 : 0.45))
+                    .foregroundStyle(
+                        entry.enabled
+                            ? SemanticColor.textSecondary
+                            : SemanticColor.textTertiary,
+                    )
                 Text(ScheduleStrings.daysSummary(entry.days))
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(entry.enabled ? 0.7 : 0.4))
+                    .foregroundStyle(
+                        entry.enabled
+                            ? SemanticColor.textSecondary
+                            : SemanticColor.textTertiary,
+                    )
             }
             Spacer()
             Toggle("", isOn: Binding(
@@ -336,18 +382,26 @@ private struct ScheduleEntryRow: View {
                 set: { _ in onToggleEnabled() },
             ))
             .labelsHidden()
-            .tint(.accentColor)
+            .tint(SemanticColor.accent)
+            .accessibilityID(.scheduleEntryToggle)
+            .accessibilityLabel(Text(ScheduleStrings.entrySheetEnabledLabel))
             Button(action: onEdit) {
                 Image(systemName: "pencil")
                     .accessibilityLabel(Text(ScheduleStrings.entrySheetEditTitle))
             }
             .buttonStyle(.plain)
             .padding(10)
-            .background(Color.white.opacity(0.08), in: Circle())
-            .foregroundStyle(.white)
+            .background(SemanticColor.elevatedFill, in: Circle())
+            .foregroundStyle(SemanticColor.textPrimary)
+            .accessibilityID(.scheduleEntryEdit)
         }
         .padding(12)
-        .background(Color.white.opacity(entry.enabled ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 16))
+        .background(
+            SemanticColor.groupedBackground.opacity(entry.enabled ? 1.0 : 0.7),
+            in: RoundedRectangle(cornerRadius: 16),
+        )
+        .accessibilityID(.scheduleEntryRow)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -394,13 +448,14 @@ private struct ScheduleEntrySheet: View {
                     Section {
                         Text(ScheduleStrings.validationMessage(for: validationFailure))
                             .font(.footnote)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(SemanticColor.destructive)
                     }
                 }
                 Section {
                     Button(role: .destructive, action: onDelete) {
                         Text(ScheduleStrings.entrySheetDeleteButton)
                     }
+                    .accessibilityID(.scheduleEntrySheetDelete)
                 }
             }
             .navigationTitle(ScheduleStrings.entrySheetEditTitle)
@@ -411,16 +466,20 @@ private struct ScheduleEntrySheet: View {
                     #if os(iOS)
                     ToolbarItem(placement: .cancellationAction) {
                         Button(ScheduleStrings.entrySheetCancel, action: onCancel)
+                            .accessibilityID(.scheduleEntrySheetCancel)
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button(ScheduleStrings.entrySheetSave) { submit() }
+                            .accessibilityID(.scheduleEntrySheetSave)
                     }
                     #else
                     ToolbarItem {
                         Button(ScheduleStrings.entrySheetCancel, action: onCancel)
+                            .accessibilityID(.scheduleEntrySheetCancel)
                     }
                     ToolbarItem {
                         Button(ScheduleStrings.entrySheetSave) { submit() }
+                            .accessibilityID(.scheduleEntrySheetSave)
                     }
                     #endif
                 }
@@ -455,7 +514,7 @@ private struct ScheduleEntrySheet: View {
     private var durationStepper: some View {
         HStack {
             Text(ScheduleStrings.durationLabel(minutes: draft.durationMinutes))
-                .foregroundStyle(.primary)
+                .foregroundStyle(SemanticColor.textPrimary)
             Spacer()
             Stepper(
                 "",

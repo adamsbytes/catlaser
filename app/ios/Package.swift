@@ -45,6 +45,14 @@ let package = Package(
             name: "CatLaserApp",
             targets: ["CatLaserApp"],
         ),
+        .library(
+            name: "CatLaserDesign",
+            targets: ["CatLaserDesign"],
+        ),
+        .library(
+            name: "CatLaserObservability",
+            targets: ["CatLaserObservability"],
+        ),
     ],
     dependencies: [
         .package(
@@ -166,6 +174,7 @@ let package = Package(
         .target(
             name: "CatLaserLive",
             dependencies: [
+                "CatLaserDesign",
                 "CatLaserDevice",
                 "CatLaserProto",
             ],
@@ -193,6 +202,7 @@ let package = Package(
             name: "CatLaserPairing",
             dependencies: [
                 "CatLaserAuth",
+                "CatLaserDesign",
                 "CatLaserDevice",
                 "CatLaserProto",
             ],
@@ -236,6 +246,7 @@ let package = Package(
         .target(
             name: "CatLaserHistory",
             dependencies: [
+                "CatLaserDesign",
                 "CatLaserDevice",
                 "CatLaserProto",
             ],
@@ -262,6 +273,7 @@ let package = Package(
         .target(
             name: "CatLaserSchedule",
             dependencies: [
+                "CatLaserDesign",
                 "CatLaserDevice",
                 "CatLaserProto",
             ],
@@ -293,6 +305,7 @@ let package = Package(
             name: "CatLaserPush",
             dependencies: [
                 "CatLaserAuth",
+                "CatLaserDesign",
                 "CatLaserDevice",
                 "CatLaserProto",
             ],
@@ -313,9 +326,11 @@ let package = Package(
             name: "CatLaserApp",
             dependencies: [
                 "CatLaserAuth",
+                "CatLaserDesign",
                 "CatLaserDevice",
                 "CatLaserHistory",
                 "CatLaserLive",
+                "CatLaserObservability",
                 "CatLaserPairing",
                 "CatLaserPush",
                 "CatLaserSchedule",
@@ -339,6 +354,7 @@ let package = Package(
                 // suite cannot exercise the wiring end-to-end.
                 "CatLaserHistory",
                 "CatLaserLive",
+                "CatLaserObservability",
                 "CatLaserPairing",
                 // Pairing test support brings the
                 // ``FakeNetworkPathMonitor`` the composition's
@@ -352,6 +368,44 @@ let package = Package(
                 "CatLaserProto",
             ],
             path: "Tests/CatLaserAppTests",
+        ),
+        // Design system — semantic colour tokens + accessibility
+        // helpers. A lightweight dependency every feature module
+        // that ships a SwiftUI view imports so the light / dark
+        // branching is driven by system appearance and the
+        // accessibility-identifier strings stay DRY across tests.
+        .target(
+            name: "CatLaserDesign",
+            path: "Sources/CatLaserDesign",
+        ),
+        .testTarget(
+            name: "CatLaserDesignTests",
+            dependencies: ["CatLaserDesign"],
+            path: "Tests/CatLaserDesignTests",
+        ),
+        // Observability — first-party crash reporting (MetricKit +
+        // NSException + POSIX signal handlers + breadcrumbs) and
+        // strictly-typed telemetry. No third-party SDKs; everything
+        // ships to the operator-run coordination server the rest of
+        // the app already talks to. Depends only on Foundation +
+        // (on Darwin) CryptoKit + MetricKit so the pure logic
+        // (event envelopes, queue, ring, consent store) builds and
+        // tests on Linux SPM runners.
+        .target(
+            name: "CatLaserObservability",
+            dependencies: [
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux, .windows, .android, .wasi]),
+                ),
+            ],
+            path: "Sources/CatLaserObservability",
+        ),
+        .testTarget(
+            name: "CatLaserObservabilityTests",
+            dependencies: ["CatLaserObservability"],
+            path: "Tests/CatLaserObservabilityTests",
         ),
     ],
     swiftLanguageModes: [.v6],

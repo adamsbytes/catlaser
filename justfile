@@ -93,8 +93,14 @@ py-test:
 ios-build:
     cd app/ios && swift build
 
+# `--no-parallel` is load-bearing on Linux: Swift Testing's
+# task-based concurrency layer leaks `AsyncStream` consumer tasks
+# between suites on swift-6.3-linux, which saturates the cooperative
+# thread pool and hangs the run past the last test. Serialised
+# execution avoids that; Darwin CI still exercises the parallel path
+# via Xcode's test runner.
 ios-test:
-    cd app/ios && swift test
+    cd app/ios && swift test --no-parallel
 
 ios-check: ios-build ios-test
 

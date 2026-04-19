@@ -1,4 +1,5 @@
 #if canImport(SwiftUI)
+import CatLaserDesign
 import Foundation
 import SwiftUI
 #if canImport(UIKit)
@@ -10,6 +11,8 @@ import UIKit
 /// state of its own. Tests exercise the VM directly.
 public struct PairingView: View {
     @Bindable private var viewModel: PairingViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var errorFocus: Bool
 
     public init(viewModel: PairingViewModel) {
         self.viewModel = viewModel
@@ -17,12 +20,22 @@ public struct PairingView: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            SemanticColor.background.ignoresSafeArea()
             contentView
         }
-        .animation(.easeInOut(duration: 0.2), value: phaseTag)
+        .accessibilityID(.pairingRoot)
+        .catlaserDynamicTypeBounds()
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: phaseTag,
+        )
         .task {
             await viewModel.start()
+        }
+        .onChange(of: phaseTag) { _, newValue in
+            if newValue.hasPrefix("failed") {
+                errorFocus = true
+            }
         }
     }
 
@@ -65,13 +78,14 @@ public struct PairingView: View {
         VStack(spacing: 16) {
             ProgressView()
                 .scaleEffect(1.4)
-                .tint(.white)
+                .accessibilityLabel(Text(label ?? PairingStrings.exchangingLabel))
             if let label {
                 Text(label)
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(SemanticColor.textSecondary)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var scanningView: some View {
@@ -91,9 +105,10 @@ public struct PairingView: View {
                 },
             )
             .ignoresSafeArea()
+            .accessibilityLabel(Text(PairingStrings.scanningPrompt))
             #else
             Text(PairingStrings.scanningPrompt)
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
             #endif
 
             VStack(spacing: 12) {
@@ -102,9 +117,10 @@ public struct PairingView: View {
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
+                    .accessibilityHeader()
                 Text(PairingStrings.scanningHint)
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(.white.opacity(0.85))
                 Button(PairingStrings.manualEntryButton) {
                     viewModel.switchToManualEntry()
                 }
@@ -113,8 +129,14 @@ public struct PairingView: View {
                 .padding(.vertical, 10)
                 .background(.ultraThinMaterial, in: Capsule())
                 .foregroundStyle(.white)
+                .accessibilityID(.pairingManualEntryToggle)
+                .accessibilityLabel(Text(PairingStrings.manualEntryButton))
             }
             .padding(.bottom, 32)
+            .padding(.horizontal, 24)
+            .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
         }
     }
 
@@ -122,7 +144,8 @@ public struct PairingView: View {
         VStack(spacing: 16) {
             Text(PairingStrings.title)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             TextField(
                 PairingStrings.manualEntryPlaceholder,
                 text: Binding(
@@ -133,8 +156,14 @@ public struct PairingView: View {
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled(true)
             .padding()
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-            .foregroundStyle(.white)
+            .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(SemanticColor.separator, lineWidth: 1),
+            )
+            .foregroundStyle(SemanticColor.textPrimary)
+            .accessibilityID(.pairingManualField)
+            .accessibilityLabel(Text(PairingStrings.manualEntryPlaceholder))
 
             HStack(spacing: 12) {
                 Button(PairingStrings.scanInsteadButton) {
@@ -143,8 +172,10 @@ public struct PairingView: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial, in: Capsule())
-                .foregroundStyle(.white)
+                .background(SemanticColor.elevatedFill, in: Capsule())
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityID(.pairingScanInstead)
+                .accessibilityLabel(Text(PairingStrings.scanInsteadButton))
 
                 Button(PairingStrings.manualSubmitButton) {
                     Task { await viewModel.submitManualCode() }
@@ -152,8 +183,10 @@ public struct PairingView: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Color.accentColor, in: Capsule())
+                .background(SemanticColor.accent, in: Capsule())
                 .foregroundStyle(.white)
+                .accessibilityID(.pairingManualSubmit)
+                .accessibilityLabel(Text(PairingStrings.manualSubmitButton))
             }
         }
         .frame(maxWidth: 420)
@@ -164,14 +197,15 @@ public struct PairingView: View {
         VStack(spacing: 16) {
             Image(systemName: "camera")
                 .font(.system(size: 44, weight: .regular))
-                .foregroundStyle(.white.opacity(0.7))
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.textSecondary)
+                .accessibilityDecorativeIcon()
             Text(permissionTitle(status))
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(permissionSubtitle(status))
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             HStack(spacing: 12) {
@@ -183,8 +217,10 @@ public struct PairingView: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
-                    .background(Color.accentColor, in: Capsule())
+                    .background(SemanticColor.accent, in: Capsule())
                     .foregroundStyle(.white)
+                    .accessibilityID(.pairingPermissionRequest)
+                    .accessibilityLabel(Text(PairingStrings.permissionRequestButton))
                 case .denied, .restricted:
                     #if canImport(UIKit) && os(iOS)
                     Button(PairingStrings.openSettingsButton) {
@@ -195,8 +231,10 @@ public struct PairingView: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .foregroundStyle(.white)
+                    .background(SemanticColor.elevatedFill, in: Capsule())
+                    .foregroundStyle(SemanticColor.textPrimary)
+                    .accessibilityID(.pairingOpenSettings)
+                    .accessibilityLabel(Text(PairingStrings.openSettingsButton))
                     #endif
                     Button(PairingStrings.manualEntryButton) {
                         viewModel.switchToManualEntry()
@@ -204,8 +242,10 @@ public struct PairingView: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
-                    .background(Color.accentColor, in: Capsule())
+                    .background(SemanticColor.accent, in: Capsule())
                     .foregroundStyle(.white)
+                    .accessibilityID(.pairingManualEntryToggle)
+                    .accessibilityLabel(Text(PairingStrings.manualEntryButton))
                 case .authorized:
                     // Shouldn't reach here — if authorised the VM
                     // transitions to .scanning. Defensive fallback
@@ -216,8 +256,10 @@ public struct PairingView: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
-                    .background(Color.accentColor, in: Capsule())
+                    .background(SemanticColor.accent, in: Capsule())
                     .foregroundStyle(.white)
+                    .accessibilityID(.pairingRetry)
+                    .accessibilityLabel(Text(PairingStrings.retryButton))
                 }
             }
         }
@@ -229,28 +271,29 @@ public struct PairingView: View {
         VStack(spacing: 18) {
             Image(systemName: "checkmark.shield.fill")
                 .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.white.opacity(0.85))
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityDecorativeIcon()
             Text(PairingStrings.confirmTitle)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
                 .multilineTextAlignment(.center)
+                .accessibilityHeader()
             VStack(spacing: 4) {
                 Text(PairingStrings.confirmDeviceIDLabel)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(SemanticColor.textSecondary)
                     .textCase(.uppercase)
                 Text(code.deviceID)
                     .font(.title3.weight(.semibold).monospaced())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SemanticColor.textPrimary)
                     .textSelection(.enabled)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 10))
             }
             Text(PairingStrings.confirmSubtitle)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             HStack(spacing: 12) {
@@ -261,10 +304,12 @@ public struct PairingView: View {
                         .font(.body.weight(.semibold))
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .foregroundStyle(.white)
+                        .background(SemanticColor.elevatedFill, in: Capsule())
+                        .foregroundStyle(SemanticColor.textPrimary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityID(.pairingConfirmCancel)
+                .accessibilityLabel(Text(PairingStrings.confirmCancelButton))
                 Button {
                     Task { await viewModel.confirmPairing() }
                 } label: {
@@ -272,10 +317,12 @@ public struct PairingView: View {
                         .font(.body.weight(.semibold))
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
-                        .background(Color.accentColor, in: Capsule())
+                        .background(SemanticColor.accent, in: Capsule())
                         .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
+                .accessibilityID(.pairingConfirmAccept)
+                .accessibilityLabel(Text(PairingStrings.confirmButton))
             }
         }
         .frame(maxWidth: 420)
@@ -287,25 +334,29 @@ public struct PairingView: View {
         VStack(spacing: 14) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.green)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.success)
+                .accessibilityDecorativeIcon()
             Text(PairingStrings.pairedTitle)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(deviceLabel(device))
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
             Text(PairingStrings.connectionStateLabel(viewModel.connectionState))
                 .font(.footnote)
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(SemanticColor.textTertiary)
+                .accessibilityAddTraits(.updatesFrequently)
             Button(PairingStrings.unpairButton) {
                 Task { await viewModel.unpair() }
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule())
-            .foregroundStyle(.white)
+            .background(SemanticColor.elevatedFill, in: Capsule())
+            .foregroundStyle(SemanticColor.textPrimary)
+            .accessibilityID(.pairingUnpair)
+            .accessibilityLabel(Text(PairingStrings.unpairButton))
         }
         .frame(maxWidth: 420)
         .padding()
@@ -320,13 +371,14 @@ public struct PairingView: View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 44, weight: .regular))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.warning)
+                .accessibilityDecorativeIcon()
             Text(PairingStrings.errorMessage(for: error))
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(SemanticColor.textPrimary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
+                .accessibilityFocused($errorFocus)
             HStack(spacing: 12) {
                 Button(PairingStrings.dismissButton) {
                     Task { await viewModel.dismissError() }
@@ -334,8 +386,10 @@ public struct PairingView: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial, in: Capsule())
-                .foregroundStyle(.white)
+                .background(SemanticColor.elevatedFill, in: Capsule())
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityID(.pairingDismissError)
+                .accessibilityLabel(Text(PairingStrings.dismissButton))
             }
         }
         .frame(maxWidth: 420)

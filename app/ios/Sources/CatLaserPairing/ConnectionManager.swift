@@ -168,6 +168,17 @@ public actor ConnectionManager {
         self.stateContinuation = captured
     }
 
+    /// Finish the state stream on deallocation so any test fixture
+    /// iterating ``states`` in a ``for await`` loop exits cleanly.
+    /// Swift 6.3 on Linux does not auto-finish an ``AsyncStream`` when
+    /// the producer-side continuation copy is released — without this
+    /// explicit ``finish()`` call the consumer task leaks and, across
+    /// parallel tests, eventually saturates the cooperative thread
+    /// pool and deadlocks the whole suite.
+    deinit {
+        stateContinuation.finish()
+    }
+
     // MARK: - Public API
 
     /// Current supervisor state. Reading this races with transitions —

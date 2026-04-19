@@ -104,6 +104,23 @@ public actor PushTokenRegistrar: SessionLifecycleObserver {
         self.outcomeContinuation = captured
     }
 
+    /// Finish the ``outcomes`` stream on deallocation.
+    ///
+    /// Critical for test parallelism: without this, the ``AsyncStream``
+    /// consumer task held by test ``OutcomeSink`` fixtures keeps
+    /// running even after the registrar is released — the stream's
+    /// producer-side continuation copy stored here is dropped, but
+    /// Swift 6.3 on Linux does not automatically finish the stream
+    /// when all producer copies vanish. The consumer's ``for await``
+    /// loop therefore hangs forever, and across dozens of parallel
+    /// tests the leaked tasks saturate the cooperative thread pool
+    /// and deadlock the whole suite. Explicitly finishing here is
+    /// the single load-bearing line that makes the test target
+    /// terminate in CI.
+    deinit {
+        outcomeContinuation.finish()
+    }
+
     // MARK: - Public API
 
     /// Swap the device client the registrar talks to.

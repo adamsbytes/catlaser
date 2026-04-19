@@ -1,4 +1,5 @@
 #if canImport(SwiftUI)
+import CatLaserDesign
 import Foundation
 import SwiftUI
 
@@ -16,6 +17,8 @@ import UIKit
 /// action and VM property wired to control state."
 public struct PushView: View {
     @Bindable private var viewModel: PushViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var errorFocus: Bool
 
     public init(viewModel: PushViewModel) {
         self.viewModel = viewModel
@@ -23,12 +26,33 @@ public struct PushView: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            SemanticColor.background.ignoresSafeArea()
             content
                 .padding(.horizontal, 24)
         }
+        .accessibilityID(.pushRoot)
+        .catlaserDynamicTypeBounds()
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: stateTag,
+        )
+        .onChange(of: stateTag) { _, newValue in
+            if newValue == "failed" { errorFocus = true }
+        }
         .task {
             await viewModel.start()
+        }
+    }
+
+    private var stateTag: String {
+        switch viewModel.state {
+        case .idle: "idle"
+        case .requestingAuthorization: "requestingAuthorization"
+        case .awaitingAPNsToken: "awaitingAPNsToken"
+        case .registering: "registering"
+        case .registered: "registered"
+        case .authorizationDenied: "authorizationDenied"
+        case .failed: "failed"
         }
     }
 
@@ -57,15 +81,16 @@ public struct PushView: View {
             Spacer()
             Image(systemName: "bell.badge")
                 .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(.white.opacity(0.9))
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityDecorativeIcon()
             Text(PushStrings.primerTitle)
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
                 .multilineTextAlignment(.center)
+                .accessibilityHeader()
             Text(PushStrings.primerBody)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
             Spacer()
             Button(PushStrings.primerAllowButton) {
@@ -75,8 +100,9 @@ public struct PushView: View {
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
-            .background(Color.accentColor, in: Capsule())
+            .background(SemanticColor.accent, in: Capsule())
             .foregroundStyle(.white)
+            .accessibilityID(.pushPrimerAllow)
             .accessibilityLabel(Text(PushStrings.primerAllowButton))
         }
     }
@@ -86,13 +112,15 @@ public struct PushView: View {
             Spacer()
             ProgressView()
                 .scaleEffect(1.4)
-                .tint(.white)
+                .accessibilityLabel(Text(label))
             Text(label)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.updatesFrequently)
             Spacer()
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var success: some View {
@@ -100,15 +128,16 @@ public struct PushView: View {
             Spacer()
             Image(systemName: "bell.badge.fill")
                 .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(.green)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.success)
+                .accessibilityDecorativeIcon()
             Text(PushStrings.registeredTitle)
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
                 .multilineTextAlignment(.center)
+                .accessibilityHeader()
             Text(PushStrings.registeredBody)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
             Spacer()
         }
@@ -119,15 +148,16 @@ public struct PushView: View {
             Spacer()
             Image(systemName: "bell.slash")
                 .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.warning)
+                .accessibilityDecorativeIcon()
             Text(PushStrings.deniedTitle)
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
                 .multilineTextAlignment(.center)
+                .accessibilityHeader()
             Text(PushStrings.deniedBody)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
             Spacer()
             Button(PushStrings.openSettingsButton, action: openSettings)
@@ -135,8 +165,10 @@ public struct PushView: View {
                 .font(.body.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
-                .background(Color.accentColor, in: Capsule())
+                .background(SemanticColor.accent, in: Capsule())
                 .foregroundStyle(.white)
+                .accessibilityID(.pushOpenSettings)
+                .accessibilityLabel(Text(PushStrings.openSettingsButton))
         }
     }
 
@@ -145,15 +177,17 @@ public struct PushView: View {
             Spacer()
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.warning)
+                .accessibilityDecorativeIcon()
             Text(PushStrings.errorBannerTitle)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(PushStrings.message(for: error))
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
+                .accessibilityFocused($errorFocus)
             Spacer()
             Button(PushStrings.retryButton) {
                 Task { await viewModel.retry() }
@@ -162,8 +196,10 @@ public struct PushView: View {
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
-            .background(Color.accentColor, in: Capsule())
+            .background(SemanticColor.accent, in: Capsule())
             .foregroundStyle(.white)
+            .accessibilityID(.pushRetry)
+            .accessibilityLabel(Text(PushStrings.retryButton))
         }
     }
 

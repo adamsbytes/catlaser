@@ -1,4 +1,5 @@
 #if canImport(SwiftUI)
+import CatLaserDesign
 import CatLaserProto
 import Foundation
 import SwiftUI
@@ -31,6 +32,8 @@ public struct HistoryView: View {
     @State private var selectedPane: Pane = .cats
     @State private var editingProfile: Catlaser_App_V1_CatProfile?
     @State private var pendingDeletion: Catlaser_App_V1_CatProfile?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var errorFocus: Bool
 
     public init(viewModel: HistoryViewModel) {
         self.viewModel = viewModel
@@ -38,7 +41,7 @@ public struct HistoryView: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            SemanticColor.background.ignoresSafeArea()
             VStack(spacing: 0) {
                 segmentControl
                     .padding(.horizontal, 16)
@@ -50,7 +53,15 @@ public struct HistoryView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: viewModel.lastActionError)
+        .accessibilityID(.historyRoot)
+        .catlaserDynamicTypeBounds()
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: viewModel.lastActionError,
+        )
+        .onChange(of: viewModel.lastActionError) { _, newValue in
+            if newValue != nil { errorFocus = true }
+        }
         .sheet(item: $editingProfile) { profile in
             EditCatSheet(
                 profile: profile,
@@ -101,6 +112,7 @@ public struct HistoryView: View {
             Text(HistoryStrings.segmentSessions).tag(Pane.sessions)
         }
         .pickerStyle(.segmented)
+        .accessibilityID(.historyPaneSegment)
         .accessibilityLabel(Text(HistoryStrings.screenTitle))
     }
 
@@ -160,7 +172,7 @@ public struct HistoryView: View {
             if isRefreshing {
                 ProgressView()
                     .controlSize(.small)
-                    .tint(.white)
+                    .accessibilityLabel(Text(HistoryStrings.catListLoadingLabel))
                     .padding(.top, 8)
             }
         }
@@ -217,7 +229,7 @@ public struct HistoryView: View {
             if isRefreshing {
                 ProgressView()
                     .controlSize(.small)
-                    .tint(.white)
+                    .accessibilityLabel(Text(HistoryStrings.sessionsLoadingLabel))
                     .padding(.top, 8)
             }
         }
@@ -233,12 +245,14 @@ public struct HistoryView: View {
             Spacer()
             ProgressView()
                 .scaleEffect(1.4)
-                .tint(.white)
+                .accessibilityLabel(Text(label))
             Text(label)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(SemanticColor.textSecondary)
+                .accessibilityAddTraits(.updatesFrequently)
             Spacer()
         }
+        .accessibilityElement(children: .combine)
     }
 
     private func emptyPane(iconName: String, title: String, subtitle: String) -> some View {
@@ -246,14 +260,15 @@ public struct HistoryView: View {
             Spacer()
             Image(systemName: iconName)
                 .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.white.opacity(0.55))
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.textTertiary)
+                .accessibilityDecorativeIcon()
             Text(title)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(subtitle)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Spacer()
@@ -265,22 +280,25 @@ public struct HistoryView: View {
             Spacer()
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 44, weight: .regular))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.warning)
+                .accessibilityDecorativeIcon()
             Text(HistoryStrings.errorBannerTitle)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(HistoryStrings.message(for: error))
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Button(HistoryStrings.retryButton, action: onRetry)
                 .buttonStyle(.plain)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Color.accentColor, in: Capsule())
+                .background(SemanticColor.accent, in: Capsule())
                 .foregroundStyle(.white)
+                .accessibilityID(.historyRetry)
+                .accessibilityLabel(Text(HistoryStrings.retryButton))
             Spacer()
         }
     }
@@ -290,25 +308,29 @@ public struct HistoryView: View {
             Spacer()
             HStack(spacing: 12) {
                 Image(systemName: "exclamationmark.octagon.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(SemanticColor.warning)
                     .accessibilityHidden(true)
                 Text(HistoryStrings.message(for: error))
                     .font(.callout)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SemanticColor.textPrimary)
                     .lineLimit(3)
+                    .accessibilityFocused($errorFocus)
                 Spacer()
                 Button(HistoryStrings.dismissButton) {
                     viewModel.dismissActionError()
                 }
                 .buttonStyle(.plain)
                 .font(.callout.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityID(.historyDismissError)
+                .accessibilityLabel(Text(HistoryStrings.dismissButton))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
+            .accessibilityElement(children: .contain)
         }
     }
 }
@@ -328,17 +350,17 @@ private struct CatProfileRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(profile.name.isEmpty ? HistoryStrings.sessionRowUnknownCat : profile.name)
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SemanticColor.textPrimary)
                 Text(CatProfileFormatter.sessionsString(count: profile.totalSessions))
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(SemanticColor.textSecondary)
                 Text(
                     CatProfileFormatter.playTimeString(secondsTotal: profile.totalPlayTimeSec)
                         + " • "
                         + CatProfileFormatter.treatsString(count: profile.totalTreats),
                 )
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(SemanticColor.textSecondary)
             }
             Spacer()
             VStack(spacing: 8) {
@@ -347,19 +369,29 @@ private struct CatProfileRow: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Color.accentColor.opacity(0.85), in: Capsule())
+                    .background(SemanticColor.accent.opacity(0.85), in: Capsule())
                     .foregroundStyle(.white)
+                    .accessibilityID(.historyCatEdit)
+                    .accessibilityLabel(
+                        Text("\(HistoryStrings.catRowEditButton) \(profile.name)"),
+                    )
                 Button(HistoryStrings.catRowDeleteButton, role: .destructive, action: onDelete)
                     .font(.caption.weight(.semibold))
                     .buttonStyle(.plain)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .foregroundStyle(.white)
+                    .background(SemanticColor.elevatedFill, in: Capsule())
+                    .foregroundStyle(SemanticColor.destructive)
+                    .accessibilityID(.historyCatDelete)
+                    .accessibilityLabel(
+                        Text("\(HistoryStrings.catRowDeleteButton) \(profile.name)"),
+                    )
             }
         }
         .padding(12)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+        .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityID(.historyCatRow)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -377,11 +409,11 @@ private struct PlaySessionRow: View {
                     profiles: profiles,
                 ))
                 .font(.body.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(SemanticColor.textPrimary)
                 Spacer()
                 Text(CatProfileFormatter.sessionDateString(epochSeconds: session.startTime))
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(SemanticColor.textTertiary)
             }
             HStack(spacing: 16) {
                 statBlock(
@@ -402,10 +434,12 @@ private struct PlaySessionRow: View {
                 )
             }
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(SemanticColor.textSecondary)
         }
         .padding(12)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+        .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityID(.historySessionRow)
+        .accessibilityElement(children: .combine)
     }
 
     private func statBlock(icon: String, label: String) -> some View {
@@ -444,15 +478,17 @@ private struct EditCatSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(HistoryStrings.editNameLabel)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SemanticColor.textSecondary)
                 TextField(HistoryStrings.editNamePlaceholder, text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.words)
                     .autocorrectionDisabled(false)
+                    .accessibilityID(.historyEditNameField)
+                    .accessibilityLabel(Text(HistoryStrings.editNameLabel))
                 if let validationError {
                     Text(validationError)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(SemanticColor.destructive)
                 }
                 Spacer()
             }
@@ -466,6 +502,7 @@ private struct EditCatSheet: View {
                     ToolbarItem(placement: .cancellationAction) {
                         Button(HistoryStrings.editCancelButton, action: onDismiss)
                             .disabled(isSubmitting)
+                            .accessibilityID(.historyEditCancel)
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         saveButton
@@ -474,6 +511,7 @@ private struct EditCatSheet: View {
                     ToolbarItem {
                         Button(HistoryStrings.editCancelButton, action: onDismiss)
                             .disabled(isSubmitting)
+                            .accessibilityID(.historyEditCancel)
                     }
                     ToolbarItem {
                         saveButton
@@ -488,6 +526,8 @@ private struct EditCatSheet: View {
             Task { await submit() }
         }
         .disabled(isSubmitting || !canSubmit)
+        .accessibilityID(.historyEditSave)
+        .accessibilityLabel(Text(HistoryStrings.editSaveButton))
     }
 
     private var canSubmit: Bool {
@@ -535,17 +575,19 @@ private struct NameNewCatSheet: View {
                     .accessibilityLabel(Text(HistoryStrings.namingThumbnailAccessibility))
                 Text(HistoryStrings.namingSheetBody)
                     .font(.body)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(SemanticColor.textPrimary)
                 Text(HistoryStrings.namingNameLabel)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SemanticColor.textSecondary)
                 TextField(HistoryStrings.editNamePlaceholder, text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.words)
+                    .accessibilityID(.historyNewCatNameField)
+                    .accessibilityLabel(Text(HistoryStrings.namingNameLabel))
                 if let validationError {
                     Text(validationError)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(SemanticColor.destructive)
                 }
                 Spacer()
             }
@@ -561,6 +603,7 @@ private struct NameNewCatSheet: View {
                             viewModel.dismissNewCatPrompt(prompt.trackIDHint)
                         }
                         .disabled(isSubmitting)
+                        .accessibilityID(.historyNewCatDismiss)
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         saveButton
@@ -571,6 +614,7 @@ private struct NameNewCatSheet: View {
                             viewModel.dismissNewCatPrompt(prompt.trackIDHint)
                         }
                         .disabled(isSubmitting)
+                        .accessibilityID(.historyNewCatDismiss)
                     }
                     ToolbarItem {
                         saveButton
@@ -585,6 +629,8 @@ private struct NameNewCatSheet: View {
             Task { await submit() }
         }
         .disabled(isSubmitting || !canSubmit)
+        .accessibilityID(.historyNewCatSave)
+        .accessibilityLabel(Text(HistoryStrings.namingSaveButton))
     }
 
     private var canSubmit: Bool {
@@ -618,13 +664,15 @@ private struct ThumbnailImage: View {
                 image
                     .resizable()
                     .scaledToFill()
+                    .accessibilityIgnoresInvertColors(true)
             } else {
                 ZStack {
-                    Color.white.opacity(0.06)
+                    SemanticColor.groupedBackground
                     Image(systemName: fallbackIcon)
                         .font(.system(size: 28, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(SemanticColor.textTertiary)
                 }
+                .accessibilityHidden(true)
             }
         }
     }

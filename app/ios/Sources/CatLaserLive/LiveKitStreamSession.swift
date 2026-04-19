@@ -68,6 +68,16 @@ public actor LiveKitStreamSession: LiveStreamSession {
         self.room = Room(delegate: delegate)
     }
 
+    /// Finish the event stream on deallocation. Same rationale as the
+    /// ``PushTokenRegistrar`` / ``ConnectionManager`` deinit: Swift
+    /// 6.3 on Linux does not auto-finish an ``AsyncStream`` when the
+    /// producer-side continuation copy goes out of scope, so a
+    /// consumer iterating ``events`` in a ``for await`` loop would
+    /// park a Task forever and the parallel test pool would saturate.
+    deinit {
+        eventContinuation.finish()
+    }
+
     public var events: AsyncStream<LiveStreamEvent> {
         get async { eventStream }
     }

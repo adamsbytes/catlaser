@@ -128,6 +128,17 @@ public actor DeviceClient {
         self.eventContinuation = captured
     }
 
+    /// Finish the event stream on deallocation. Same rationale as
+    /// ``ConnectionManager/deinit`` and ``PushTokenRegistrar/deinit``:
+    /// without an explicit ``finish()`` call the stream stays open
+    /// after the client is released, the consumer's ``for await``
+    /// loop keeps parking a Task in the cooperative thread pool, and
+    /// across the full parallel test suite the pool saturates and
+    /// deadlocks.
+    deinit {
+        eventContinuation.finish()
+    }
+
     /// Production nonce source — 16 bytes from
     /// ``SystemRandomNumberGenerator``. Exposed as a static member
     /// so tests that want the production generator alongside an

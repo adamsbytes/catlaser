@@ -2,10 +2,14 @@ import CatLaserAuth
 import CatLaserDevice
 import CatLaserHistory
 import CatLaserLive
+import CatLaserObservability
 import CatLaserPairing
 import CatLaserPush
 import CatLaserSchedule
 import Foundation
+#if canImport(UIKit) && !os(watchOS)
+import UIKit
+#endif
 
 /// Single production wiring for the app's object graph.
 ///
@@ -80,15 +84,25 @@ public struct AppComposition: Sendable {
         /// (the release default).
         public let keychainAccessGroup: String?
 
+        /// Observability endpoints, storage paths, app version, and
+        /// device-id hashing salt. Production callers derive this
+        /// from the same coordination-server base URL ``authConfig``
+        /// uses via ``ObservabilityConfig/derived(baseURL:...)`` so
+        /// the three endpoints (auth, observability-events,
+        /// observability-crashes) land on the same Cloudflare worker.
+        public let observabilityConfig: ObservabilityConfig
+
         public init(
             authConfig: AuthConfig,
             tlsPinning: TLSPinning,
             liveKitAllowlist: LiveKitHostAllowlist,
+            observabilityConfig: ObservabilityConfig,
             keychainAccessGroup: String? = nil,
         ) {
             self.authConfig = authConfig
             self.tlsPinning = tlsPinning
             self.liveKitAllowlist = liveKitAllowlist
+            self.observabilityConfig = observabilityConfig
             self.keychainAccessGroup = keychainAccessGroup
         }
     }
@@ -151,6 +165,22 @@ public struct AppComposition: Sendable {
     /// doubles both fit, and so the type system refuses a wiring
     /// that omits the lifecycle hook.
     public let endpointStore: any EndpointStore & SessionLifecycleObserver
+
+    /// Observability facade — breadcrumb ring, telemetry queue,
+    /// crash uploader. Constructed once per launch in
+    /// ``production(config:)``; the composition wires it as a
+    /// ``SessionLifecycleObserver`` on the auth coordinator so
+    /// sign-out purges local observability state (breadcrumbs,
+    /// pending telemetry, tombstones). Every view that wants to
+    /// record an event or a breadcrumb reaches for this instance
+    /// via the composition it was constructed from.
+    public let observability: Observability
+
+    /// Consent store. Read at launch to decide whether to present
+    /// ``PrivacyConsentView``. Shared with the consent VM, the
+    /// future Settings screen, and the observability actor (which
+    /// reads it on every upload).
+    public let consentStore: any ConsentStore
 
     /// Single shared push-token registrar. Wired as a
     /// ``SessionLifecycleObserver`` on the auth coordinator at
@@ -270,6 +300,30 @@ public struct AppComposition: Sendable {
         )
     }
 
+    /// Build a ``PrivacyConsentViewModel`` wired to this
+    /// composition's consent store and observability facade. The
+    /// host view calls ``onCompletion`` when the user taps Continue
+    /// so the SwiftUI root can transition from the consent screen
+    /// to the sign-in flow.
+    @MainActor
+    public func privacyConsentViewModel(
+        onCompletion: @escaping @MainActor () -> Void,
+    ) -> PrivacyConsentViewModel {
+        PrivacyConsentViewModel(
+            consentStore: consentStore,
+            observability: observability,
+            onCompletion: onCompletion,
+        )
+    }
+
+    /// Whether the consent screen must be presented before the
+    /// main flow. Read once at launch; subsequent changes to consent
+    /// state are committed via the VM and do not re-trigger the
+    /// prompt.
+    public func needsPrivacyConsent() async -> Bool {
+        await consentStore.load().needsPrompt
+    }
+
     /// Concrete session factory used by ``liveViewModel``. Lives in
     /// its own helper so the `#if canImport(LiveKit)` branch stays
     /// tight: when LiveKit is linked (production + Xcode target),
@@ -348,6 +402,8 @@ public struct AppComposition: Sendable {
         bearerStore: any BearerTokenStore & SessionInvalidating,
         liveVideoGate: any LiveVideoGate,
         endpointStore: any EndpointStore & SessionLifecycleObserver,
+        observability: Observability,
+        consentStore: any ConsentStore,
         deviceTransportFactory: @escaping DeviceTransportFactory,
         pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
         pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
@@ -394,6 +450,18 @@ public struct AppComposition: Sendable {
         // paired device would keep receiving pushes.
         let pushRegistrar = PushTokenRegistrar()
         await coordinator.addLifecycleObserver(pushRegistrar)
+
+        // The observability lifecycle observer fires on sign-out and
+        // on 401. Sign-out purges every persisted observability
+        // artefact (breadcrumbs, telemetry queue, tombstones) so the
+        // next user on the same device cannot read the prior user's
+        // audit trail. 401 records a breadcrumb but leaves state
+        // intact because a 401 is a short-lived re-auth nudge, not a
+        // permanent session end.
+        let observabilityObserver = ObservabilityLifecycleObserver(
+            observability: observability,
+        )
+        await coordinator.addLifecycleObserver(observabilityObserver)
 
         // Build the signed transport via the caller-supplied factory,
         // threading the composition's 401 callback. The factory is
@@ -474,6 +542,8 @@ public struct AppComposition: Sendable {
             pairingAuthGate: pairingAuthGate,
             endpointStore: endpointStore,
             pushRegistrar: pushRegistrar,
+            observability: observability,
+            consentStore: consentStore,
             pushPrompt: pushPrompt,
             pushReadAuthorization: pushReadAuthorization,
             pushRegisterForRemote: pushRegisterForRemoteNotifications,
@@ -572,6 +642,8 @@ public struct AppComposition: Sendable {
         pairingAuthGate: @escaping PairingAuthGate,
         endpointStore: any EndpointStore & SessionLifecycleObserver,
         pushRegistrar: PushTokenRegistrar,
+        observability: Observability,
+        consentStore: any ConsentStore,
         pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
         pushReadAuthorization: @escaping PushViewModel.AuthorizationStatusReader,
         pushRegisterForRemote: @escaping PushViewModel.RegisterForRemoteNotifications,
@@ -589,6 +661,8 @@ public struct AppComposition: Sendable {
         self.pairingAuthGate = pairingAuthGate
         self.endpointStore = endpointStore
         self.pushRegistrar = pushRegistrar
+        self.observability = observability
+        self.consentStore = consentStore
         self.pushPrompt = pushPrompt
         self.pushReadAuthorization = pushReadAuthorization
         self.pushRegisterForRemote = pushRegisterForRemote
@@ -696,7 +770,74 @@ public extension AppComposition {
         let pushRegisterForRemote: PushViewModel.RegisterForRemoteNotifications = {
             await authController.registerForRemoteNotifications()
         }
-        return await make(
+
+        // Observability pipeline. Wires:
+        //  * the persistent ``UserDefaultsConsentStore`` (UserDefaults
+        //    value, versioned key) — checked on every upload.
+        //  * the HTTPS transport hanging off the same pinned URL
+        //    session the auth traffic uses, with a bearer-provider
+        //    closure that attaches the current bearer when available
+        //    (opportunistic: pre-login crash uploads still ship).
+        //  * the ``Observability`` actor — breadcrumb ring,
+        //    telemetry queue, tombstone pickup. Registered as a
+        //    ``SessionLifecycleObserver`` inside ``make`` so sign-out
+        //    purges every persisted artefact.
+        //  * the POSIX signal + ``NSException`` handlers, which
+        //    write tombstones the facade picks up on next launch.
+        //  * the ``MXMetricManager`` subscriber that delivers
+        //    Apple-signed crash / hang / cpu-exception diagnostics
+        //    on the launch following a crash.
+        //
+        // The MetricKit bridge and the in-process handlers are
+        // installed inside an unstructured Task so a failure to
+        // register does not block the rest of the composition from
+        // returning (and therefore the app from launching).
+        let consentStore = UserDefaultsConsentStore()
+        let observabilityTransportClient = ObservabilityPinnedHTTPClient(
+            pinned: pinnedTransport,
+        )
+        let transport = HTTPObservabilityTransport(
+            uploadURL: config.observabilityConfig.telemetryURL,
+            httpClient: observabilityTransportClient,
+            bearerProvider: { [bearerStore] in
+                try? await bearerStore.load()?.bearerToken
+            },
+        )
+        let observability = Observability(
+            config: config.observabilityConfig,
+            consent: consentStore,
+            transport: transport,
+        )
+
+        // Install the in-process crash handler BEFORE doing any more
+        // work so any crash between now and the end of composition is
+        // captured for the next launch. The handler is idempotent —
+        // a test that runs ``production`` twice (unusual) does not
+        // double-install.
+        try? config.observabilityConfig.tombstoneDirectory.checkResourceIsReachable()
+        let tombstoneStore = TombstoneStore(
+            directory: config.observabilityConfig.tombstoneDirectory,
+        )
+        try? tombstoneStore.prepare()
+        InProcessCrashHandler.install(
+            tombstoneDirectory: config.observabilityConfig.tombstoneDirectory,
+            sessionID: observability.sessionID,
+            appVersion: config.observabilityConfig.appVersion,
+            buildNumber: config.observabilityConfig.buildNumber,
+            osVersion: UIDevice.current.systemVersion,
+        )
+
+        // Register for MetricKit deliveries. The subscriber holds a
+        // strong reference to the bridge (``MetricKitBridge``) via
+        // a static so a future deployment does not have to remember
+        // to hold onto the bridge themselves.
+        let metricKitBridge = MetricKitBridge(handler: { [observability] payloads in
+            Task { await observability.ingestCrashPayloads(payloads) }
+        })
+        metricKitBridge.register()
+        _metricKitBridge = metricKitBridge
+
+        let composition = await make(
             authConfig: config.authConfig,
             authHTTPClient: pinnedTransport,
             signedHTTPClientFactory: pinnedFactory,
@@ -705,11 +846,49 @@ public extension AppComposition {
             bearerStore: bearerStore,
             liveVideoGate: bearerStore,
             endpointStore: endpointStore,
+            observability: observability,
+            consentStore: consentStore,
             deviceTransportFactory: transportFactory,
             pathMonitorFactory: pathMonitorFactory,
             pushPrompt: pushPrompt,
             pushReadAuthorization: pushReadAuthorization,
             pushRegisterForRemoteNotifications: pushRegisterForRemote,
+        )
+
+        // Kick off the first drain. Any crash payload + any queued
+        // events from previous sessions get uploaded as soon as the
+        // network is up — the drain is cooperative and a second
+        // concurrent call no-ops, so the Task here does not race
+        // with a later on-foreground drain.
+        Task { await observability.drain() }
+
+        return composition
+    }
+}
+
+/// Process-global strong reference to the ``MXMetricManager``
+/// subscriber. MetricKit registers with a weak reference pattern
+/// (subscribers stay alive by being retained elsewhere); we keep
+/// them here so the registration survives the composition returning.
+/// Shared via ``nonisolated(unsafe)`` because the value is mutated
+/// only from the main-actor ``production`` factory during launch.
+nonisolated(unsafe) private var _metricKitBridge: MetricKitBridge?
+
+/// Bridge type that lets ``HTTPObservabilityTransport`` use the
+/// same ``PinnedHTTPClient`` the rest of the app uses for auth
+/// traffic, without requiring ``CatLaserObservability`` to import
+/// ``CatLaserAuth``. The transport declares a minimal
+/// ``HTTPClient`` protocol of its own; this adapter bridges the
+/// two.
+private struct ObservabilityPinnedHTTPClient: ObservabilityHTTPClient {
+    let pinned: PinnedHTTPClient
+
+    func send(_ request: URLRequest) async throws -> ObservabilityHTTPResponse {
+        let response = try await pinned.send(request)
+        return ObservabilityHTTPResponse(
+            statusCode: response.statusCode,
+            headers: response.headers,
+            body: response.body,
         )
     }
 }

@@ -40,6 +40,18 @@ public final class InMemoryDeviceTransport: DeviceTransport, @unchecked Sendable
         self.continuation = captured
     }
 
+    /// Finish the inbound stream on deallocation. Swift 6.3 on Linux
+    /// does not auto-finish a leftover ``AsyncThrowingStream`` when
+    /// the producer-side continuation goes out of scope, so a
+    /// ``DeviceClient`` ``for await`` loop keeps a Task parked in the
+    /// cooperative thread pool; across the parallel test suite the
+    /// pool saturates and deadlocks. Calling ``finish`` here
+    /// terminates every consumer cleanly once the last reference to
+    /// the transport is released.
+    deinit {
+        continuation.finish()
+    }
+
     public func open() async throws {
         try await state.open()
     }

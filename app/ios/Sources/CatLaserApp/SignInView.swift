@@ -1,5 +1,6 @@
 #if canImport(SwiftUI)
 import CatLaserAuth
+import CatLaserDesign
 import Foundation
 import SwiftUI
 
@@ -21,6 +22,8 @@ import AppKit
 /// and VM property wired to control property."
 public struct SignInView: View {
     @Bindable private var viewModel: SignInViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AccessibilityFocusState private var errorFocus: Bool
 
     public init(viewModel: SignInViewModel) {
         self.viewModel = viewModel
@@ -28,6 +31,7 @@ public struct SignInView: View {
 
     public var body: some View {
         ZStack {
+            SemanticColor.background.ignoresSafeArea()
             mainContent
                 .opacity(emailSentAddress == nil ? 1 : 0)
 
@@ -41,7 +45,12 @@ public struct SignInView: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: emailSentAddress)
+        .accessibilityID(.signInRoot)
+        .catlaserDynamicTypeBounds()
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: emailSentAddress,
+        )
         .sheet(isPresented: $viewModel.emailSheetPresented) {
             EmailEntrySheet(viewModel: viewModel)
         }
@@ -50,6 +59,11 @@ public struct SignInView: View {
         }
         .task {
             await viewModel.resume()
+        }
+        .onChange(of: viewModel.currentErrorMessage) { _, newValue in
+            if newValue != nil {
+                errorFocus = true
+            }
         }
     }
 
@@ -107,12 +121,16 @@ public struct SignInView: View {
                     dismissLabel: SignInStrings.dismissButton,
                     onDismiss: { viewModel.dismissError() },
                 )
+                .accessibilityFocused($errorFocus)
                 .transition(.opacity)
             }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
-        .animation(.easeInOut(duration: 0.2), value: viewModel.currentErrorMessage)
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: viewModel.currentErrorMessage,
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -120,14 +138,16 @@ public struct SignInView: View {
         VStack(spacing: 8) {
             Image(systemName: "pawprint.circle.fill")
                 .font(.system(size: 56, weight: .regular))
-                .foregroundStyle(Color.accentColor)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityDecorativeIcon()
             Text(SignInStrings.title)
                 .font(.largeTitle.weight(.semibold))
                 .multilineTextAlignment(.center)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityHeader()
             Text(SignInStrings.subtitle)
                 .font(.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(SemanticColor.textSecondary)
                 .multilineTextAlignment(.center)
         }
     }
@@ -162,6 +182,7 @@ private struct AppleSignInButton: View {
                 HStack(spacing: 8) {
                     Image(systemName: "applelogo")
                         .font(.body.weight(.medium))
+                        .accessibilityHidden(true)
                     Text(SignInStrings.appleButton)
                         .font(.body.weight(.semibold))
                 }
@@ -169,16 +190,18 @@ private struct AppleSignInButton: View {
 
                 if isActive {
                     ProgressView()
-                        .tint(.white)
+                        .tint(SemanticColor.appleButtonForeground)
+                        .accessibilityLabel(Text(SignInStrings.appleButton))
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 48)
-            .background(Color.black)
-            .foregroundStyle(.white)
+            .background(SemanticColor.appleButtonBackground)
+            .foregroundStyle(SemanticColor.appleButtonForeground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+        .accessibilityID(.signInAppleButton)
         .accessibilityLabel(Text(SignInStrings.appleButton))
     }
 }
@@ -194,6 +217,7 @@ private struct GoogleSignInButton: View {
                 HStack(spacing: 8) {
                     Image(systemName: "g.circle.fill")
                         .font(.body.weight(.medium))
+                        .accessibilityHidden(true)
                     Text(SignInStrings.googleButton)
                         .font(.body.weight(.semibold))
                 }
@@ -201,19 +225,21 @@ private struct GoogleSignInButton: View {
 
                 if isActive {
                     ProgressView()
+                        .accessibilityLabel(Text(SignInStrings.googleButton))
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 48)
-            .background(Color(white: 0.98))
-            .foregroundStyle(.black)
+            .background(SemanticColor.googleButtonBackground)
+            .foregroundStyle(SemanticColor.googleButtonForeground)
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color(white: 0.85), lineWidth: 1),
+                    .stroke(SemanticColor.separator, lineWidth: 1),
             )
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+        .accessibilityID(.signInGoogleButton)
         .accessibilityLabel(Text(SignInStrings.googleButton))
     }
 }
@@ -227,19 +253,21 @@ private struct EmailEntryButton: View {
             HStack(spacing: 8) {
                 Image(systemName: "envelope.fill")
                     .font(.body.weight(.medium))
+                    .accessibilityHidden(true)
                 Text(SignInStrings.emailButton)
                     .font(.body.weight(.semibold))
             }
             .frame(maxWidth: .infinity, minHeight: 48)
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(SemanticColor.accent)
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.accentColor, lineWidth: 1),
+                    .stroke(SemanticColor.accent, lineWidth: 1),
             )
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+        .accessibilityID(.signInEmailButton)
         .accessibilityLabel(Text(SignInStrings.emailButton))
     }
 }
@@ -250,14 +278,14 @@ private struct DividerLabel: View {
     var body: some View {
         HStack(spacing: 12) {
             Rectangle()
-                .fill(Color(white: 0.85))
+                .fill(SemanticColor.separator)
                 .frame(height: 1)
             Text(text)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(SemanticColor.textSecondary)
                 .accessibilityHidden(true)
             Rectangle()
-                .fill(Color(white: 0.85))
+                .fill(SemanticColor.separator)
                 .frame(height: 1)
         }
     }
@@ -271,9 +299,11 @@ private struct EmailEntrySheet: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(SignInStrings.emailSheetTitle)
                     .font(.title2.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textPrimary)
+                    .accessibilityHeader()
                 Text(SignInStrings.emailSentHint)
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SemanticColor.textSecondary)
 
                 TextField(
                     SignInStrings.emailFieldPlaceholder,
@@ -286,12 +316,13 @@ private struct EmailEntrySheet: View {
                 .autocorrectionDisabled(true)
                 #endif
                 .textFieldStyle(.roundedBorder)
+                .accessibilityID(.signInEmailField)
                 .accessibilityLabel(Text(SignInStrings.emailFieldLabel))
 
                 if !viewModel.emailInput.isEmpty, !viewModel.isEmailInputValid {
                     Text(SignInStrings.emailInvalid)
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(SemanticColor.destructive)
                 }
 
                 Button {
@@ -306,20 +337,27 @@ private struct EmailEntrySheet: View {
                         if viewModel.phase == .requestingMagicLink {
                             ProgressView()
                                 .tint(.white)
+                                .accessibilityLabel(Text(SignInStrings.emailSendingButton))
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: 48)
-                    .background(viewModel.canRequestMagicLink ? Color.accentColor : Color.gray)
+                    .background(
+                        viewModel.canRequestMagicLink
+                            ? SemanticColor.accent
+                            : SemanticColor.textTertiary,
+                    )
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(!viewModel.canRequestMagicLink)
+                .accessibilityID(.signInEmailSubmit)
+                .accessibilityLabel(Text(SignInStrings.emailSendButton))
 
                 if let message = viewModel.currentErrorMessage {
                     Text(message)
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(SemanticColor.destructive)
                         .accessibilityAddTraits(.isStaticText)
                 }
 
@@ -331,6 +369,7 @@ private struct EmailEntrySheet: View {
                     Button(SignInStrings.cancelButton) {
                         viewModel.dismissEmailSheet()
                     }
+                    .accessibilityID(.signInEmailCancel)
                 }
             }
         }
@@ -349,18 +388,21 @@ private struct EmailSentView: View {
 
             Image(systemName: "envelope.badge")
                 .font(.system(size: 64, weight: .regular))
-                .foregroundStyle(Color.accentColor)
-                .accessibilityHidden(true)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityDecorativeIcon()
 
             VStack(spacing: 8) {
                 Text(SignInStrings.emailSentTitle)
                     .font(.title2.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textPrimary)
+                    .accessibilityHeader()
                 Text(SignInStrings.emailSentBody(address))
                     .font(.body)
+                    .foregroundStyle(SemanticColor.textPrimary)
                     .multilineTextAlignment(.center)
                 Text(SignInStrings.emailSentHint)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SemanticColor.textSecondary)
                     .multilineTextAlignment(.center)
             }
 
@@ -374,12 +416,15 @@ private struct EmailSentView: View {
                             .opacity(isResending ? 0 : 1)
                         if isResending {
                             ProgressView()
+                                .accessibilityLabel(Text(SignInStrings.resendButton))
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.bordered)
                 .disabled(isResending)
+                .accessibilityID(.signInEmailSentResend)
+                .accessibilityLabel(Text(SignInStrings.resendButton))
 
                 Button(action: onUseDifferentEmail) {
                     Text(SignInStrings.useDifferentEmailButton)
@@ -387,8 +432,10 @@ private struct EmailSentView: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(SemanticColor.textSecondary)
                 .disabled(isResending)
+                .accessibilityID(.signInEmailSentUseDifferent)
+                .accessibilityLabel(Text(SignInStrings.useDifferentEmailButton))
             }
             .frame(maxWidth: 420)
         }
@@ -408,14 +455,15 @@ private struct ErrorBanner: View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.body.weight(.semibold))
-                .foregroundStyle(.orange)
+                .foregroundStyle(SemanticColor.warning)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textPrimary)
                 Text(message)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SemanticColor.textSecondary)
             }
             Spacer(minLength: 8)
             Button(action: onDismiss) {
@@ -423,19 +471,23 @@ private struct ErrorBanner: View {
                     .font(.footnote.weight(.semibold))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(SemanticColor.accent)
+            .accessibilityID(.signInErrorDismiss)
             .accessibilityLabel(Text(dismissLabel))
         }
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(white: 0.96)),
+                .fill(SemanticColor.groupedBackground),
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color(white: 0.85), lineWidth: 1),
+                .stroke(SemanticColor.separator, lineWidth: 1),
         )
         .frame(maxWidth: 520)
+        .accessibilityID(.signInErrorBanner)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("\(title). \(message)"))
     }
 }
 #endif
