@@ -36,15 +36,15 @@ import Observation
 /// hops back. The events-watch task is captured as ``eventsTask`` and
 /// cancelled in ``stop()``.
 ///
-/// ## Single-consumer events stream
+/// ## Event stream consumption
 ///
-/// The VM consumes ``DeviceClient.events`` directly, which the device
-/// client documents as a single-subscriber stream. Other surfaces in
-/// the app that want to observe device-pushed events (status updates,
-/// hopper-empty warnings) construct their own VMs and route through
-/// their own consumers — there is no broadcast wrapper because the
-/// per-surface scope here is the load-bearing constraint that lets the
-/// VM filter for the events it cares about and ignore the rest.
+/// Unsolicited events reach the VM through a ``DeviceEventBroker``
+/// subscription, not via direct ``DeviceClient/events`` iteration.
+/// The broker is the composition's single consumer of the device's
+/// event stream and fans out to every view model that needs
+/// ``NewCatDetected`` (this VM), ``StatusUpdate`` (the live-view
+/// overlay), and the other unsolicited event types. The VM registers
+/// one subscription per ``start()`` and cancels it in ``stop()``.
 @MainActor
 @Observable
 public final class HistoryViewModel {
@@ -84,19 +84,23 @@ public final class HistoryViewModel {
     // MARK: - Dependencies
 
     private let deviceClient: DeviceClient
+    private let eventBroker: DeviceEventBroker?
     private let clock: @Sendable () -> Date
 
     // MARK: - Internal state
 
-    /// Long-running task that consumes ``DeviceClient.events`` for
-    /// unsolicited pushes. Cancelled in ``stop()``.
+    /// Long-running task that consumes the broker's fanout
+    /// subscription for unsolicited ``NewCatDetected`` pushes.
+    /// Cancelled in ``stop()``.
     private var eventsTask: Task<Void, Never>?
 
     public init(
         deviceClient: DeviceClient,
+        eventBroker: DeviceEventBroker? = nil,
         clock: @escaping @Sendable () -> Date = { Date() },
     ) {
         self.deviceClient = deviceClient
+        self.eventBroker = eventBroker
         self.clock = clock
     }
 
@@ -418,14 +422,27 @@ public final class HistoryViewModel {
 
     private func startEventsWatcherIfNeeded() {
         guard eventsTask == nil else { return }
-        eventsTask = Task { [weak self, deviceClient] in
-            // ``DeviceClient.events`` is ``nonisolated``; no hop
-            // needed to obtain the stream handle. The for-loop hops
-            // back to the MainActor for each ``handleUnsolicited``.
-            let stream = deviceClient.events
-            for await event in stream {
-                guard !Task.isCancelled else { return }
-                await self?.handleUnsolicited(event)
+        // Prefer the broker's fanout subscription so multiple VMs can
+        // observe the device's unsolicited event surface without
+        // racing the single-consumer contract on ``DeviceClient/events``.
+        // When no broker is wired (legacy test rigs that pre-date the
+        // broker), fall back to the direct events stream — the SPM
+        // tests that use this fallback are single-VM by construction.
+        if let eventBroker {
+            let subscription = eventBroker.events()
+            eventsTask = Task { [weak self] in
+                for await event in subscription {
+                    guard !Task.isCancelled else { return }
+                    await self?.handleUnsolicited(event)
+                }
+            }
+        } else {
+            eventsTask = Task { [weak self, deviceClient] in
+                let stream = deviceClient.events
+                for await event in stream {
+                    guard !Task.isCancelled else { return }
+                    await self?.handleUnsolicited(event)
+                }
             }
         }
     }

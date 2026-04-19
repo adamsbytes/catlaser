@@ -1,24 +1,67 @@
 #if canImport(SwiftUI)
 import CatLaserDesign
+import CatLaserProto
 import Foundation
 import SwiftUI
+
+#if canImport(UIKit) && !os(watchOS)
+import UIKit
+#endif
 
 /// Live-view screen.
 ///
 /// Four visual states, one per non-busy `LiveViewState` case, plus a
 /// shared spinner overlay for the three busy cases. Every control on
 /// screen is bound to a VM property — the view has no state of its
-/// own, so tests exercise the VM directly (matching `SignInView`).
+/// own beyond the transient control-visibility timer, so tests
+/// exercise the VM directly (matching `SignInView`).
 ///
 /// Video rendering is delegated to `LiveVideoView`, a
 /// `UIViewRepresentable` (or `NSViewRepresentable`) that wraps
 /// LiveKit's `VideoView`. When `LiveKit` is not linked the delegate
 /// falls back to a placeholder, so the screen still compiles and runs
 /// with a mock session.
+///
+/// ## Streaming UX
+///
+/// While streaming, the screen displays:
+///
+/// 1. The live video feed, full-bleed against a black canvas.
+/// 2. A top session-status pill ("Playing now · 1m 20s") that
+///    updates every second via a `TimelineView` and renders a
+///    hopper-low / hopper-empty badge next to it when the device
+///    reports a low level.
+/// 3. A bottom Stop button that tears the stream down.
+///
+/// Tap the video area once to toggle the overlay chrome visibility;
+/// after three seconds of idle it auto-hides so the feed is
+/// unobstructed. VoiceOver users see the chrome at all times — the
+/// auto-hide is suppressed when
+/// ``accessibilityVoiceOverEnabled`` is true because the gesture
+/// needed to reveal the controls is not discoverable under VoiceOver.
 public struct LiveView: View {
     @Bindable private var viewModel: LiveViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @AccessibilityFocusState private var errorFocus: Bool
+
+    /// Visibility of the streaming overlay chrome (top status pill +
+    /// bottom Stop button). Toggled by a tap on the video and auto-
+    /// reset by an inactivity timer. Initialised `true` so a user
+    /// landing on a fresh stream sees the controls immediately; the
+    /// auto-hide timer takes over three seconds later.
+    @State private var controlsVisible: Bool = true
+
+    /// Countdown Task that flips ``controlsVisible`` back to `false`.
+    /// Re-armed on every tap so the idle timer restarts with each
+    /// interaction; cancelled on tap-to-hide and on view disappear.
+    @State private var controlsHideTask: Task<Void, Never>?
+
+    /// Inactivity window before the Stop-button chrome auto-hides.
+    /// Three seconds matches the pattern AVKit, Photos, and Home use
+    /// for their full-screen video surfaces — long enough to press,
+    /// short enough to clear out of the way of the feed.
+    private static let controlsAutoHideDelay: Duration = .seconds(3)
 
     public init(viewModel: LiveViewModel) {
         self.viewModel = viewModel
@@ -35,6 +78,10 @@ public struct LiveView: View {
             CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
             value: stateTag,
         )
+        .animation(
+            CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
+            value: controlsVisible,
+        )
         .onChange(of: stateTag) { _, newValue in
             switch newValue {
             case "failed":
@@ -43,7 +90,9 @@ public struct LiveView: View {
             case "streaming":
                 // Success haptic the moment the first track lands —
                 // the stream spinner-to-video transition is the
-                // payoff the user was waiting for.
+                // payoff the user was waiting for. The chrome is
+                // visible and the auto-hide timer is armed by
+                // ``streamingContent``'s ``.onAppear``.
                 Haptics.success.play()
             default:
                 break
@@ -54,12 +103,13 @@ public struct LiveView: View {
             // cancel the stream to tear down the device-side and
             // LiveKit-side resources cleanly.
             await withTaskCancellationHandler {
-                // No-op body; the handler fires on cancel.
                 for await _ in AsyncStream<Void> { continuation in
                     continuation.onTermination = { _ in continuation.finish() }
                 } {}
             } onCancel: {
                 Task { @MainActor in
+                    controlsHideTask?.cancel()
+                    controlsHideTask = nil
                     if viewModel.state.canStop {
                         await viewModel.stop()
                     }
@@ -166,38 +216,180 @@ public struct LiveView: View {
 
     @ViewBuilder
     private func streamingContent(track: any LiveVideoTrackHandle) -> some View {
-        ZStack(alignment: .bottom) {
+        ZStack(alignment: .top) {
             LiveVideoView(track: track)
                 .ignoresSafeArea()
                 .accessibilityID(.liveVideo)
                 .accessibilityLabel(Text(LiveViewStrings.videoAccessibilityLabel))
                 .accessibilityAddTraits(.updatesFrequently)
                 .accessibilityIgnoresInvertColors(true)
+                .contentShape(Rectangle())
+                .onTapGesture { toggleControls() }
 
-            HStack {
-                Spacer()
-                Button {
-                    Haptics.light.play()
-                    Task { await viewModel.stop() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "stop.circle.fill")
-                            .accessibilityHidden(true)
-                        Text(LiveViewStrings.stopButton)
-                    }
-                    .font(.body.weight(.semibold))
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .foregroundStyle(.white)
-                }
-                .buttonStyle(.plain)
-                .accessibilityID(.liveStopButton)
-                .accessibilityLabel(Text(LiveViewStrings.stopButton))
-                Spacer()
+            if controlsVisible || voiceOverEnabled {
+                overlayChrome
+                    .transition(.opacity)
             }
-            .padding(.bottom, 32)
         }
+        .onAppear {
+            controlsVisible = true
+            scheduleAutoHide()
+        }
+        .onDisappear {
+            controlsHideTask?.cancel()
+            controlsHideTask = nil
+        }
+    }
+
+    /// Top status pill + hopper badge overlay, and a bottom Stop
+    /// button. Rendered above the video via a `ZStack` alignment and
+    /// kept inside the safe area — the feed itself extends behind the
+    /// home indicator, but controls never do.
+    ///
+    /// ``frame(maxWidth: .infinity, maxHeight: .infinity)`` makes the
+    /// VStack stretch to the parent ZStack's bounds so the ``Spacer``
+    /// between the top row and the bottom button has a definite
+    /// height to claim; without it the VStack sizes to its intrinsic
+    /// content and the Stop button would glue up against the top
+    /// row.
+    private var overlayChrome: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                sessionStatusPill
+                Spacer()
+                if let badge = LiveSessionStatusStrings.hopperBadge(
+                    for: viewModel.sessionStatus.hopperLevel,
+                ) {
+                    hopperBadge(label: badge, level: viewModel.sessionStatus.hopperLevel)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+
+            Spacer()
+
+            stopButton
+                .padding(.bottom, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Session pill with an animated elapsed-time counter. A
+    /// `TimelineView` ticks once per second for the "Playing now"
+    /// phase; the idle / unknown phases render a static label with
+    /// no timer — `TimelineView.explicit` with an empty schedule is
+    /// used so the reduce-motion branch never animates.
+    @ViewBuilder
+    private var sessionStatusPill: some View {
+        let status = viewModel.sessionStatus
+        switch status.phase {
+        case .unknown:
+            // Nothing yet — hide the pill rather than render "Unknown"
+            // chrome. The connection-status overlay in the tab shell
+            // covers "connecting / waiting" states already.
+            EmptyView()
+        case .idle:
+            playingPillLabel(
+                label: LiveSessionStatusStrings.idleLabel,
+                dotColor: SemanticColor.textSecondary,
+                accessibility: LiveSessionStatusStrings.idleLabel,
+            )
+        case .playing:
+            TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                let elapsed = status.sessionStartedAt.map { start in
+                    LiveSessionStatusStrings.elapsed(
+                        since: start,
+                        now: context.date,
+                    )
+                }
+                let spoken = status.sessionStartedAt.map { start in
+                    LiveSessionStatusStrings.spokenElapsed(
+                        since: start,
+                        now: context.date,
+                    )
+                } ?? LiveSessionStatusStrings.playingLabel
+                playingPillLabel(
+                    label: elapsed.map { "\(LiveSessionStatusStrings.playingLabel) · \($0)" }
+                        ?? LiveSessionStatusStrings.playingLabel,
+                    dotColor: SemanticColor.success,
+                    accessibility: LiveSessionStatusStrings.playingAccessibilityLabel(
+                        elapsed: spoken,
+                    ),
+                )
+            }
+        }
+    }
+
+    private func playingPillLabel(
+        label: String,
+        dotColor: Color,
+        accessibility: String,
+    ) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(
+            Capsule().stroke(SemanticColor.separator.opacity(0.5), lineWidth: 0.5),
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(accessibility))
+        .accessibilityAddTraits(.updatesFrequently)
+    }
+
+    private func hopperBadge(
+        label: String,
+        level: Catlaser_App_V1_HopperLevel,
+    ) -> some View {
+        let tint: Color = switch level {
+        case .empty: SemanticColor.destructive
+        default: SemanticColor.warning
+        }
+        return HStack(spacing: 6) {
+            Image(systemName: level == .empty ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(
+            Capsule().stroke(tint.opacity(0.75), lineWidth: 1),
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(label))
+    }
+
+    private var stopButton: some View {
+        Button {
+            Haptics.light.play()
+            Task { await viewModel.stop() }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "stop.circle.fill")
+                    .accessibilityHidden(true)
+                Text(LiveViewStrings.stopButton)
+            }
+            .font(.body.weight(.semibold))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule())
+            .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+        .accessibilityID(.liveStopButton)
+        .accessibilityLabel(Text(LiveViewStrings.stopButton))
     }
 
     private var disconnectingContent: some View {
@@ -265,6 +457,40 @@ public struct LiveView: View {
         }
         .frame(maxWidth: 420)
         .padding()
+    }
+
+    // MARK: - Tap-to-hide controls
+
+    private func toggleControls() {
+        // When VoiceOver is running, controls are pinned visible (the
+        // overlay's conditional above renders chrome even when
+        // ``controlsVisible`` is false) so the tap-to-hide gesture
+        // would confuse screen-reader users. No-op in that case.
+        guard !voiceOverEnabled else { return }
+        controlsVisible.toggle()
+        Haptics.selection.play()
+        if controlsVisible {
+            scheduleAutoHide()
+        } else {
+            controlsHideTask?.cancel()
+            controlsHideTask = nil
+        }
+    }
+
+    private func scheduleAutoHide() {
+        controlsHideTask?.cancel()
+        // Suppressed when VoiceOver is running — same rationale as
+        // the tap gesture. The overlay is already forced visible by
+        // the conditional, so skipping the timer avoids a redundant
+        // MainActor state write that would otherwise fire on every
+        // streaming tick.
+        guard !voiceOverEnabled else { return }
+        let delay = Self.controlsAutoHideDelay
+        controlsHideTask = Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            controlsVisible = false
+        }
     }
 }
 #endif

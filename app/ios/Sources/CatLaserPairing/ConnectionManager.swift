@@ -508,14 +508,17 @@ public actor ConnectionManager {
 
     private func startEventsWatcher(for client: DeviceClient) {
         eventsWatcherTask?.cancel()
-        let stream = client.events
+        // Wait for ``DeviceClient`` to transition into ``.closed`` via
+        // its dedicated close signal — NOT by iterating ``events``.
+        // The ``events`` stream is a single-consumer surface reserved
+        // for ``DeviceEventBroker``; two concurrent iterators on an
+        // ``AsyncStream`` race ``next()`` calls and silently split
+        // events between consumers, so letting the supervisor also
+        // subscribe here would leak every second unsolicited push
+        // away from the broker fanout.
         eventsWatcherTask = Task { [weak self, client] in
-            for await _ in stream {
-                if Task.isCancelled { return }
-            }
-            // End-of-stream means the DeviceClient has closed. If
-            // we're still marked connected to THIS client, tear it
-            // down and reconnect.
+            await client.waitForClose()
+            if Task.isCancelled { return }
             guard let self else { return }
             await self.handleEventsStreamEnded(client: client)
         }

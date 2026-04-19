@@ -86,6 +86,188 @@ struct LiveViewModelTests {
         #expect(vm.state.canStart)
         #expect(!vm.state.canStop)
         #expect(!vm.state.isBusy)
+        #expect(vm.sessionStatus.phase == .unknown)
+        #expect(!vm.isObservingStatus)
+    }
+
+    // MARK: - Session status observation
+
+    @Test
+    func sessionStatusUnknownWithoutBroker() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { MockLiveStreamSession() },
+        )
+        #expect(vm.sessionStatus.phase == .unknown)
+        #expect(vm.sessionStatus.sessionStartedAt == nil)
+        #expect(!vm.isObservingStatus)
+    }
+
+    @Test
+    func sessionStatusMovesToPlayingOnStatusUpdate() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        try await client.connect()
+        let broker = DeviceEventBroker(
+            client: client,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        broker.start()
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { MockLiveStreamSession() },
+            eventBroker: broker,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        defer {
+            Task {
+                broker.stop()
+                await client.disconnect()
+                await transport.close()
+            }
+        }
+
+        #expect(vm.isObservingStatus)
+
+        var status = Catlaser_App_V1_StatusUpdate()
+        status.sessionActive = true
+        status.activeCatIds = ["cat-a", "cat-b"]
+        status.hopperLevel = .ok
+        status.firmwareVersion = "1.2.3"
+        var event = Catlaser_App_V1_DeviceEvent()
+        event.statusUpdate = status
+        try transport.deliver(event: event)
+
+        await eventually { vm.sessionStatus.phase == .playing }
+
+        #expect(vm.sessionStatus.phase == .playing)
+        #expect(vm.sessionStatus.activeCatCount == 2)
+        #expect(vm.sessionStatus.hopperLevel == .ok)
+        #expect(vm.sessionStatus.firmwareVersion == "1.2.3")
+        #expect(vm.sessionStatus.sessionStartedAt == Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    @Test
+    func sessionStatusStableOnRepeatedPlayingStatus() async throws {
+        // The session-started timestamp is a rising-edge observation;
+        // a subsequent heartbeat with session_active=true must NOT
+        // reset the timestamp, otherwise the overlay's elapsed
+        // counter would bounce back to zero every heartbeat.
+        let clockSeq = LockedClock(Date(timeIntervalSince1970: 1_700_000_000))
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        try await client.connect()
+        let broker = DeviceEventBroker(client: client, clock: { clockSeq.now })
+        broker.start()
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { MockLiveStreamSession() },
+            eventBroker: broker,
+            clock: { clockSeq.now },
+        )
+        defer {
+            Task {
+                broker.stop()
+                await client.disconnect()
+                await transport.close()
+            }
+        }
+
+        var status = Catlaser_App_V1_StatusUpdate()
+        status.sessionActive = true
+        var event = Catlaser_App_V1_DeviceEvent()
+        event.statusUpdate = status
+        try transport.deliver(event: event)
+        await eventually { vm.sessionStatus.phase == .playing }
+        let firstStart = vm.sessionStatus.sessionStartedAt
+        #expect(firstStart == Date(timeIntervalSince1970: 1_700_000_000))
+
+        // Second heartbeat, later wall-clock, still session_active.
+        clockSeq.advance(by: 5)
+        try transport.deliver(event: event)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        #expect(vm.sessionStatus.sessionStartedAt == firstStart)
+    }
+
+    @Test
+    func sessionStatusResetsOnSessionSummary() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        try await client.connect()
+        let broker = DeviceEventBroker(client: client)
+        broker.start()
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { MockLiveStreamSession() },
+            eventBroker: broker,
+        )
+        defer {
+            Task {
+                broker.stop()
+                await client.disconnect()
+                await transport.close()
+            }
+        }
+
+        var status = Catlaser_App_V1_StatusUpdate()
+        status.sessionActive = true
+        var statusEvent = Catlaser_App_V1_DeviceEvent()
+        statusEvent.statusUpdate = status
+        try transport.deliver(event: statusEvent)
+        await eventually { vm.sessionStatus.phase == .playing }
+
+        var summary = Catlaser_App_V1_SessionSummary()
+        summary.durationSec = 120
+        var summaryEvent = Catlaser_App_V1_DeviceEvent()
+        summaryEvent.sessionSummary = summary
+        try transport.deliver(event: summaryEvent)
+
+        await eventually { vm.sessionStatus.phase == .idle }
+        #expect(vm.sessionStatus.sessionStartedAt == nil)
+        #expect(vm.sessionStatus.activeCatCount == 0)
+    }
+
+    @Test
+    func sessionStatusHopperLevelTracksLatestStatus() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        try await client.connect()
+        let broker = DeviceEventBroker(client: client)
+        broker.start()
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { MockLiveStreamSession() },
+            eventBroker: broker,
+        )
+        defer {
+            Task {
+                broker.stop()
+                await client.disconnect()
+                await transport.close()
+            }
+        }
+
+        var status = Catlaser_App_V1_StatusUpdate()
+        status.sessionActive = false
+        status.hopperLevel = .low
+        var event = Catlaser_App_V1_DeviceEvent()
+        event.statusUpdate = status
+        try transport.deliver(event: event)
+
+        await eventually { vm.sessionStatus.hopperLevel == .low }
+        #expect(vm.sessionStatus.phase == .idle)
     }
 
     // MARK: - Happy path
@@ -877,5 +1059,29 @@ final class LockedBool: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value
+    }
+}
+
+/// Lock-guarded advanceable clock for tests that want an observable
+/// "time passed" between scripted deliveries. Captured by the clock
+/// closures on the broker / VM so both read the same `now`.
+final class LockedClock: @unchecked Sendable {
+    private var current: Date
+    private let lock = NSLock()
+
+    init(_ initial: Date) {
+        self.current = initial
+    }
+
+    var now: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func advance(by seconds: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        current = current.addingTimeInterval(seconds)
     }
 }

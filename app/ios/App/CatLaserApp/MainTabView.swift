@@ -6,6 +6,9 @@ import CatLaserPairing
 import CatLaserPush
 import CatLaserSchedule
 import SwiftUI
+#if canImport(UIKit) && !os(watchOS)
+import UIKit
+#endif
 
 /// Primary tab shell for the paired + connected app.
 ///
@@ -36,7 +39,7 @@ struct MainTabView: View {
 
     var body: some View {
         TabView(selection: $selected) {
-            LiveView(viewModel: liveViewModel)
+            liveTabContent
                 .tabItem {
                     Label("Live", systemImage: "video.fill")
                 }
@@ -101,5 +104,24 @@ struct MainTabView: View {
                 selected = .settings
             }
         }
+    }
+
+    /// Live tab content with per-screen orientation policy.
+    ///
+    /// The Live tab is the only surface that needs landscape — the
+    /// video feed fills the phone screen at 16:9 when rotated. The
+    /// ``allowOrientations`` modifier updates the shared
+    /// ``OrientationLock`` on appear and restores portrait on
+    /// disappear so sibling tabs keep their portrait-first layouts
+    /// intact. On platforms where UIKit is unavailable the modifier
+    /// is compiled out and the Live tab just renders the view.
+    @ViewBuilder
+    private var liveTabContent: some View {
+        #if canImport(UIKit) && !os(watchOS) && os(iOS)
+        LiveView(viewModel: liveViewModel)
+            .allowOrientations(.allButUpsideDown)
+        #else
+        LiveView(viewModel: liveViewModel)
+        #endif
     }
 }

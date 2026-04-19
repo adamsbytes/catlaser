@@ -1139,6 +1139,108 @@ struct DeviceClientTests {
         }
     }
 
+    // MARK: - waitForClose
+
+    @Test
+    func waitForCloseResumesOnDisconnect() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        try await client.connect()
+        #expect(await client.isClosed == false)
+
+        let waiter = Task {
+            await client.waitForClose()
+            return true
+        }
+        // Let waiter park.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await client.disconnect()
+        let resumed = await waiter.value
+        #expect(resumed)
+        #expect(await client.isClosed)
+    }
+
+    @Test
+    func waitForCloseReturnsImmediatelyIfAlreadyClosed() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        try await client.connect()
+        await client.disconnect()
+        #expect(await client.isClosed)
+
+        // Second call must return immediately without parking.
+        let start = Date()
+        await client.waitForClose()
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < 0.1)
+    }
+
+    @Test
+    func waitForCloseResumesOnTransportError() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        try await client.connect()
+
+        let waiter = Task {
+            await client.waitForClose()
+            return true
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        // Simulate a transport error surfaced from the peer side.
+        struct TestError: Error {}
+        transport.finishPeer(throwing: TestError())
+
+        let resumed = await waiter.value
+        #expect(resumed)
+        #expect(await client.isClosed)
+    }
+
+    @Test
+    func waitForCloseResumesOnTaskCancellation() async throws {
+        // Without a cancellation-aware implementation a cancelled
+        // caller would leak the continuation forever. Assert that
+        // cancelling the awaiting Task causes the waiter to return
+        // and the client's internal state to be clean for a
+        // subsequent re-await.
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        try await client.connect()
+
+        let waiter = Task {
+            await client.waitForClose()
+            return true
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        waiter.cancel()
+        let resumed = await waiter.value
+        #expect(resumed)
+
+        // Client must still be marked as open — cancellation must
+        // not accidentally close the client.
+        #expect(await !client.isClosed)
+        await client.disconnect()
+    }
+
+    @Test
+    func waitForCloseSupportsMultipleConcurrentWaiters() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        try await client.connect()
+
+        let waiterA = Task { await client.waitForClose() }
+        let waiterB = Task { await client.waitForClose() }
+        let waiterC = Task { await client.waitForClose() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        await client.disconnect()
+        await waiterA.value
+        await waiterB.value
+        await waiterC.value
+        // Reaching here means all three resumed.
+        #expect(await client.isClosed)
+    }
+
     @Test
     func handshakeRejectsResponseSignedLongAgo() async throws {
         // The attacker replayed a perfectly-valid response whose

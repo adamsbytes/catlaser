@@ -66,6 +66,13 @@ public final class LiveViewModel {
 
     public private(set) var state: LiveViewState = .disconnected
 
+    /// View-facing snapshot of the device's play-session status and
+    /// hopper reading. Updated by the broker subscription; renders the
+    /// top-of-stream overlay ("Playing now • 1m 20s") and the
+    /// stationary hopper badge. Observable so SwiftUI re-renders on
+    /// every status push.
+    public private(set) var sessionStatus: LiveSessionStatus = .init()
+
     /// Wall-clock deadline for the ``.connecting`` phase. A legitimate
     /// LiveKit connect over Tailscale settles in a few seconds; 30
     /// seconds is generous even on slow cellular. If no ``.streaming``
@@ -79,22 +86,30 @@ public final class LiveViewModel {
     private let authGate: AuthGate
     private let liveKitAllowlist: LiveKitHostAllowlist
     private let connectTimeout: TimeInterval
+    private let clock: @Sendable () -> Date
     private var currentSession: (any LiveStreamSession)?
     private var eventsTask: Task<Void, Never>?
     private var connectTimeoutTask: Task<Void, Never>?
+    private var statusObservationTask: Task<Void, Never>?
 
     public init(
         deviceClient: DeviceClient,
         authGate: @escaping AuthGate,
         liveKitAllowlist: LiveKitHostAllowlist,
         sessionFactory: @escaping @Sendable () -> any LiveStreamSession,
+        eventBroker: DeviceEventBroker? = nil,
         connectTimeout: TimeInterval = LiveViewModel.connectTimeout,
+        clock: @escaping @Sendable () -> Date = { Date() },
     ) {
         self.deviceClient = deviceClient
         self.authGate = authGate
         self.liveKitAllowlist = liveKitAllowlist
         self.sessionFactory = sessionFactory
         self.connectTimeout = connectTimeout
+        self.clock = clock
+        if let eventBroker {
+            startStatusObservation(broker: eventBroker)
+        }
     }
 
     // No deinit: `LiveViewModel` is `@MainActor` so `eventsTask` is
@@ -217,6 +232,89 @@ public final class LiveViewModel {
     /// session exists. Used by tests to assert that `stop()` wiped
     /// the reference.
     public var hasActiveSession: Bool { currentSession != nil }
+
+    /// Test-only: whether the VM has attached a status observation
+    /// task to a broker. Tests assert this to confirm a VM
+    /// constructed without a broker stays silent and a VM constructed
+    /// with one does observe.
+    public var isObservingStatus: Bool { statusObservationTask != nil }
+
+    // MARK: - Session status observation
+
+    /// Attach a long-running observer to the broker's event fanout
+    /// and translate ``StatusUpdate`` / ``SessionSummary`` into the
+    /// view-facing ``sessionStatus`` value. Runs for the lifetime of
+    /// the VM; exits cleanly when the broker stops (its subscription
+    /// stream finishes) or when the VM is released (``[weak self]``
+    /// capture lets the task exit on the next event).
+    ///
+    /// Intentionally not exposed as a public lifecycle method: the
+    /// observation is tied to VM construction, not to the stream
+    /// start / stop state machine. Having a separate "start status
+    /// observation" API would let a caller forget to call it and
+    /// silently leave the overlay blank; making it implicit at init
+    /// means the one call site (``AppComposition/liveViewModel``) gets
+    /// the wiring right for free.
+    private func startStatusObservation(broker: DeviceEventBroker) {
+        guard statusObservationTask == nil else { return }
+        let subscription = broker.events()
+        statusObservationTask = Task { [weak self] in
+            for await event in subscription {
+                guard !Task.isCancelled else { return }
+                guard let strongSelf = self else { return }
+                // ``applyStatus`` / ``applySessionEnded`` are
+                // MainActor-isolated non-async methods; route through
+                // ``MainActor.run`` to make the actor hop explicit and
+                // keep Swift 6's optional-chain await analysis quiet.
+                switch event.event {
+                case let .statusUpdate(payload):
+                    await MainActor.run {
+                        strongSelf.applyStatus(payload)
+                    }
+                case .sessionSummary:
+                    await MainActor.run {
+                        strongSelf.applySessionEnded()
+                    }
+                default:
+                    continue
+                }
+            }
+        }
+    }
+
+    private func applyStatus(_ payload: Catlaser_App_V1_StatusUpdate) {
+        var updated = sessionStatus
+        updated.hopperLevel = payload.hopperLevel
+        updated.firmwareVersion = payload.firmwareVersion
+        if payload.sessionActive {
+            updated.phase = .playing
+            updated.activeCatCount = payload.activeCatIds.count
+            // Track the first-observed timestamp on the rising edge
+            // only. If we're already playing, keep the earlier
+            // reading so the overlay's elapsed-time counter doesn't
+            // reset on every heartbeat.
+            if updated.sessionStartedAt == nil {
+                updated.sessionStartedAt = clock()
+            }
+        } else {
+            updated.phase = .idle
+            updated.activeCatCount = 0
+            updated.sessionStartedAt = nil
+        }
+        sessionStatus = updated
+    }
+
+    private func applySessionEnded() {
+        // Session-summary is the edge-triggered "session just ended"
+        // signal. Even if a following heartbeat hasn't landed yet, we
+        // reset the overlay so the stale elapsed counter doesn't keep
+        // ticking after the device has actually stopped.
+        var updated = sessionStatus
+        updated.phase = .idle
+        updated.activeCatCount = 0
+        updated.sessionStartedAt = nil
+        sessionStatus = updated
+    }
 
     // MARK: - Private
 

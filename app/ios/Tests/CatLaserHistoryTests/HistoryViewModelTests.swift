@@ -576,6 +576,47 @@ struct HistoryViewModelTests {
 
     // MARK: - NewCatDetected event handling
 
+    /// When an event broker is supplied, unsolicited events must
+    /// reach the VM through the broker's fanout subscription (not the
+    /// direct ``DeviceClient/events`` path). This test pins the
+    /// wiring so a regression that reverted to direct iteration would
+    /// surface.
+    @Test
+    func newCatDetectedReachesVMViaBroker() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [])
+            case .getPlayHistory: return self.reply(sessions: [])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        try await client.connect()
+        await server.run()
+        let broker = DeviceEventBroker(client: client)
+        broker.start()
+        let vm = HistoryViewModel(
+            deviceClient: client,
+            eventBroker: broker,
+            clock: { Date(timeIntervalSince1970: 1_712_345_678) },
+        )
+        defer {
+            Task {
+                broker.stop()
+                await server.stop()
+                await client.disconnect()
+            }
+        }
+
+        await vm.start()
+
+        try transport.deliver(event: makeNewCatEvent(trackID: 42, thumbnail: Data([0xAB])))
+        await eventually { vm.pendingNewCats.count == 1 }
+        #expect(vm.pendingNewCats.first?.trackIDHint == 42)
+        #expect(vm.pendingNewCats.first?.thumbnail == Data([0xAB]))
+    }
+
     @Test
     func unsolicitedNewCatDetectedAppendsToQueue() async throws {
         let (vm, transport, server, client) = try await makeHarness { request in

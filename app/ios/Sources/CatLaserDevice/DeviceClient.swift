@@ -101,6 +101,13 @@ public actor DeviceClient {
     private var pending: [UInt32: CheckedContinuation<Catlaser_App_V1_DeviceEvent, any Error>] = [:]
     private var receiveTask: Task<Void, Never>?
     private var timeoutTasks: [UInt32: Task<Void, Never>] = [:]
+    /// Continuations parked on ``waitForClose``. Resumed (all at once)
+    /// by every close path — ``disconnect``, ``closeWithError``, and
+    /// the handshake-failure teardown. Exists so the
+    /// ``ConnectionManager`` can await connection-close without
+    /// subscribing to ``events`` (which is a single-consumer surface
+    /// reserved for the ``DeviceEventBroker`` fanout).
+    private var closeWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     // Unsolicited event plumbing. Single consumer.
     private let eventStream: AsyncStream<Catlaser_App_V1_DeviceEvent>
@@ -358,6 +365,7 @@ public actor DeviceClient {
         await transport.close()
         await failAllPending(.cancelled)
         eventContinuation.finish()
+        resumeCloseWaiters()
     }
 
     /// Tear the transport down and fail all outstanding requests.
@@ -369,6 +377,7 @@ public actor DeviceClient {
         await transport.close()
         await failAllPending(.cancelled)
         eventContinuation.finish()
+        resumeCloseWaiters()
     }
 
     /// Current connection state — inspected by tests and diagnostics.
@@ -378,6 +387,81 @@ public actor DeviceClient {
     /// auth handshake is still in flight, otherwise they could
     /// schedule a ``request`` that the public gate would then refuse.
     public var isConnected: Bool { state == .connected }
+
+    /// True once the client has transitioned to ``.closed`` — either
+    /// via ``disconnect``, a transport error, or a rejected handshake.
+    /// Paired with ``waitForClose`` for consumers that want to observe
+    /// the transition without subscribing to ``events``.
+    public var isClosed: Bool { state == .closed }
+
+    /// Await the transition into ``.closed``. Returns immediately if
+    /// the client is already closed. Exposed so
+    /// ``ConnectionManager`` can detect end-of-connection without
+    /// subscribing to ``events``, which is reserved for a single
+    /// consumer — ``DeviceEventBroker``. Multiple concurrent awaiters
+    /// are supported; the close path resumes all of them.
+    ///
+    /// Cancellation-aware: if the caller's task is cancelled before
+    /// the client closes, the parked waiter is resumed immediately
+    /// (the call returns) and the map entry is cleared. Without this
+    /// hook a cancelled caller would leak a continuation forever —
+    /// ``withCheckedContinuation`` itself does not observe task
+    /// cancellation.
+    public func waitForClose() async {
+        if state == .closed { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                registerCloseWaiter(id: id, continuation: continuation)
+            }
+        } onCancel: {
+            // The closure runs outside the actor's isolation domain;
+            // push the waiter-cleanup back to the actor via a Task
+            // and let the actor resume the parked continuation. The
+            // Task's ``[weak self]`` capture lives on the cooperative
+            // pool, satisfying Swift 6's ``sending``-closure
+            // isolation check.
+            Task { [weak self] in
+                await self?.cancelCloseWaiter(id: id)
+            }
+        }
+    }
+
+    /// Register a close waiter, or resume it immediately if the
+    /// client has closed between the fast-path check in
+    /// ``waitForClose`` and the continuation install. Prevents a race
+    /// where ``resumeCloseWaiters`` runs before the map write, which
+    /// would park the caller forever.
+    private func registerCloseWaiter(
+        id: UUID,
+        continuation: CheckedContinuation<Void, Never>,
+    ) {
+        if state == .closed {
+            continuation.resume()
+            return
+        }
+        closeWaiters[id] = continuation
+    }
+
+    /// Cancellation hook — resume the parked waiter without waiting
+    /// for the close transition. Idempotent: if ``resumeCloseWaiters``
+    /// has already fired (the close landed first), the map entry is
+    /// gone and this is a no-op.
+    private func cancelCloseWaiter(id: UUID) {
+        guard let continuation = closeWaiters.removeValue(forKey: id) else { return }
+        continuation.resume()
+    }
+
+    /// Fire every parked ``waitForClose`` continuation. Called from
+    /// the close paths (``disconnect``, ``closeWithError``,
+    /// ``shutdownForHandshakeFailure``) after the state transition.
+    private func resumeCloseWaiters() {
+        let snapshot = closeWaiters
+        closeWaiters.removeAll(keepingCapacity: false)
+        for continuation in snapshot.values {
+            continuation.resume()
+        }
+    }
 
     /// Send a request that expects exactly one response. The response
     /// is returned as a raw `DeviceEvent` so the caller can inspect the
@@ -591,6 +675,7 @@ public actor DeviceClient {
         await failAllPending(error)
         eventContinuation.finish()
         await transport.close()
+        resumeCloseWaiters()
     }
 
     // MARK: - Pending management

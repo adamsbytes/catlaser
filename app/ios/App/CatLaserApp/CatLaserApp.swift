@@ -1,4 +1,5 @@
 import CatLaserApp
+import CatLaserDesign
 import CatLaserPush
 import SwiftUI
 import UIKit
@@ -136,5 +137,19 @@ final class CatLaserAppDelegate: NSObject, UIApplicationDelegate {
         didFailToRegisterForRemoteNotificationsWithError error: Error,
     ) {
         state.pushViewModel?.handleDidFailToRegister(error: error)
+    }
+
+    /// Per-window supported-orientation bridge. UIKit consults this
+    /// on every rotation decision; the value comes from
+    /// ``OrientationLock/shared``, which the Live tab adjusts on
+    /// appear and resets on disappear. No other surface changes the
+    /// mask, so the default portrait lock applies to sign-in,
+    /// pairing, History, Schedule, Settings, and the modal flows.
+    @MainActor
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?,
+    ) -> UIInterfaceOrientationMask {
+        OrientationLock.shared.mask
     }
 }

@@ -51,6 +51,12 @@ struct PairedShell: View {
     /// (`===`) rather than value equality. Nil until the first
     /// `.connected` event lands.
     @State private var currentClient: DeviceClient?
+    /// Currently-bound event broker — the single consumer of the
+    /// current client's events stream. Rebuilt alongside the VMs on
+    /// every client swap; ``stop()``-ed when the supervisor leaves
+    /// the ``.connected`` state so its subscriber streams finish and
+    /// downstream for-await loops exit cleanly.
+    @State private var currentBroker: DeviceEventBroker?
     @State private var liveVM: LiveViewModel?
     @State private var historyVM: HistoryViewModel?
     @State private var scheduleVM: ScheduleViewModel?
@@ -113,13 +119,27 @@ struct PairedShell: View {
             if currentClient === newClient { return }
             let pairedDevice = currentPairedDevice()
             guard let pairedDevice else { return }
+            // Tear down the previous broker before swapping in a new
+            // one. Each broker is a single consumer of its client's
+            // events stream; the previous client's stream will finish
+            // on its own disconnect, but calling stop here also
+            // finishes every subscriber's fanout so old VM tasks exit
+            // without waiting on a stale stream.
+            currentBroker?.stop()
+            let broker = composition.deviceEventBroker(for: newClient)
+            broker.start()
             liveVM = composition.liveViewModel(
                 pairedDevice: pairedDevice,
                 deviceClient: newClient,
+                eventBroker: broker,
             )
-            historyVM = composition.historyViewModel(deviceClient: newClient)
+            historyVM = composition.historyViewModel(
+                deviceClient: newClient,
+                eventBroker: broker,
+            )
             scheduleVM = composition.scheduleViewModel(deviceClient: newClient)
             currentClient = newClient
+            currentBroker = broker
             sessionID = UUID()
             // Fire-and-forget: refresh the push-token registrar
             // against the new client. The registrar's actor isolation
@@ -129,6 +149,8 @@ struct PairedShell: View {
             Task { await registrar.setClient(newClient) }
         default:
             if currentClient != nil {
+                currentBroker?.stop()
+                currentBroker = nil
                 liveVM = nil
                 historyVM = nil
                 scheduleVM = nil

@@ -438,6 +438,37 @@ struct AppCompositionInvariantsTests {
 
     // MARK: - liveViewModel factory
 
+    /// The live VM factory MUST thread the supplied event broker into
+    /// the constructed VM so the live-view overlay observes device
+    /// heartbeats. A regression that dropped the broker parameter
+    /// would silently leave the overlay blank even though status
+    /// updates are reaching the device client — the symptom is hard
+    /// to detect from the UI because the video itself would still
+    /// render. This test pins the wiring.
+    @MainActor
+    @Test
+    func liveViewModelFactoryThreadsEventBroker() async throws {
+        let (composition, _, _, _) = try await Self.makeComposition()
+        let endpoint = try DeviceEndpoint(host: "100.64.1.7", port: 9820)
+        let paired = PairedDevice(
+            id: "cat-777",
+            name: "Living Room",
+            endpoint: endpoint,
+            pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: Data(repeating: 0x42, count: 32),
+        )
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        let broker = composition.deviceEventBroker(for: client)
+        let vm = composition.liveViewModel(
+            pairedDevice: paired,
+            deviceClient: client,
+            eventBroker: broker,
+        )
+        #expect(vm.isObservingStatus,
+                "liveViewModel factory must wire the supplied broker so the overlay observes status updates")
+    }
+
     /// Security-critical contract: the expected LiveKit publisher
     /// identity the VM watches for MUST be derived from the TRUSTED
     /// `PairedDevice.id` (which came from the Keychain + coordination
@@ -468,7 +499,12 @@ struct AppCompositionInvariantsTests {
         // session factory it wires in would require LiveKit on
         // Darwin — the VM is built lazily and `start()` is not
         // called here.
-        let vm = composition.liveViewModel(pairedDevice: paired, deviceClient: client)
+        let broker = composition.deviceEventBroker(for: client)
+        let vm = composition.liveViewModel(
+            pairedDevice: paired,
+            deviceClient: client,
+            eventBroker: broker,
+        )
         #expect(vm.state == .disconnected)
 
         // Expected identity is `catlaser-device-<slug>` derived from
@@ -656,7 +692,11 @@ struct AppCompositionInvariantsTests {
         let (composition, _, _, _) = try await Self.makeComposition()
         let transport = InMemoryDeviceTransport()
         let client = DeviceClient(transport: transport)
-        let vm = composition.historyViewModel(deviceClient: client)
+        let broker = composition.deviceEventBroker(for: client)
+        let vm = composition.historyViewModel(
+            deviceClient: client,
+            eventBroker: broker,
+        )
         #expect(vm.catsState == .idle)
         #expect(vm.historyState == .idle)
         #expect(vm.pendingNewCats.isEmpty)
@@ -709,7 +749,11 @@ struct AppCompositionInvariantsTests {
             }
         }
 
-        let vm = composition.historyViewModel(deviceClient: client)
+        let broker = composition.deviceEventBroker(for: client)
+        let vm = composition.historyViewModel(
+            deviceClient: client,
+            eventBroker: broker,
+        )
         await vm.start()
         let observed = CapturedRange.shared.get()
         // Composition's fixedClockTimestamp is captured by the

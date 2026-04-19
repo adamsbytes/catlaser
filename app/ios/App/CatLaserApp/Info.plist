@@ -37,9 +37,24 @@
 	<array>
 		<string>arm64</string>
 	</array>
+	<!--
+	  The app's Info.plist permits all three non-upside-down iPhone
+	  orientations so the live-view tab can rotate to landscape for
+	  full-screen video. Per-screen policy is enforced at runtime
+	  via ``OrientationLock`` (read by the ``CatLaserAppDelegate``
+	  through ``application(_:supportedInterfaceOrientationsFor:)``).
+	  Every screen except Live is portrait-locked at runtime; Live
+	  opts into ``.allButUpsideDown`` on appear and the lock reverts
+	  on disappear.
+
+	  iPad permits all four orientations as iPad layouts are expected
+	  to adapt natively.
+	-->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>

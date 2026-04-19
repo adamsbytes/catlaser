@@ -208,6 +208,24 @@ public struct AppComposition: Sendable {
     /// identity.
     public let pushRegistrar: PushTokenRegistrar
 
+    /// Construct a ``DeviceEventBroker`` attached to the supplied
+    /// ``DeviceClient``. Intended to be constructed once per supervisor
+    /// cycle (each reconnect produces a fresh client → fresh broker)
+    /// and shared across every VM that observes the device's
+    /// unsolicited event surface. The broker itself is the single
+    /// consumer of ``DeviceClient/events``; view models subscribe via
+    /// ``DeviceEventBroker/events()`` so multiple screens can observe
+    /// concurrently without racing the single-consumer contract.
+    ///
+    /// The caller is responsible for lifecycle: ``start()`` after
+    /// construction and ``stop()`` before tearing down the supervisor
+    /// cycle. The ``PairedShell`` threads these calls through its
+    /// connection-state reconcile loop.
+    @MainActor
+    public func deviceEventBroker(for deviceClient: DeviceClient) -> DeviceEventBroker {
+        DeviceEventBroker(client: deviceClient, clock: clock)
+    }
+
     /// Construct a ``LiveViewModel`` wired to the paired device. The
     /// slug is read from the trusted ``PairedDevice`` (Keychain) and
     /// captured in the session factory closure — it is NEVER derived
@@ -222,6 +240,12 @@ public struct AppComposition: Sendable {
     /// expects to see. Routing everything through this factory
     /// keeps the boundary narrow and testable.
     ///
+    /// The ``eventBroker`` parameter is threaded through so the VM
+    /// can observe device heartbeats and render the live-view session
+    /// overlay. The same broker instance MUST be passed to the
+    /// sibling ``historyViewModel`` so both VMs observe the same
+    /// device-pushed event stream through the one authorised consumer.
+    ///
     /// The factory is `@MainActor` because ``LiveViewModel`` itself
     /// is MainActor-isolated — constructing it off the main thread
     /// would require a hop anyway, so we surface that constraint at
@@ -230,6 +254,7 @@ public struct AppComposition: Sendable {
     public func liveViewModel(
         pairedDevice: PairedDevice,
         deviceClient: DeviceClient,
+        eventBroker: DeviceEventBroker,
     ) -> LiveViewModel {
         let expectedIdentity = LiveStreamIdentity.expectedPublisherIdentity(
             forDeviceSlug: pairedDevice.id,
@@ -246,25 +271,35 @@ public struct AppComposition: Sendable {
             authGate: liveAuthGate,
             liveKitAllowlist: liveKitAllowlist,
             sessionFactory: sessionFactory,
+            eventBroker: eventBroker,
+            clock: clock,
         )
     }
 
     /// Construct a ``HistoryViewModel`` wired to the supplied
     /// ``DeviceClient``. The same client instance threaded through
-    /// ``liveViewModel(pairedDevice:deviceClient:)`` MUST be passed
-    /// here so both screens share the single-consumer event stream
-    /// surface. A second client built behind the back of the
-    /// composition would race the supervisor's reconnect logic and
-    /// silently drop unsolicited ``NewCatDetected`` pushes against
-    /// whichever VM lost the race.
+    /// ``liveViewModel(pairedDevice:deviceClient:eventBroker:)`` MUST
+    /// be passed here — likewise the same ``DeviceEventBroker``
+    /// instance — so both VMs observe the device through one broker
+    /// and one client. A second broker built behind the back of the
+    /// composition would race the single-consumer contract on
+    /// ``DeviceClient/events`` and silently drop pushes against
+    /// whichever broker lost the race.
     ///
     /// ``@MainActor`` because ``HistoryViewModel`` is MainActor-
     /// isolated: constructing it off the main thread would require a
     /// hop anyway, so we surface the constraint at the factory
     /// boundary.
     @MainActor
-    public func historyViewModel(deviceClient: DeviceClient) -> HistoryViewModel {
-        HistoryViewModel(deviceClient: deviceClient, clock: clock)
+    public func historyViewModel(
+        deviceClient: DeviceClient,
+        eventBroker: DeviceEventBroker,
+    ) -> HistoryViewModel {
+        HistoryViewModel(
+            deviceClient: deviceClient,
+            eventBroker: eventBroker,
+            clock: clock,
+        )
     }
 
     /// Construct a ``ScheduleViewModel`` wired to the supplied
