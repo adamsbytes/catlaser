@@ -1,0 +1,107 @@
+// Shared build settings for the CATLASER iOS app target.
+//
+// Every Debug and Release configuration references this file via
+// baseConfigurationReference. Target-specific overrides (e.g. flipping
+// aps-environment to `production` for Release builds) live in the
+// pbxproj per-configuration block so they do not require editing
+// this file.
+//
+// Variables prefixed CATLASER_ are propagated verbatim into the
+// Info.plist via $(VAR) substitution; DeploymentConfiguration.swift
+// reads them at launch.
+//
+// PLACEHOLDER VALUES below MUST be replaced before any build that
+// is handed to a real user — see the TODO block at the bottom of
+// docs/BUILD.md for the full list and instructions. The placeholders
+// are syntactically valid so Xcode's build succeeds out-of-the-box
+// on a fresh checkout; a running app built against them will fail
+// TLS verification on the first network call, which is the desired
+// fail-closed posture.
+
+// MARK: - Product identity
+
+PRODUCT_BUNDLE_IDENTIFIER = com.example.catlaser
+PRODUCT_NAME = CATLASER
+MARKETING_VERSION = 1.0.0
+CURRENT_PROJECT_VERSION = 1
+
+// MARK: - Platform
+
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+TARGETED_DEVICE_FAMILY = 1,2
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+SDKROOT = iphoneos
+
+// MARK: - Swift
+
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+
+// MARK: - Build
+
+ENABLE_BITCODE = NO
+CLANG_ENABLE_MODULES = YES
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+
+// MARK: - Info.plist + entitlements
+
+// Paths are relative to SRCROOT, which is the directory containing
+// the .xcodeproj (app/ios/App/). Both resources live in the
+// CatLaserApp/ subgroup next to the sources.
+INFOPLIST_FILE = CatLaserApp/Info.plist
+CODE_SIGN_ENTITLEMENTS = CatLaserApp/CatLaserApp.entitlements
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon
+ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES
+
+// MARK: - Signing (left blank so Xcode uses Automatic + the current
+//                  DEVELOPMENT_TEAM on the developer machine. Override
+//                  per-local via a ~/.xcconfig or Xcode's Signing &
+//                  Capabilities pane — do NOT commit a team ID.)
+
+CODE_SIGN_STYLE = Automatic
+
+// MARK: - Deployment configuration (read by DeploymentConfiguration.swift)
+// MARK: - ↓ PLACEHOLDERS — SWAP BEFORE SHIPPING ↓
+
+// Coordination-server base URL. Must be https. All auth,
+// observability, and paired-device endpoints hang off this host.
+CATLASER_AUTH_BASE_URL = https://placeholder.invalid
+
+// Apple Sign In service identifier (configured in App Store Connect).
+CATLASER_AUTH_APPLE_SERVICE_ID = com.example.catlaser.signin
+
+// Google Sign In OIDC client ID (configured in Google Cloud Console).
+CATLASER_AUTH_GOOGLE_CLIENT_ID = 0000000000-placeholder.apps.googleusercontent.com
+
+// Universal Link host + path. Must match the apple-app-site-association
+// file served by the coordination server and the associated-domains
+// entitlement. MUST differ from the API verify path.
+CATLASER_AUTH_UNIVERSAL_LINK_HOST = placeholder.invalid
+CATLASER_AUTH_UNIVERSAL_LINK_PATH = /app/auth/magic-link
+
+// OAuth redirect hosts (comma-separated). Must each serve an AASA
+// file linking this bundle ID. Typically a single host.
+CATLASER_AUTH_OAUTH_REDIRECT_HOSTS = placeholder.invalid
+
+// LiveKit hosts the app is permitted to dial (comma-separated). A
+// StreamOffer whose host is not in this set is refused before the
+// LiveKit SDK is handed the URL. Exactly the operator's LiveKit
+// deployment — no wildcards.
+CATLASER_LIVEKIT_HOSTS = placeholder.invalid
+
+// Device-ID hashing salt for observability. Rotating this salt is a
+// backwards-incompatible change — existing installs read as fresh
+// devices afterwards. Generate a fresh 32-byte random value before
+// shipping; the placeholder is recognisable so grepping for it
+// catches an accidental release.
+CATLASER_OBSERVABILITY_DEVICE_ID_SALT = PLACEHOLDER-rotate-before-ship
+
+// SPKI-SHA256 TLS pins (comma-separated, base64-encoded). DER-encode
+// the SubjectPublicKeyInfo, SHA-256 it, base64 the 32-byte digest.
+// The placeholder below is 32 zero bytes — the app will launch
+// against it but every network call will fail pin verification,
+// which is the right posture: a placeholder pin MUST NOT accept any
+// real CA.
+CATLASER_TLS_SPKI_SHA256_PINS = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

@@ -182,6 +182,16 @@ public struct AppComposition: Sendable {
     /// reads it on every upload).
     public let consentStore: any ConsentStore
 
+    /// Bearer-token store retained here so ``applicationDidEnterBackground``
+    /// can drop the in-memory cache on scene backgrounding. The
+    /// keychain row is deliberately untouched — the next protected
+    /// call will re-read under the Secure-Enclave `.userPresence` ACL
+    /// and prompt the user for biometrics, which is the posture the
+    /// `GatedBearerTokenStore` docstring claims. Without this hook the
+    /// in-memory bearer survives every app background, undercutting
+    /// the 2-minute idle window the gate advertises.
+    private let bearerStore: any BearerTokenStore & SessionInvalidating
+
     /// Single shared push-token registrar. Wired as a
     /// ``SessionLifecycleObserver`` on the auth coordinator at
     /// composition time so sign-out unregisters the APNs token from
@@ -322,6 +332,53 @@ public struct AppComposition: Sendable {
     /// prompt.
     public func needsPrivacyConsent() async -> Bool {
         await consentStore.load().needsPrompt
+    }
+
+    // MARK: - Lifecycle hooks
+
+    /// Called by the app's scene-phase observer on every transition
+    /// into ``ScenePhase/background``.
+    ///
+    /// Two cooperating actions:
+    ///
+    /// 1. Drop the in-memory bearer cache via
+    ///    ``SessionInvalidating/invalidateSession()``. The next
+    ///    protected call will re-read the keychain, which triggers a
+    ///    biometric prompt under the `.userPresence` ACL. This is the
+    ///    property the `GatedBearerTokenStore` docstring claims —
+    ///    without this hook the in-memory cache survives every
+    ///    background, and a stolen-just-unlocked phone could swipe up
+    ///    back into the app and reach protected calls without a fresh
+    ///    prompt.
+    /// 2. Best-effort drain of the observability queue so pending
+    ///    telemetry or crash-payload tombstones ship before the OS
+    ///    suspends the app. The drain is cooperative — a concurrent
+    ///    drain no-ops — and the iOS runtime's graceful-suspension
+    ///    window caps the work; we never block the scene transition.
+    ///
+    /// Idempotent: a double-call (rapid foreground / background hop)
+    /// is safe. Both downstream actions already guard against
+    /// concurrent invocation internally.
+    public func applicationDidEnterBackground() async {
+        await bearerStore.invalidateSession()
+        await observability.drain()
+    }
+
+    /// Called by the app's scene-phase observer on every transition
+    /// into ``ScenePhase/active``, including first-foreground on cold
+    /// launch.
+    ///
+    /// Kicks an observability drain so any events queued while the
+    /// network was unreachable ship now that it is presumably back.
+    /// The ``ConnectionManager`` reacts to network-path changes on its
+    /// own, so the supervisor does not need a manual foreground kick
+    /// — its ``NetworkPathMonitor`` surfaces the `.satisfied` event
+    /// that wakes the parked backoff immediately.
+    ///
+    /// Idempotent: a second call while a previous drain is in flight
+    /// no-ops inside ``Observability/drain()``.
+    public func applicationDidBecomeActive() async {
+        await observability.drain()
     }
 
     /// Concrete session factory used by ``liveViewModel``. Lives in
@@ -544,6 +601,7 @@ public struct AppComposition: Sendable {
             pushRegistrar: pushRegistrar,
             observability: observability,
             consentStore: consentStore,
+            bearerStore: bearerStore,
             pushPrompt: pushPrompt,
             pushReadAuthorization: pushReadAuthorization,
             pushRegisterForRemote: pushRegisterForRemoteNotifications,
@@ -644,6 +702,7 @@ public struct AppComposition: Sendable {
         pushRegistrar: PushTokenRegistrar,
         observability: Observability,
         consentStore: any ConsentStore,
+        bearerStore: any BearerTokenStore & SessionInvalidating,
         pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
         pushReadAuthorization: @escaping PushViewModel.AuthorizationStatusReader,
         pushRegisterForRemote: @escaping PushViewModel.RegisterForRemoteNotifications,
@@ -663,6 +722,7 @@ public struct AppComposition: Sendable {
         self.pushRegistrar = pushRegistrar
         self.observability = observability
         self.consentStore = consentStore
+        self.bearerStore = bearerStore
         self.pushPrompt = pushPrompt
         self.pushReadAuthorization = pushReadAuthorization
         self.pushRegisterForRemote = pushRegisterForRemote

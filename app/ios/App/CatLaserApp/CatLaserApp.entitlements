@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  aps-environment controls whether APNs tokens come back signed
+	  by the development or production push service. TestFlight /
+	  App Store builds MUST use `production`; a mismatched entitlement
+	  causes APNs to silently refuse to hand out tokens. Flip via an
+	  .xcconfig override in the release build configuration before
+	  archiving.
+	-->
+	<key>aps-environment</key>
+	<string>development</string>
+
+	<!--
+	  Enables Sign in with Apple. The composition wires this provider
+	  regardless; without the entitlement, Apple's button returns a
+	  provider-unavailable error at runtime.
+	-->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
+
+	<!--
+	  Associated Domains: routes the magic-link Universal Link into
+	  the app instead of Safari. The `applinks:` prefix is mandatory.
+	  The host must serve an apple-app-site-association file that
+	  associates this bundle identifier with the universal-link path.
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:$(CATLASER_AUTH_UNIVERSAL_LINK_HOST)</string>
+	</array>
+
+	<!--
+	  Keychain access group defaults to the app-specific group
+	  (`<TeamID>.<BundleID>`). No explicit entry is needed unless a
+	  future extension (widget, Watch app) needs to share the bearer;
+	  leaving this implicit keeps the bearer scoped to this target.
+	-->
+</dict>
+</plist>

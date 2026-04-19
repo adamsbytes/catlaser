@@ -104,6 +104,17 @@ ios-test:
 
 ios-check: ios-build ios-test
 
+# Archive the shipping Xcode app target. macOS-only — the xcodeproj
+# pulls in LiveKit's WebRTC xcframework and needs xcodebuild + a
+# provisioned signing identity. Running this on Linux will fail at
+# `xcodebuild` invocation; the SPM package still builds and tests
+# via `just ios-check` on any host.
+ios-xcode-build:
+    cd app/ios/App && xcodebuild -scheme CATLASER -configuration Debug -destination 'generic/platform=iOS Simulator' build
+
+ios-xcode-archive:
+    cd app/ios/App && xcodebuild -scheme CATLASER -configuration Release -destination 'generic/platform=iOS' archive -archivePath build/CATLASER.xcarchive
+
 server-check:
     cd server && bun run lint
     cd server && bun run typecheck

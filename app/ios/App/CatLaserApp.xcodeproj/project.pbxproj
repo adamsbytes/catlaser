@@ -1,0 +1,452 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		CA7500000000000000002001 /* CatLaserApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001001 /* CatLaserApp.swift */; };
+		CA7500000000000000002002 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001002 /* AppState.swift */; };
+		CA7500000000000000002003 /* AppShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001003 /* AppShell.swift */; };
+		CA7500000000000000002004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001004 /* RootView.swift */; };
+		CA7500000000000000002005 /* PairedShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001005 /* PairedShell.swift */; };
+		CA7500000000000000002006 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001006 /* MainTabView.swift */; };
+		CA7500000000000000002007 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001007 /* SettingsView.swift */; };
+		CA7500000000000000002008 /* ConnectingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001008 /* ConnectingView.swift */; };
+		CA7500000000000000002009 /* ConnectionStatusPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7500000000000000001009 /* ConnectionStatusPill.swift */; };
+		CA750000000000000000200A /* DeploymentConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA750000000000000000100A /* DeploymentConfiguration.swift */; };
+		CA750000000000000000200B /* LaunchPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA750000000000000000100B /* LaunchPlaceholder.swift */; };
+		CA750000000000000000200C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CA750000000000000000100F /* Assets.xcassets */; };
+		CA7500000000000000004001 /* CatLaserApp in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003101 /* CatLaserApp */; };
+		CA7500000000000000004002 /* CatLaserDesign in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003102 /* CatLaserDesign */; };
+		CA7500000000000000004003 /* CatLaserAuth in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003103 /* CatLaserAuth */; };
+		CA7500000000000000004004 /* CatLaserPairing in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003104 /* CatLaserPairing */; };
+		CA7500000000000000004005 /* CatLaserDevice in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003105 /* CatLaserDevice */; };
+		CA7500000000000000004006 /* CatLaserHistory in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003106 /* CatLaserHistory */; };
+		CA7500000000000000004007 /* CatLaserSchedule in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003107 /* CatLaserSchedule */; };
+		CA7500000000000000004008 /* CatLaserLive in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003108 /* CatLaserLive */; };
+		CA7500000000000000004009 /* CatLaserPush in Frameworks */ = {isa = PBXBuildFile; productRef = CA7500000000000000003109 /* CatLaserPush */; };
+		CA750000000000000000400A /* CatLaserObservability in Frameworks */ = {isa = PBXBuildFile; productRef = CA750000000000000000310A /* CatLaserObservability */; };
+		CA750000000000000000400B /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = CA750000000000000000310B /* LiveKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		CA7500000000000000000100 /* CATLASER.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CATLASER.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CA7500000000000000001001 /* CatLaserApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatLaserApp.swift; sourceTree = "<group>"; };
+		CA7500000000000000001002 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		CA7500000000000000001003 /* AppShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShell.swift; sourceTree = "<group>"; };
+		CA7500000000000000001004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		CA7500000000000000001005 /* PairedShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedShell.swift; sourceTree = "<group>"; };
+		CA7500000000000000001006 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		CA7500000000000000001007 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		CA7500000000000000001008 /* ConnectingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectingView.swift; sourceTree = "<group>"; };
+		CA7500000000000000001009 /* ConnectionStatusPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusPill.swift; sourceTree = "<group>"; };
+		CA750000000000000000100A /* DeploymentConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeploymentConfiguration.swift; sourceTree = "<group>"; };
+		CA750000000000000000100B /* LaunchPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchPlaceholder.swift; sourceTree = "<group>"; };
+		CA750000000000000000100C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		CA750000000000000000100D /* CatLaserApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CatLaserApp.entitlements; sourceTree = "<group>"; };
+		CA750000000000000000100E /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
+		CA750000000000000000100F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		CA7500000000000000000022 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CA7500000000000000004001 /* CatLaserApp in Frameworks */,
+				CA7500000000000000004002 /* CatLaserDesign in Frameworks */,
+				CA7500000000000000004003 /* CatLaserAuth in Frameworks */,
+				CA7500000000000000004004 /* CatLaserPairing in Frameworks */,
+				CA7500000000000000004005 /* CatLaserDevice in Frameworks */,
+				CA7500000000000000004006 /* CatLaserHistory in Frameworks */,
+				CA7500000000000000004007 /* CatLaserSchedule in Frameworks */,
+				CA7500000000000000004008 /* CatLaserLive in Frameworks */,
+				CA7500000000000000004009 /* CatLaserPush in Frameworks */,
+				CA750000000000000000400A /* CatLaserObservability in Frameworks */,
+				CA750000000000000000400B /* LiveKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		CA7500000000000000000002 /* App (root group) */ = {
+			isa = PBXGroup;
+			children = (
+				CA7500000000000000000004 /* CatLaserApp */,
+				CA7500000000000000000005 /* Products */,
+				CA7500000000000000000006 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		CA7500000000000000000004 /* CatLaserApp */ = {
+			isa = PBXGroup;
+			children = (
+				CA7500000000000000001001 /* CatLaserApp.swift */,
+				CA7500000000000000001002 /* AppState.swift */,
+				CA7500000000000000001003 /* AppShell.swift */,
+				CA7500000000000000001004 /* RootView.swift */,
+				CA7500000000000000001005 /* PairedShell.swift */,
+				CA7500000000000000001006 /* MainTabView.swift */,
+				CA7500000000000000001007 /* SettingsView.swift */,
+				CA7500000000000000001008 /* ConnectingView.swift */,
+				CA7500000000000000001009 /* ConnectionStatusPill.swift */,
+				CA750000000000000000100A /* DeploymentConfiguration.swift */,
+				CA750000000000000000100B /* LaunchPlaceholder.swift */,
+				CA750000000000000000100C /* Info.plist */,
+				CA750000000000000000100D /* CatLaserApp.entitlements */,
+				CA750000000000000000100E /* Config.xcconfig */,
+				CA750000000000000000100F /* Assets.xcassets */,
+			);
+			path = CatLaserApp;
+			sourceTree = "<group>";
+		};
+		CA7500000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CA7500000000000000000100 /* CATLASER.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CA7500000000000000000006 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CA7500000000000000000020 /* CATLASER */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CA750000000000000000000B /* Build configuration list for PBXNativeTarget "CATLASER" */;
+			buildPhases = (
+				CA7500000000000000000021 /* Sources */,
+				CA7500000000000000000022 /* Frameworks */,
+				CA7500000000000000000023 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CATLASER;
+			packageProductDependencies = (
+				CA7500000000000000003101 /* CatLaserApp */,
+				CA7500000000000000003102 /* CatLaserDesign */,
+				CA7500000000000000003103 /* CatLaserAuth */,
+				CA7500000000000000003104 /* CatLaserPairing */,
+				CA7500000000000000003105 /* CatLaserDevice */,
+				CA7500000000000000003106 /* CatLaserHistory */,
+				CA7500000000000000003107 /* CatLaserSchedule */,
+				CA7500000000000000003108 /* CatLaserLive */,
+				CA7500000000000000003109 /* CatLaserPush */,
+				CA750000000000000000310A /* CatLaserObservability */,
+				CA750000000000000000310B /* LiveKit */,
+			);
+			productName = CATLASER;
+			productReference = CA7500000000000000000100 /* CATLASER.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CA7500000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastSwiftUpdateCheck = 1520;
+				LastUpgradeCheck = 1520;
+				TargetAttributes = {
+					CA7500000000000000000020 = {
+						CreatedOnToolsVersion = 15.2;
+					};
+				};
+			};
+			buildConfigurationList = CA750000000000000000000A /* Build configuration list for PBXProject "CATLASER" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = CA7500000000000000000002;
+			packageReferences = (
+				CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */,
+				CA7500000000000000003002 /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
+			);
+			productRefGroup = CA7500000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CA7500000000000000000020 /* CATLASER */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CA7500000000000000000023 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CA750000000000000000200C /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		CA7500000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CA7500000000000000002001 /* CatLaserApp.swift in Sources */,
+				CA7500000000000000002002 /* AppState.swift in Sources */,
+				CA7500000000000000002003 /* AppShell.swift in Sources */,
+				CA7500000000000000002004 /* RootView.swift in Sources */,
+				CA7500000000000000002005 /* PairedShell.swift in Sources */,
+				CA7500000000000000002006 /* MainTabView.swift in Sources */,
+				CA7500000000000000002007 /* SettingsView.swift in Sources */,
+				CA7500000000000000002008 /* ConnectingView.swift in Sources */,
+				CA7500000000000000002009 /* ConnectionStatusPill.swift in Sources */,
+				CA750000000000000000200A /* DeploymentConfiguration.swift in Sources */,
+				CA750000000000000000200B /* LaunchPlaceholder.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		CA7500000000000000000030 /* Debug (project) */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		CA7500000000000000000031 /* Release (project) */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		CA7500000000000000000040 /* Debug (target) */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = CA750000000000000000100E /* Config.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		CA7500000000000000000041 /* Release (target) */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = CA750000000000000000100E /* Config.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CA750000000000000000000A /* Build configuration list for PBXProject "CATLASER" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CA7500000000000000000030 /* Debug */,
+				CA7500000000000000000031 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CA750000000000000000000B /* Build configuration list for PBXNativeTarget "CATLASER" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CA7500000000000000000040 /* Debug */,
+				CA7500000000000000000041 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "..";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CA7500000000000000003002 /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.13.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CA7500000000000000003101 /* CatLaserApp */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserApp;
+		};
+		CA7500000000000000003102 /* CatLaserDesign */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserDesign;
+		};
+		CA7500000000000000003103 /* CatLaserAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserAuth;
+		};
+		CA7500000000000000003104 /* CatLaserPairing */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserPairing;
+		};
+		CA7500000000000000003105 /* CatLaserDevice */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserDevice;
+		};
+		CA7500000000000000003106 /* CatLaserHistory */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserHistory;
+		};
+		CA7500000000000000003107 /* CatLaserSchedule */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserSchedule;
+		};
+		CA7500000000000000003108 /* CatLaserLive */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserLive;
+		};
+		CA7500000000000000003109 /* CatLaserPush */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserPush;
+		};
+		CA750000000000000000310A /* CatLaserObservability */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CatLaserObservability;
+		};
+		CA750000000000000000310B /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CA7500000000000000003002 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = CA7500000000000000000001 /* Project object */;
+}

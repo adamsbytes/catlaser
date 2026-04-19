@@ -75,7 +75,7 @@
   - [X] Device pairing endpoint/flow
   - [ ] Cloudflare Tunnel deployment (cloudflared on VM, no inbound ports) + client pins 3–4 public roots CF chains through
 
-[ ] App — iOS (SwiftUI, primary)
+[X] App — iOS (SwiftUI, primary)
   - [X] Proto codegen (swift-protobuf from app.proto)
   - [X] Sign in with Apple + Google (AuthenticationServices + GoogleSignIn SDK, ID token exchanged for better-auth bearer)
   - [X] Sign in with email magic link (Universal Links target, SE-signed attestation bound to each request and verify call)
@@ -86,6 +86,7 @@
   - [X] History + cat profiles (stats, naming, management)
   - [X] Schedule setup (auto-play times, quiet hours)
   - [X] Push notifications (APNs: play summaries, session alerts, hopper empty)
+  - [X] Xcode app target (com.example.catlaser, @main entry, root navigation, scenePhase lifecycle, LiveKit client-sdk-swift linked)
 
 [ ] App — Android (Jetpack Compose, port)
   - [ ] Proto codegen (protobuf-kotlin from app.proto)
@@ -94,3 +95,27 @@
   - [ ] Signed HTTP client wrapper (Keystore-signs every authenticated request with api: binding, attaches x-device-attestation alongside bearer)
   - [ ] Port all screens from iOS (same flows, Compose equivalents)
   - [ ] Push notifications (FCM)
+
+## iOS — values to swap before shipping
+
+The Xcode target at `app/ios/App/CatLaserApp.xcodeproj` builds and launches out-of-the-box against placeholder values in `app/ios/App/CatLaserApp/Config.xcconfig`. Every placeholder is syntactically valid, so Xcode's build succeeds on a fresh checkout; a running app built against them will fail TLS pin verification on the first network call — which is the desired fail-closed posture, not a bug.
+
+Before any build handed to a real user (TestFlight, App Store, side-loaded beta), swap each of the following in `Config.xcconfig`:
+
+- `CATLASER_AUTH_BASE_URL` — production coordination-server URL (must be `https://`). Placeholder: `https://placeholder.invalid`.
+- `CATLASER_AUTH_APPLE_SERVICE_ID` — Apple Sign In service identifier registered in App Store Connect against this bundle ID.
+- `CATLASER_AUTH_GOOGLE_CLIENT_ID` — OIDC client ID from Google Cloud Console (iOS client type).
+- `CATLASER_AUTH_UNIVERSAL_LINK_HOST` — host the magic-link email points at. Must serve an `apple-app-site-association` file that associates this bundle ID with the path below, and must differ from the API verify path.
+- `CATLASER_AUTH_UNIVERSAL_LINK_PATH` — path on the universal-link host.
+- `CATLASER_AUTH_OAUTH_REDIRECT_HOSTS` — comma-separated hosts trusted to receive the Google OIDC redirect.
+- `CATLASER_LIVEKIT_HOSTS` — comma-separated hostnames of the operator-run LiveKit deployment. A `StreamOffer` whose URL host is not in this set is refused before the LiveKit SDK ever sees it.
+- `CATLASER_OBSERVABILITY_DEVICE_ID_SALT` — fresh 32-byte random string. Rotating it is a backwards-incompatible change (existing installs read as new devices afterwards).
+- `CATLASER_TLS_SPKI_SHA256_PINS` — comma-separated, base64-encoded SHA-256 digests of the `SubjectPublicKeyInfo` of each pinned certificate. Compute with: `openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64`. Pin intermediate CA(s) with one or more offline backup pins per RFC 7469.
+
+Entitlements also need attention on the first real build:
+
+- `CatLaserApp.entitlements` has `aps-environment = development`. Override to `production` in the Release configuration before archiving for TestFlight or the App Store (a mismatched entitlement causes APNs to silently refuse to hand out tokens).
+- `CODE_SIGN_STYLE = Automatic` with no `DEVELOPMENT_TEAM` set — add the team ID to a local `~/.xcconfig` include or via Xcode's Signing & Capabilities pane. Do not commit a team ID.
+
+App-icon artwork is a placeholder empty `AppIcon.appiconset`. Drop a 1024×1024 PNG into that directory before archiving — Apple rejects submissions without an app icon.
+

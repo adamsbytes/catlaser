@@ -983,6 +983,67 @@ struct AppCompositionInvariantsTests {
         #expect(vm.state == .awaitingAPNsToken)
         vm.stop()
     }
+
+    // MARK: - Scene-phase lifecycle hooks
+
+    /// Backgrounding MUST drop the in-memory bearer cache. Without
+    /// this, a stolen just-unlocked phone can swipe back into the app
+    /// and reach protected calls without a fresh biometric prompt —
+    /// the hard-reauth window the ``GatedBearerTokenStore`` docstring
+    /// advertises would be fiction.
+    @Test
+    func applicationDidEnterBackgroundInvalidatesBearerCache() async throws {
+        let (composition, bearerStore, _, _) = try await Self.makeComposition()
+        #expect(await bearerStore.invalidateCount == 0)
+
+        await composition.applicationDidEnterBackground()
+
+        #expect(await bearerStore.invalidateCount == 1,
+                "backgrounding must invoke invalidateSession() on the bearer store")
+    }
+
+    /// Backgrounding MUST NOT delete the bearer keychain row. The
+    /// keychain wipe belongs to sign-out; backgrounding only drops
+    /// the in-memory cache so the next protected call re-reads under
+    /// `.userPresence` and prompts. A regression that conflated the
+    /// two would log users out on every app-switch.
+    @Test
+    func applicationDidEnterBackgroundDoesNotDeleteBearerKeychain() async throws {
+        let (composition, bearerStore, _, _) = try await Self.makeComposition()
+        await composition.applicationDidEnterBackground()
+        #expect(await bearerStore.deleteCount == 0,
+                "background must not wipe the keychain — that is sign-out's job")
+    }
+
+    /// Repeated background transitions (rapid foreground/background
+    /// hop) must remain safe. Each call increments
+    /// ``invalidateCount`` independently; the observability drain is
+    /// cooperative and a concurrent call is expected to no-op inside
+    /// the actor — the test tolerates either interleaving, it only
+    /// asserts no crash and the invalidate counter reaches N.
+    @Test
+    func applicationDidEnterBackgroundIsIdempotent() async throws {
+        let (composition, bearerStore, _, _) = try await Self.makeComposition()
+        for _ in 0 ..< 5 {
+            await composition.applicationDidEnterBackground()
+        }
+        #expect(await bearerStore.invalidateCount == 5)
+        #expect(await bearerStore.deleteCount == 0)
+    }
+
+    /// Foregrounding kicks an observability drain. We cannot drive a
+    /// full telemetry round-trip from this suite without wiring a
+    /// dedicated transport, but the public contract is that the
+    /// method returns cleanly without throwing. A regression that
+    /// made the method throw (or that hit a deadlock inside the
+    /// actor on a parallel second call) would trip this test.
+    @Test
+    func applicationDidBecomeActiveReturnsCleanly() async throws {
+        let (composition, _, _, _) = try await Self.makeComposition()
+        await composition.applicationDidBecomeActive()
+        // And again, to prove the drain's cooperative no-op path.
+        await composition.applicationDidBecomeActive()
+    }
 }
 
 /// Process-wide capture for the schedule-routing invariant test.

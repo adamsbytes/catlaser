@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>AccentColor</string>
+	</dict>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+
+	<key>NSCameraUsageDescription</key>
+	<string>CATLASER uses your camera only to read the QR code on your device during pairing. No photos or video are recorded.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>CATLASER uses Face ID to confirm it's you before unlocking your session or showing the live video feed from your device.</string>
+
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).pairing-refused</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>catlaser</string>
+			</array>
+		</dict>
+	</array>
+
+	<key>CATLASER_AUTH_BASE_URL</key>
+	<string>$(CATLASER_AUTH_BASE_URL)</string>
+	<key>CATLASER_AUTH_APPLE_SERVICE_ID</key>
+	<string>$(CATLASER_AUTH_APPLE_SERVICE_ID)</string>
+	<key>CATLASER_AUTH_GOOGLE_CLIENT_ID</key>
+	<string>$(CATLASER_AUTH_GOOGLE_CLIENT_ID)</string>
+	<key>CATLASER_AUTH_UNIVERSAL_LINK_HOST</key>
+	<string>$(CATLASER_AUTH_UNIVERSAL_LINK_HOST)</string>
+	<key>CATLASER_AUTH_UNIVERSAL_LINK_PATH</key>
+	<string>$(CATLASER_AUTH_UNIVERSAL_LINK_PATH)</string>
+	<key>CATLASER_AUTH_OAUTH_REDIRECT_HOSTS</key>
+	<string>$(CATLASER_AUTH_OAUTH_REDIRECT_HOSTS)</string>
+	<key>CATLASER_LIVEKIT_HOSTS</key>
+	<string>$(CATLASER_LIVEKIT_HOSTS)</string>
+	<key>CATLASER_OBSERVABILITY_DEVICE_ID_SALT</key>
+	<string>$(CATLASER_OBSERVABILITY_DEVICE_ID_SALT)</string>
+	<key>CATLASER_TLS_SPKI_SHA256_PINS</key>
+	<string>$(CATLASER_TLS_SPKI_SHA256_PINS)</string>
+</dict>
+</plist>
