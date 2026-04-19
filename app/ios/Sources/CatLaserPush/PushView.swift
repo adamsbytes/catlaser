@@ -37,7 +37,21 @@ public struct PushView: View {
             value: stateTag,
         )
         .onChange(of: stateTag) { _, newValue in
-            if newValue == "failed" { errorFocus = true }
+            switch newValue {
+            case "failed":
+                errorFocus = true
+                Haptics.error.play()
+            case "authorizationDenied":
+                // Not an error — the user's explicit choice. But it
+                // is the terminal state of their tap on "Turn on",
+                // so a warning haptic underlines the denial without
+                // treating it as failure.
+                Haptics.warning.play()
+            case "registered":
+                Haptics.success.play()
+            default:
+                break
+            }
         }
         .task {
             await viewModel.start()
@@ -94,6 +108,7 @@ public struct PushView: View {
                 .multilineTextAlignment(.center)
             Spacer()
             Button(PushStrings.primerAllowButton) {
+                Haptics.commit.play()
                 Task { await viewModel.requestAuthorization() }
             }
             .buttonStyle(.plain)
@@ -190,6 +205,7 @@ public struct PushView: View {
                 .accessibilityFocused($errorFocus)
             Spacer()
             Button(PushStrings.retryButton) {
+                Haptics.commit.play()
                 Task { await viewModel.retry() }
             }
             .buttonStyle(.plain)

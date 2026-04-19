@@ -35,6 +35,9 @@ public struct PairingView: View {
         .onChange(of: phaseTag) { _, newValue in
             if newValue.hasPrefix("failed") {
                 errorFocus = true
+                Haptics.error.play()
+            } else if newValue == "paired" {
+                Haptics.success.play()
             }
         }
     }
@@ -93,6 +96,7 @@ public struct PairingView: View {
             #if canImport(AVFoundation) && canImport(UIKit) && os(iOS)
             QRScannerView(
                 onDecode: { code in
+                    Haptics.light.play()
                     Task { await viewModel.submitScannedCode(code) }
                 },
                 onRejected: { _ in
@@ -178,6 +182,7 @@ public struct PairingView: View {
                 .accessibilityLabel(Text(PairingStrings.scanInsteadButton))
 
                 Button(PairingStrings.manualSubmitButton) {
+                    Haptics.commit.play()
                     Task { await viewModel.submitManualCode() }
                 }
                 .buttonStyle(.plain)
@@ -311,6 +316,7 @@ public struct PairingView: View {
                 .accessibilityID(.pairingConfirmCancel)
                 .accessibilityLabel(Text(PairingStrings.confirmCancelButton))
                 Button {
+                    Haptics.commit.play()
                     Task { await viewModel.confirmPairing() }
                 } label: {
                     Text(PairingStrings.confirmButton)
@@ -348,6 +354,7 @@ public struct PairingView: View {
                 .foregroundStyle(SemanticColor.textTertiary)
                 .accessibilityAddTraits(.updatesFrequently)
             Button(PairingStrings.unpairButton) {
+                Haptics.warning.play()
                 Task { await viewModel.unpair() }
             }
             .buttonStyle(.plain)

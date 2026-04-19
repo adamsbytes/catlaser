@@ -49,6 +49,7 @@ struct SettingsView: View {
                 titleVisibility: .visible,
             ) {
                 Button("Unpair", role: .destructive) {
+                    Haptics.warning.play()
                     Task { await pairingViewModel.unpair() }
                 }
                 Button("Cancel", role: .cancel) {}
@@ -61,6 +62,7 @@ struct SettingsView: View {
                 titleVisibility: .visible,
             ) {
                 Button("Sign out", role: .destructive) {
+                    Haptics.warning.play()
                     Task { await performSignOut() }
                 }
                 Button("Cancel", role: .cancel) {}

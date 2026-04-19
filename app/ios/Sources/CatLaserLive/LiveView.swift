@@ -36,7 +36,18 @@ public struct LiveView: View {
             value: stateTag,
         )
         .onChange(of: stateTag) { _, newValue in
-            if newValue == "failed" { errorFocus = true }
+            switch newValue {
+            case "failed":
+                errorFocus = true
+                Haptics.error.play()
+            case "streaming":
+                // Success haptic the moment the first track lands —
+                // the stream spinner-to-video transition is the
+                // payoff the user was waiting for.
+                Haptics.success.play()
+            default:
+                break
+            }
         }
         .task {
             // If the view goes away mid-connect (user navigates out),
@@ -112,6 +123,7 @@ public struct LiveView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Button {
+                Haptics.commit.play()
                 Task { await viewModel.start() }
             } label: {
                 Text(LiveViewStrings.watchLiveButton)
@@ -165,6 +177,7 @@ public struct LiveView: View {
             HStack {
                 Spacer()
                 Button {
+                    Haptics.light.play()
                     Task { await viewModel.stop() }
                 } label: {
                     HStack(spacing: 8) {
@@ -231,6 +244,7 @@ public struct LiveView: View {
                 .accessibilityID(.liveDismissButton)
                 .accessibilityLabel(Text(LiveViewStrings.dismissButton))
                 Button {
+                    Haptics.commit.play()
                     Task {
                         viewModel.dismissError()
                         await viewModel.start()

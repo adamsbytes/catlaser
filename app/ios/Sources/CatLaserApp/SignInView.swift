@@ -39,7 +39,10 @@ public struct SignInView: View {
                 EmailSentView(
                     address: address,
                     isResending: isResendingMagicLink,
-                    onResend: { Task { await viewModel.resendMagicLink() } },
+                    onResend: {
+                        Haptics.light.play()
+                        Task { await viewModel.resendMagicLink() }
+                    },
                     onUseDifferentEmail: { viewModel.useDifferentEmail() },
                 )
                 .transition(.opacity)
@@ -63,6 +66,7 @@ public struct SignInView: View {
         .onChange(of: viewModel.currentErrorMessage) { _, newValue in
             if newValue != nil {
                 errorFocus = true
+                Haptics.error.play()
             }
         }
     }
@@ -93,13 +97,19 @@ public struct SignInView: View {
                 AppleSignInButton(
                     isActive: viewModel.phase == .authenticating(.apple),
                     isEnabled: !viewModel.phase.isBusy,
-                    action: { Task { await viewModel.signInWithApple(context: currentPresentationContext()) } },
+                    action: {
+                        Haptics.commit.play()
+                        Task { await viewModel.signInWithApple(context: currentPresentationContext()) }
+                    },
                 )
 
                 GoogleSignInButton(
                     isActive: viewModel.phase == .authenticating(.google),
                     isEnabled: !viewModel.phase.isBusy,
-                    action: { Task { await viewModel.signInWithGoogle(context: currentPresentationContext()) } },
+                    action: {
+                        Haptics.commit.play()
+                        Task { await viewModel.signInWithGoogle(context: currentPresentationContext()) }
+                    },
                 )
 
                 DividerLabel(text: SignInStrings.dividerLabel)
@@ -326,6 +336,7 @@ private struct EmailEntrySheet: View {
                 }
 
                 Button {
+                    Haptics.commit.play()
                     Task { await viewModel.requestMagicLink() }
                 } label: {
                     ZStack {

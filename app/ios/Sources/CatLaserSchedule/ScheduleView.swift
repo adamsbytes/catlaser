@@ -37,7 +37,19 @@ public struct ScheduleView: View {
             value: viewModel.lastActionError,
         )
         .onChange(of: viewModel.lastActionError) { _, newValue in
-            if newValue != nil { errorFocus = true }
+            if newValue != nil {
+                errorFocus = true
+                Haptics.error.play()
+            }
+        }
+        .onChange(of: isSavingProjection) { oldValue, newValue in
+            // isSaving true → false without a fresh error means the
+            // SetScheduleRequest landed. Pair the commit haptic the
+            // save tap already fired with a success haptic so the
+            // user feels the server ack, not just their own tap.
+            if oldValue == true, newValue == false, viewModel.lastActionError == nil {
+                Haptics.success.play()
+            }
         }
         .task {
             await viewModel.start()
@@ -56,6 +68,15 @@ public struct ScheduleView: View {
                 onCancel: { editingEntryID = nil },
             )
         }
+    }
+
+    /// Projection of the `isSaving` flag so ``onChange`` has a simple
+    /// Equatable to watch. Reading the enum directly would require
+    /// the whole ``ScheduleViewState`` to be Equatable; the projection
+    /// keeps the observer honest about what it cares about.
+    private var isSavingProjection: Bool {
+        if case let .loaded(_, _, isSaving) = viewModel.state { return isSaving }
+        return false
     }
 
     // MARK: - Root content
@@ -101,6 +122,7 @@ public struct ScheduleView: View {
     ) -> some View {
         HStack(spacing: 12) {
             Button {
+                Haptics.warning.play()
                 viewModel.discardChanges()
             } label: {
                 Text(ScheduleStrings.discardButton)
@@ -127,6 +149,7 @@ public struct ScheduleView: View {
             .foregroundStyle(SemanticColor.textPrimary)
             .accessibilityID(.scheduleRefreshButton)
             Button {
+                Haptics.commit.play()
                 Task { await viewModel.save() }
             } label: {
                 if isSaving {
@@ -452,7 +475,10 @@ private struct ScheduleEntrySheet: View {
                     }
                 }
                 Section {
-                    Button(role: .destructive, action: onDelete) {
+                    Button(role: .destructive) {
+                        Haptics.warning.play()
+                        onDelete()
+                    } label: {
                         Text(ScheduleStrings.entrySheetDeleteButton)
                     }
                     .accessibilityID(.scheduleEntrySheetDelete)

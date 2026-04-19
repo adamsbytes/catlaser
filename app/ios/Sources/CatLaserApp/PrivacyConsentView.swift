@@ -117,6 +117,7 @@ public struct PrivacyConsentView: View {
 
     private var continueButton: some View {
         Button {
+            Haptics.commit.play()
             Task { await viewModel.commit() }
         } label: {
             ZStack {

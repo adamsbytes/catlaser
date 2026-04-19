@@ -60,7 +60,10 @@ public struct HistoryView: View {
             value: viewModel.lastActionError,
         )
         .onChange(of: viewModel.lastActionError) { _, newValue in
-            if newValue != nil { errorFocus = true }
+            if newValue != nil {
+                errorFocus = true
+                Haptics.error.play()
+            }
         }
         .sheet(item: $editingProfile) { profile in
             EditCatSheet(
@@ -87,6 +90,7 @@ public struct HistoryView: View {
             presenting: pendingDeletion,
         ) { profile in
             Button(HistoryStrings.catRowDeleteConfirmAction, role: .destructive) {
+                Haptics.warning.play()
                 Task {
                     let target = profile
                     pendingDeletion = nil
@@ -523,6 +527,7 @@ private struct EditCatSheet: View {
 
     private var saveButton: some View {
         Button(HistoryStrings.editSaveButton) {
+            Haptics.commit.play()
             Task { await submit() }
         }
         .disabled(isSubmitting || !canSubmit)
@@ -626,6 +631,7 @@ private struct NameNewCatSheet: View {
 
     private var saveButton: some View {
         Button(HistoryStrings.namingSaveButton) {
+            Haptics.commit.play()
             Task { await submit() }
         }
         .disabled(isSubmitting || !canSubmit)
