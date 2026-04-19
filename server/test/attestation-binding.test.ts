@@ -64,6 +64,35 @@ describe('attestation binding: tag routing', () => {
     expect(binding.timestamp).toBe(1_734_489_600n);
   });
 
+  test('del: decodes to a deleteAccount binding with a positive Int64 timestamp', () => {
+    const binding = decodeAttestationBinding('del:1734489600');
+    expect(binding.tag).toBe('deleteAccount');
+    if (binding.tag !== 'deleteAccount') {
+      throw new Error('narrowing guard');
+    }
+    expect(binding.timestamp).toBe(1_734_489_600n);
+  });
+
+  test('del: rejects an empty timestamp payload', () => {
+    const err = captureError(() => decodeAttestationBinding('del:'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('del: rejects a non-decimal timestamp payload', () => {
+    const err = captureError(() => decodeAttestationBinding('del:notanumber'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('del: rejects a zero timestamp', () => {
+    const err = captureError(() => decodeAttestationBinding('del:0'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
+  test('del: rejects a negative timestamp', () => {
+    const err = captureError(() => decodeAttestationBinding('del:-5'));
+    expect(err.code).toBe('ATTESTATION_BND_BAD_TIMESTAMP');
+  });
+
   test('Int64 max (19 digits) is accepted', () => {
     const maxInt64 = '9223372036854775807';
     const binding = decodeAttestationBinding(`req:${maxInt64}`);

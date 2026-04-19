@@ -300,6 +300,7 @@ const bindingTimestamp = (parsed: ParsedAttestation): bigint | undefined => {
     case 'social':
     case 'signOut':
     case 'api':
+    case 'deleteAccount':
       return binding.timestamp;
     case 'verify':
       return undefined;

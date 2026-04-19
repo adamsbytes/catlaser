@@ -213,6 +213,8 @@ const bindingWireValue = (binding: AttestationBinding): string => {
       return `out:${binding.timestamp.toString()}`;
     case 'api':
       return `api:${binding.timestamp.toString()}`;
+    case 'deleteAccount':
+      return `del:${binding.timestamp.toString()}`;
     default: {
       // switch-exhaustiveness-check ensures every union arm is handled; an
       // unreachable default covers future-arm typos inside the factory.

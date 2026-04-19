@@ -164,6 +164,26 @@ const assertApiBinding = (parsed: ParsedAttestation): bigint => {
   return parsed.binding.timestamp;
 };
 
+/**
+ * Dedicated binding-tag check for the account-deletion route. A
+ * captured `api:` attestation for a read-only call (e.g. GET /me)
+ * must NOT satisfy the delete-account path within its 60s skew
+ * window — the tag is the only structural separator between "I
+ * authenticated an API call" and "I authenticated the permanent
+ * destruction of this account." Every other difference (path, body,
+ * verb) would be replayable. `del:` is the only accepted binding
+ * here; everything else 401s with `ATTESTATION_BINDING_MISMATCH`.
+ */
+const assertDeleteAccountBinding = (parsed: ParsedAttestation): bigint => {
+  if (parsed.binding.tag !== 'deleteAccount') {
+    throw new ProtectedRouteError(
+      'ATTESTATION_BINDING_MISMATCH',
+      `expected 'deleteAccount' binding on delete-account route, got '${parsed.binding.tag}'`,
+    );
+  }
+  return parsed.binding.timestamp;
+};
+
 const decodeStandardBase64 = (input: string): Uint8Array =>
   Uint8Array.from(Buffer.from(input, 'base64'));
 
@@ -254,6 +274,34 @@ export const requireAttestedSession = async (
 };
 
 /**
+ * Variant of ``requireAttestedSession`` that requires a `del:`
+ * binding tag. Used exclusively by the account-deletion route.
+ *
+ * Shares every other hop with ``requireAttestedSession`` — bearer
+ * resolution, header parse, stored-SPKI signature verify, ±60s skew
+ * enforcement — so the crypto floor is identical. The only
+ * difference is the accepted binding tag: a captured `api:`
+ * signature from any other authenticated call is refused here with
+ * ``ATTESTATION_BINDING_MISMATCH``, closing the replay window that
+ * a parameterless "any authenticated call" gate would otherwise
+ * leave open against the most destructive operation the user can
+ * perform through the app.
+ */
+export const requireDeleteAccountAttestedSession = async (
+  request: Request,
+  options: RequireAttestedSessionOptions,
+): Promise<AuthenticatedSession> => {
+  const nowSeconds = options.nowSeconds ?? defaultNowSeconds;
+  const session = await resolveSessionOrThrow(options.auth, request);
+  const parsed = parseAttestationHeaderOrThrow(request);
+  const timestamp = assertDeleteAccountBinding(parsed);
+  const stored = await loadStoredAttestationOrThrow(session.session.id);
+  verifyStoredSignatureOrThrow(parsed, stored.publicKeySpkiB64);
+  enforceSkewOrThrow(timestamp, nowSeconds);
+  return session;
+};
+
+/**
  * Build a Response for a gate failure. The body mirrors `errorResponse`
  * so every protected-route rejection looks identical to the rest of the
  * server's error surface, and the machine-readable `code` matches the
@@ -288,6 +336,29 @@ export const withAttestedSession = (
     let session: AuthenticatedSession;
     try {
       session = await requireAttestedSession(request, options);
+    } catch (error) {
+      if (error instanceof ProtectedRouteError) {
+        return protectedRouteErrorResponse(error);
+      }
+      throw error;
+    }
+    return await handler(request, session);
+  };
+};
+
+/**
+ * Higher-order wrapper that composes the delete-account gate onto a
+ * route handler. Mirrors ``withAttestedSession`` except it requires
+ * a `del:` binding tag.
+ */
+export const withDeleteAccountAttestedSession = (
+  handler: AttestedRouteHandler,
+  options: RequireAttestedSessionOptions,
+): ((request: Request) => Promise<Response>) => {
+  return async (request: Request): Promise<Response> => {
+    let session: AuthenticatedSession;
+    try {
+      session = await requireDeleteAccountAttestedSession(request, options);
     } catch (error) {
       if (error instanceof ProtectedRouteError) {
         return protectedRouteErrorResponse(error);

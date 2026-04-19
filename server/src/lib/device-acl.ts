@@ -156,6 +156,47 @@ export const publishPairGrant = async (
 };
 
 /**
+ * Revoke every active ACL grant owned by a user. Used by the
+ * account-deletion path: the user's SE public key must lose access
+ * to every device it was ever granted before the `user` row is
+ * dropped, and each affected device's revision counter must tick so
+ * the next ACL poll propagates the revocation.
+ *
+ * MUST be called inside the same transaction as the ``user`` row
+ * delete so a failure on either side rolls back cleanly. The `tx`
+ * parameter is the Drizzle transaction handle.
+ *
+ * Returns the set of affected device slugs — mostly useful for
+ * logging / auditing; callers that do not care can ignore the
+ * return value.
+ */
+export const revokeAllGrantsForUser = async (
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  input: { readonly userId: string; readonly now: Date },
+): Promise<ReadonlyArray<string>> => {
+  // Revoke every active grant for this user in one statement and
+  // return the affected slugs so we can bump revisions per slug
+  // below. ``returning`` is cheaper than a separate SELECT and is
+  // atomic with the UPDATE.
+  const revoked = await tx
+    .update(deviceAccessGrant)
+    .set({ revokedAt: input.now })
+    .where(and(eq(deviceAccessGrant.userId, input.userId), isNull(deviceAccessGrant.revokedAt)))
+    .returning({ deviceSlug: deviceAccessGrant.deviceSlug });
+
+  // Dedupe the slug list — a user who was re-granted after a prior
+  // revoke has one row per grant-lifetime, not one per device. The
+  // revision bump is per slug, not per row, and each slug's upsert
+  // is independent so the bumps run in parallel inside the
+  // caller's transaction. Ordering does not matter: pollers only
+  // ever observe the tick-level monotonicity of their own slug's
+  // revision counter, not any global ordering across slugs.
+  const uniqueSlugs = [...new Set(revoked.map((row) => row.deviceSlug))];
+  await Promise.all(uniqueSlugs.map(async (slug) => await bumpRevision(tx, slug, input.now)));
+  return uniqueSlugs;
+};
+
+/**
  * ACL row shape returned to the polling device. Only active grants
  * appear; revoked rows are filtered out at the SELECT layer.
  */

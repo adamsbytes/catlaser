@@ -2,6 +2,7 @@ import { AUTH_BASE_PATH } from '~/lib/auth.ts';
 import { env } from '~/lib/env.ts';
 import { errorResponse } from '~/lib/http.ts';
 import { APPLE_APP_SITE_ASSOCIATION_PATH } from '~/lib/universal-link.ts';
+import { ACCOUNT_DELETE_PATH, accountDeleteRoute } from '~/routes/account.ts';
 import { authRoute } from '~/routes/auth.ts';
 import {
   DEVICES_PAIR_PATH,
@@ -41,6 +42,7 @@ const STATIC_ROUTES: ReadonlyArray<{
 }> = [
   { path: APPLE_APP_SITE_ASSOCIATION_PATH, handler: appleAppSiteAssociationRoute },
   { path: ME_PATH, handler: meRoute },
+  { path: ACCOUNT_DELETE_PATH, handler: accountDeleteRoute },
   { path: DEVICES_PAIR_PATH, handler: devicesPairRoute },
   { path: DEVICES_PAIRED_PATH, handler: devicesPairedRoute },
   { path: DEVICES_PROVISION_PATH, handler: devicesProvisionRoute },

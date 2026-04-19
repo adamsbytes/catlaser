@@ -2,7 +2,7 @@
  * Server-side port of the iOS `AttestationBinding` wire format.
  *
  * `bnd` is the per-call freshness input mixed into the ECDSA signature of a
- * `DeviceAttestation`. It renders on the wire as one of five tagged UTF-8
+ * `DeviceAttestation`. It renders on the wire as one of six tagged UTF-8
  * strings, distinguished by their first four characters:
  *
  * - `req:<unix_seconds>` — outbound magic-link request. Timestamp-skewed.
@@ -22,7 +22,15 @@
  *   captured sign-in-time attestation from being replayed against a protected
  *   route, and vice versa. The protected-route middleware consumes this
  *   binding; the parser, encoder, and skew semantics stay shared across all
- *   five bindings so the crypto floor is consistent.
+ *   six bindings so the crypto floor is consistent.
+ * - `del:<unix_seconds>` — permanent account deletion. Same timestamp/skew
+ *   contract as `req:` / `out:` / `api:`; distinct tag guarantees that a
+ *   captured signature for any other operation is NOT sufficient to delete
+ *   the account, which is the single-most-destructive call the signed-in
+ *   user can issue. The `POST /api/v1/me/delete` handler refuses any binding
+ *   that is not `del:` — the universal `api:` tag is explicitly NOT accepted
+ *   here, because a leaked `api:` from a plain GET /me within the skew
+ *   window would otherwise be replayable against account deletion.
  *
  * The tagged prefix also prevents cross-context confusion: a caller that
  * stripped the prefix before signing/verifying would still see the raw signed
@@ -42,7 +50,8 @@ export type AttestationBinding =
   | { readonly tag: 'verify'; readonly token: string }
   | { readonly tag: 'social'; readonly timestamp: bigint; readonly rawNonce: string }
   | { readonly tag: 'signOut'; readonly timestamp: bigint }
-  | { readonly tag: 'api'; readonly timestamp: bigint };
+  | { readonly tag: 'api'; readonly timestamp: bigint }
+  | { readonly tag: 'deleteAccount'; readonly timestamp: bigint };
 
 export type AttestationBindingTag = AttestationBinding['tag'];
 
@@ -68,6 +77,7 @@ const TAG_VERIFY = 'ver:';
 const TAG_SOCIAL = 'sis:';
 const TAG_SIGN_OUT = 'out:';
 const TAG_API = 'api:';
+const TAG_DELETE_ACCOUNT = 'del:';
 
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)$/v;
 const INT64_MAX = 9_223_372_036_854_775_807n;
@@ -194,8 +204,14 @@ export const decodeAttestationBinding = (wireValue: string): AttestationBinding 
   if (wireValue.startsWith(TAG_API)) {
     return { tag: 'api', timestamp: parseTimestamp(wireValue.slice(TAG_API.length)) };
   }
+  if (wireValue.startsWith(TAG_DELETE_ACCOUNT)) {
+    return {
+      tag: 'deleteAccount',
+      timestamp: parseTimestamp(wireValue.slice(TAG_DELETE_ACCOUNT.length)),
+    };
+  }
   throw new AttestationParseError(
     'ATTESTATION_BND_UNKNOWN_TAG',
-    `bnd has no recognised tag (expected '${TAG_REQUEST}', '${TAG_VERIFY}', '${TAG_SOCIAL}', '${TAG_SIGN_OUT}', or '${TAG_API}')`,
+    `bnd has no recognised tag (expected '${TAG_REQUEST}', '${TAG_VERIFY}', '${TAG_SOCIAL}', '${TAG_SIGN_OUT}', '${TAG_API}', or '${TAG_DELETE_ACCOUNT}')`,
   );
 };

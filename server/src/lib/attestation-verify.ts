@@ -135,6 +135,8 @@ const bindingWireBytes = (parsed: ParsedAttestation): Uint8Array => {
       return utf8Encoder.encode(`out:${binding.timestamp.toString()}`);
     case 'api':
       return utf8Encoder.encode(`api:${binding.timestamp.toString()}`);
+    case 'deleteAccount':
+      return utf8Encoder.encode(`del:${binding.timestamp.toString()}`);
     default: {
       const exhaustive: never = binding;
       throw new Error(`unreachable AttestationBinding tag: ${JSON.stringify(exhaustive)}`);

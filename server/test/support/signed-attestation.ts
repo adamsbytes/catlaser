@@ -53,6 +53,8 @@ const bindingWireValue = (binding: AttestationBinding): string => {
       return `out:${binding.timestamp.toString()}`;
     case 'api':
       return `api:${binding.timestamp.toString()}`;
+    case 'deleteAccount':
+      return `del:${binding.timestamp.toString()}`;
     default: {
       const exhaustive: never = binding;
       throw new Error(`unreachable: ${JSON.stringify(exhaustive)}`);
