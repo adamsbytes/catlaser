@@ -5,6 +5,7 @@ import CatLaserHistory
 import CatLaserLive
 import CatLaserPairingTestSupport
 import CatLaserProto
+import CatLaserPush
 import CatLaserSchedule
 import Foundation
 import Testing
@@ -86,7 +87,8 @@ struct AppCompositionInvariantsTests {
         gate: StubLiveVideoGate = StubLiveVideoGate(),
         underlyingHTTP: RecordingHTTPClient = RecordingHTTPClient(),
         endpointStore: TestEndpointStore = TestEndpointStore(),
-    ) async throws -> (AppComposition, TestBearerStore, TestEndpointStore) {
+        pushBridge: StubPushBridge = StubPushBridge(),
+    ) async throws -> (AppComposition, TestBearerStore, TestEndpointStore, StubPushBridge) {
         let identity = SoftwareIdentityStore()
         let attestationProvider = StubDeviceAttestationProvider(
             fingerprint: DeviceFingerprint(
@@ -133,16 +135,19 @@ struct AppCompositionInvariantsTests {
             endpointStore: endpointStore,
             deviceTransportFactory: { _ in InMemoryDeviceTransport() },
             pathMonitorFactory: { FakeNetworkPathMonitor() },
+            pushPrompt: { try await pushBridge.prompt() },
+            pushReadAuthorization: { await pushBridge.read() },
+            pushRegisterForRemoteNotifications: { await pushBridge.registerForRemote() },
             clock: { Date(timeIntervalSince1970: TimeInterval(fixedClockTimestamp)) },
         )
-        return (composition, bearerStore, endpointStore)
+        return (composition, bearerStore, endpointStore, pushBridge)
     }
 
     // MARK: - 1. LiveKit allowlist
 
     @Test
     func liveKitAllowlistContainsExactlyTheConfiguredHosts() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         // Exact match — not a permissive superset, not a silent empty
         // set.
         #expect(composition.liveKitAllowlist.contains(Self.allowedLiveKitHost))
@@ -156,7 +161,7 @@ struct AppCompositionInvariantsTests {
         // The allowlist plumbs all the way down to the
         // ``LiveStreamCredentials`` constructor. A tampered offer
         // must never produce valid credentials.
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         var offer = Catlaser_App_V1_StreamOffer()
         offer.livekitURL = "wss://attacker-livekit.example.com"
         offer.subscriberToken = "jwt.placeholder"
@@ -167,7 +172,7 @@ struct AppCompositionInvariantsTests {
 
     @Test
     func liveStreamCredentialsAcceptsAllowedHost() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         var offer = Catlaser_App_V1_StreamOffer()
         offer.livekitURL = "wss://\(Self.allowedLiveKitHost)"
         offer.subscriberToken = "jwt.placeholder"
@@ -188,7 +193,7 @@ struct AppCompositionInvariantsTests {
         // regression that wired the gate as a no-op would have the
         // counter stay at zero.
         let gate = StubLiveVideoGate(outcome: .success)
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         #expect(outcome == .allowed)
         #expect(await gate.callCount == 1)
@@ -203,7 +208,7 @@ struct AppCompositionInvariantsTests {
         // ``AuthError.cancelled`` specifically, so a refactor that
         // mismaps it would be caught here.
         let gate = StubLiveVideoGate(outcome: .throwing(AuthError.cancelled))
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         #expect(outcome == .cancelled)
     }
@@ -216,7 +221,7 @@ struct AppCompositionInvariantsTests {
         // string so the caller can surface diagnostics without
         // needing to reason about the failure class.
         let gate = StubLiveVideoGate(outcome: .throwing(AuthError.biometricUnavailable("no passcode")))
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         if case let .denied(message) = outcome {
             #expect(message.contains("biometricUnavailable"))
@@ -232,7 +237,7 @@ struct AppCompositionInvariantsTests {
         // ``.allowed``. Getting this wrong would let a failure to
         // obtain user presence silently grant stream access.
         let gate = StubLiveVideoGate(outcome: .throwing(UnexpectedError()))
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.liveAuthGate()
         if case .denied = outcome {
             // correct
@@ -250,7 +255,7 @@ struct AppCompositionInvariantsTests {
         // captured ``.api(...)`` or ``.request(...)`` would pass
         // every other test but silently let the coordination server
         // accept replays against the device channel (or vice versa).
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let header = try await composition.handshakeBuilder()
         let attestation = try DeviceAttestationEncoder.decodeHeaderValue(header)
         if case let .device(timestamp) = attestation.binding {
@@ -272,7 +277,7 @@ struct AppCompositionInvariantsTests {
         // regression that somehow cached the signature or used a
         // deterministic scheme would have legitimate sub-second
         // reconnects collide with their own cached entry.
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let first = try await composition.handshakeBuilder()
         let second = try await composition.handshakeBuilder()
         let firstDecoded = try DeviceAttestationEncoder.decodeHeaderValue(first)
@@ -288,7 +293,7 @@ struct AppCompositionInvariantsTests {
         // against a freshly-parsed P-256 public key. This is the
         // same check the device's Python handshake performs; keeping
         // it in the composition test asserts round-trip fidelity.
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let header = try await composition.handshakeBuilder()
         let attestation = try DeviceAttestationEncoder.decodeHeaderValue(header)
         #expect(attestation.fingerprintHash.count == 32)
@@ -322,7 +327,7 @@ struct AppCompositionInvariantsTests {
                 body: Data(),
             )),
         ])
-        let (composition, bearerStore, _) = try await Self.makeComposition(
+        let (composition, bearerStore, _, _) = try await Self.makeComposition(
             underlyingHTTP: http,
         )
         let recorder = ExpiryRecorder()
@@ -359,7 +364,7 @@ struct AppCompositionInvariantsTests {
         let http = RecordingHTTPClient(outcomes: [
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
         ])
-        let (composition, _, _) = try await Self.makeComposition(underlyingHTTP: http)
+        let (composition, _, _, _) = try await Self.makeComposition(underlyingHTTP: http)
         let recorder = ExpiryRecorder()
         await composition.authCoordinator.addLifecycleObserver(recorder)
         _ = try? await composition.pairedDevicesClient.list()
@@ -383,7 +388,7 @@ struct AppCompositionInvariantsTests {
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
             .response(HTTPResponse(statusCode: 401, headers: [:], body: Data())),
         ])
-        let (composition, _, _) = try await Self.makeComposition(underlyingHTTP: http)
+        let (composition, _, _, _) = try await Self.makeComposition(underlyingHTTP: http)
         let recorder = ExpiryRecorder()
         await composition.authCoordinator.addLifecycleObserver(recorder)
 
@@ -412,7 +417,7 @@ struct AppCompositionInvariantsTests {
     @MainActor
     @Test
     func liveViewModelFactoryBindsIdentityToPairedDeviceSlug() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let endpoint = try DeviceEndpoint(host: "100.64.1.7", port: 9820)
         let paired = PairedDevice(
             id: "cat-777",
@@ -495,7 +500,7 @@ struct AppCompositionInvariantsTests {
     @Test
     func compositionRegistersEndpointStoreAsLifecycleObserver() async throws {
         let endpointStore = TestEndpointStore(initial: nil)
-        let (composition, _, _) = try await Self.makeComposition(endpointStore: endpointStore)
+        let (composition, _, _, _) = try await Self.makeComposition(endpointStore: endpointStore)
         let recorder = ExpiryRecorder()
         await composition.authCoordinator.addLifecycleObserver(recorder)
 
@@ -521,7 +526,7 @@ struct AppCompositionInvariantsTests {
     @Test
     func pairingAuthGateRoutesToRequirePairingMethod() async throws {
         let gate = StubLiveVideoGate(outcome: .success)
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.pairingAuthGate()
         #expect(outcome == .allowed)
         #expect(await gate.pairingCallCount == 1,
@@ -533,7 +538,7 @@ struct AppCompositionInvariantsTests {
     @Test
     func pairingAuthGateMapsCancellationToCancelled() async throws {
         let gate = StubLiveVideoGate(outcome: .throwing(AuthError.cancelled))
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.pairingAuthGate()
         #expect(outcome == .cancelled)
     }
@@ -541,7 +546,7 @@ struct AppCompositionInvariantsTests {
     @Test
     func pairingAuthGateMapsOtherFailuresToDenied() async throws {
         let gate = StubLiveVideoGate(outcome: .throwing(AuthError.biometricUnavailable("no passcode")))
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.pairingAuthGate()
         if case let .denied(message) = outcome {
             #expect(message.contains("biometricUnavailable"))
@@ -553,7 +558,7 @@ struct AppCompositionInvariantsTests {
     @Test
     func pairingAuthGateNeverDefaultAllowsOnUnexpectedError() async throws {
         let gate = StubLiveVideoGate(outcome: .throwing(UnexpectedError()))
-        let (composition, _, _) = try await Self.makeComposition(gate: gate)
+        let (composition, _, _, _) = try await Self.makeComposition(gate: gate)
         let outcome = await composition.pairingAuthGate()
         if case .denied = outcome {
             // correct
@@ -574,7 +579,7 @@ struct AppCompositionInvariantsTests {
     /// belt-and-braces guarantee that the verifier is always wired.
     @Test
     func connectionManagerFactoryWiresVerifierFromPairedDevicePublicKey() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let pubkey = Data(repeating: 0x42, count: 32)
         let device = PairedDevice(
             id: "cat-007",
@@ -617,7 +622,7 @@ struct AppCompositionInvariantsTests {
     @MainActor
     @Test
     func historyViewModelFactoryReturnsIdleVM() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let transport = InMemoryDeviceTransport()
         let client = DeviceClient(transport: transport)
         let vm = composition.historyViewModel(deviceClient: client)
@@ -644,7 +649,7 @@ struct AppCompositionInvariantsTests {
     @MainActor
     @Test
     func historyViewModelFactoryUsesCompositionClock() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let transport = InMemoryDeviceTransport()
         let client = DeviceClient(transport: transport, requestTimeout: 0.5)
         try await client.connect()
@@ -697,7 +702,7 @@ struct AppCompositionInvariantsTests {
     @MainActor
     @Test
     func scheduleViewModelFactoryReturnsIdleVM() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let transport = InMemoryDeviceTransport()
         let client = DeviceClient(transport: transport)
         let vm = composition.scheduleViewModel(deviceClient: client)
@@ -714,7 +719,7 @@ struct AppCompositionInvariantsTests {
     @MainActor
     @Test
     func scheduleViewModelFactoryRoutesThroughSuppliedClient() async throws {
-        let (composition, _, _) = try await Self.makeComposition()
+        let (composition, _, _, _) = try await Self.makeComposition()
         let transport = InMemoryDeviceTransport()
         let client = DeviceClient(transport: transport, requestTimeout: 0.5)
         try await client.connect()
@@ -747,6 +752,124 @@ struct AppCompositionInvariantsTests {
         // test.
         #expect(captured.getCount == 1)
     }
+
+    // MARK: - pushRegistrar / pushViewModel factory (Part 10 Step 10)
+
+    /// SECURITY-CRITICAL: the push-token registrar must be registered
+    /// as a ``SessionLifecycleObserver`` on the auth coordinator at
+    /// composition time. Without this hook, sign-out wipes the bearer
+    /// keychain row but leaves the APNs registration intact — the
+    /// server would keep delivering pushes to an account the user
+    /// has walked away from, and the next user who signs in on the
+    /// same device inherits the prior user's notifications.
+    @Test
+    func pushRegistrarIsRegisteredAsSessionLifecycleObserver() async throws {
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 1.0)
+        try await client.connect()
+        let captured = CapturedPushRequests.shared
+        captured.reset()
+        let server = ScriptedDeviceServer(transport: transport) { req in
+            switch req.request {
+            case let .registerPushToken(register):
+                captured.recordRegister(token: register.token, platform: register.platform)
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.pushTokenAck = Catlaser_App_V1_PushTokenAck()
+                return .reply(event)
+            case let .unregisterPushToken(unregister):
+                captured.recordUnregister(token: unregister.token)
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.pushTokenAck = Catlaser_App_V1_PushTokenAck()
+                return .reply(event)
+            default:
+                return .error(code: 99, message: "unexpected")
+            }
+        }
+        await server.run()
+        defer {
+            Task {
+                await server.stop()
+                await client.disconnect()
+            }
+        }
+        let (composition, _, _, _) = try await Self.makeComposition()
+        // Prime the registrar as the supervisor would on
+        // ``.connected(client)`` — in production the Xcode app
+        // target wires this via the state stream; here we simulate
+        // the same hand-off so the composition's observer wiring can
+        // be exercised end-to-end.
+        await composition.pushRegistrar.setClient(client)
+        let token = try PushToken(rawBytes: Data(repeating: 0x42, count: 32))
+        await composition.pushRegistrar.setToken(token)
+        // Wait for the register ACK to land so the cache is primed.
+        var deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, captured.registerCount == 0 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(captured.registerCount == 1)
+        #expect(captured.lastRegisteredToken == token.hex)
+        #expect(captured.lastRegisteredPlatform == .apns)
+
+        // Trigger sign-out via the coordinator. The composition must
+        // have wired the registrar as an observer; the observer
+        // hook fires unregister on the device channel.
+        try? await composition.authCoordinator.signOut()
+        deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline, captured.unregisterCount == 0 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(captured.unregisterCount == 1,
+                "registrar must be a session-lifecycle observer; sign-out must reach the device")
+        #expect(captured.lastUnregisteredToken == token.hex)
+    }
+
+    /// The ``pushViewModel()`` factory must return a fresh VM bound
+    /// to the composition's single registrar and to the caller-
+    /// supplied OS bridge. Like the history / schedule factories
+    /// the call itself is side-effect free until ``start()`` is
+    /// invoked — the Xcode app target mounts the VM before the
+    /// screen appears and does not want to trigger an OS permission
+    /// prompt then.
+    @MainActor
+    @Test
+    func pushViewModelFactoryReturnsIdleVM() async throws {
+        let bridge = StubPushBridge(initialStatus: .notDetermined)
+        let (composition, _, _, _) = try await Self.makeComposition(pushBridge: bridge)
+        let vm = composition.pushViewModel()
+        #expect(vm.state == .idle)
+        #expect(vm.authorization == .notDetermined)
+        #expect(vm.pendingDeepLinks.isEmpty)
+        // The factory must NOT have read OS state or triggered a
+        // prompt / register round-trip.
+        #expect(await bridge.promptCallCount == 0)
+        #expect(await bridge.readCount == 0)
+        #expect(await bridge.registerCount == 0)
+        vm.stop()
+    }
+
+    /// The factory wires the composition's OS-bridge closures, so a
+    /// ``start()`` on the returned VM must route through the stub
+    /// bridge — confirming the composition did not silently swap in
+    /// a different prompt / read / register closure.
+    @MainActor
+    @Test
+    func pushViewModelFactoryRoutesThroughCompositionBridge() async throws {
+        let bridge = StubPushBridge(initialStatus: .authorized)
+        let (composition, _, _, _) = try await Self.makeComposition(pushBridge: bridge)
+        let vm = composition.pushViewModel()
+        await vm.start()
+        // A returning user with an existing grant: the VM auto-
+        // kicks APNs registration on start. That path exercises
+        // both the read-authorization and register-for-remote
+        // closures in a single round.
+        #expect(await bridge.readCount >= 1)
+        #expect(await bridge.registerCount == 1)
+        // After the auto-kick the VM is parked on
+        // ``awaitingAPNsToken`` until APNs hands back a device
+        // token.
+        #expect(vm.state == .awaitingAPNsToken)
+        vm.stop()
+    }
 }
 
 /// Process-wide capture for the schedule-routing invariant test.
@@ -771,6 +894,89 @@ private final class CapturedScheduleRequest: @unchecked Sendable {
     var getCount: Int {
         lock.lock(); defer { lock.unlock() }
         return gets
+    }
+}
+
+/// Process-wide capture for the push-registrar invariant tests.
+/// Lives at file scope so the scripted server's ``@Sendable`` handler
+/// closure can write to it without capturing a non-Sendable test
+/// fixture. Records every register / unregister request the
+/// composition's shared registrar fires on sign-out.
+private final class CapturedPushRequests: @unchecked Sendable {
+    static let shared = CapturedPushRequests()
+    private let lock = NSLock()
+    private var registers: [(token: String, platform: Catlaser_App_V1_PushPlatform)] = []
+    private var unregisters: [String] = []
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        registers.removeAll()
+        unregisters.removeAll()
+    }
+
+    func recordRegister(token: String, platform: Catlaser_App_V1_PushPlatform) {
+        lock.lock(); defer { lock.unlock() }
+        registers.append((token, platform))
+    }
+
+    func recordUnregister(token: String) {
+        lock.lock(); defer { lock.unlock() }
+        unregisters.append(token)
+    }
+
+    var registerCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return registers.count
+    }
+
+    var unregisterCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return unregisters.count
+    }
+
+    var lastRegisteredToken: String? {
+        lock.lock(); defer { lock.unlock() }
+        return registers.last?.token
+    }
+
+    var lastRegisteredPlatform: Catlaser_App_V1_PushPlatform? {
+        lock.lock(); defer { lock.unlock() }
+        return registers.last?.platform
+    }
+
+    var lastUnregisteredToken: String? {
+        lock.lock(); defer { lock.unlock() }
+        return unregisters.last
+    }
+}
+
+/// Stub OS-bridge for the push screen — standing in for
+/// ``PushAuthorizationController`` on Linux CI and in Darwin unit
+/// tests that do not want to touch ``UNUserNotificationCenter``.
+/// The three counters let the composition invariants assert that
+/// the factory actually wires each bridge closure.
+actor StubPushBridge {
+    private var status: PushAuthorizationStatus
+    private(set) var promptCallCount = 0
+    private(set) var readCount = 0
+    private(set) var registerCount = 0
+
+    init(initialStatus: PushAuthorizationStatus = .notDetermined) {
+        self.status = initialStatus
+    }
+
+    func prompt() async throws -> PushAuthorizationStatus {
+        promptCallCount += 1
+        return status
+    }
+
+    func read() async -> PushAuthorizationStatus {
+        readCount += 1
+        return status
+    }
+
+    func registerForRemote() async {
+        registerCount += 1
     }
 }
 

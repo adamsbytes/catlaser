@@ -85,7 +85,7 @@
   - [X] Device pairing + endpoint persistence (QR pair flow, coordination-server-brokered Tailscale endpoint lookup, Keychain-persisted endpoint, auto-reconnect on network change, connection heartbeat, signed-out → endpoint wipe)
   - [X] History + cat profiles (stats, naming, management)
   - [X] Schedule setup (auto-play times, quiet hours)
-  - [ ] Push notifications (APNs: play summaries, session alerts, hopper empty)
+  - [X] Push notifications (APNs: play summaries, session alerts, hopper empty)
 
 [ ] App — Android (Jetpack Compose, port)
   - [ ] Proto codegen (protobuf-kotlin from app.proto)

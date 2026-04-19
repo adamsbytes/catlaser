@@ -38,6 +38,10 @@ let package = Package(
             targets: ["CatLaserSchedule"],
         ),
         .library(
+            name: "CatLaserPush",
+            targets: ["CatLaserPush"],
+        ),
+        .library(
             name: "CatLaserApp",
             targets: ["CatLaserApp"],
         ),
@@ -273,6 +277,38 @@ let package = Package(
             ],
             path: "Tests/CatLaserScheduleTests",
         ),
+        // APNs push-notification orchestration. Owns the
+        // register/unregister round-trip to the paired device
+        // (``RegisterPushTokenRequest`` / ``UnregisterPushTokenRequest``
+        // over the existing data channel), the typed parse of the
+        // FCM ``data`` dict that ``python/catlaser_brain/network/push.py``
+        // sends, and the deep-link route a tapped notification
+        // resolves to. The ``UserNotifications``-backed authorization
+        // controller + delegate are ``canImport``-gated so the pure
+        // logic (token hex, payload parser, registrar state machine,
+        // VM) builds and tests on Linux SPM runners the same as on
+        // Darwin — matching the pattern every other feature module
+        // in this package follows.
+        .target(
+            name: "CatLaserPush",
+            dependencies: [
+                "CatLaserAuth",
+                "CatLaserDevice",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserPush",
+        ),
+        .testTarget(
+            name: "CatLaserPushTests",
+            dependencies: [
+                "CatLaserPush",
+                "CatLaserAuth",
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Tests/CatLaserPushTests",
+        ),
         .target(
             name: "CatLaserApp",
             dependencies: [
@@ -281,6 +317,7 @@ let package = Package(
                 "CatLaserHistory",
                 "CatLaserLive",
                 "CatLaserPairing",
+                "CatLaserPush",
                 "CatLaserSchedule",
             ],
             path: "Sources/CatLaserApp",
@@ -309,6 +346,7 @@ let package = Package(
                 // factory needs to construct a supervisor without
                 // touching ``Network`` framework on Linux CI.
                 "CatLaserPairingTestSupport",
+                "CatLaserPush",
                 "CatLaserDevice",
                 "CatLaserDeviceTestSupport",
                 "CatLaserProto",

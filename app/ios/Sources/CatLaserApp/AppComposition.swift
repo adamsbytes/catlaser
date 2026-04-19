@@ -3,6 +3,7 @@ import CatLaserDevice
 import CatLaserHistory
 import CatLaserLive
 import CatLaserPairing
+import CatLaserPush
 import CatLaserSchedule
 import Foundation
 
@@ -151,6 +152,22 @@ public struct AppComposition: Sendable {
     /// that omits the lifecycle hook.
     public let endpointStore: any EndpointStore & SessionLifecycleObserver
 
+    /// Single shared push-token registrar. Wired as a
+    /// ``SessionLifecycleObserver`` on the auth coordinator at
+    /// composition time so sign-out unregisters the APNs token from
+    /// the paired device (and wipes the local cache) without the
+    /// Xcode app target having to remember. The same registrar is
+    /// threaded into every ``PushViewModel`` the composition mints —
+    /// a second registrar instance would race with this one on
+    /// token dedupe and silently re-register on every wake.
+    ///
+    /// The Xcode app target additionally feeds the supervisor's
+    /// ``ConnectionState.connected(client)`` reference into
+    /// ``PushTokenRegistrar/setClient(_:)`` so a fresh reconnect
+    /// triggers a fresh register against the new `DeviceClient`
+    /// identity.
+    public let pushRegistrar: PushTokenRegistrar
+
     /// Construct a ``LiveViewModel`` wired to the paired device. The
     /// slug is read from the trusted ``PairedDevice`` (Keychain) and
     /// captured in the session factory closure — it is NEVER derived
@@ -228,6 +245,29 @@ public struct AppComposition: Sendable {
     @MainActor
     public func scheduleViewModel(deviceClient: DeviceClient) -> ScheduleViewModel {
         ScheduleViewModel(deviceClient: deviceClient)
+    }
+
+    /// Construct a ``PushViewModel`` wired to the composition's
+    /// ``pushRegistrar`` and to the caller-supplied OS bridge
+    /// closures. The closures are supplied per-composition (not per-
+    /// call) because they are stateless and injected by the
+    /// ``production(config:)`` factory on Darwin (backed by
+    /// ``PushAuthorizationController``). The cross-platform
+    /// ``make(...)`` variant accepts them directly so Linux-side
+    /// tests can stub them.
+    ///
+    /// ``@MainActor`` because ``PushViewModel`` is MainActor-
+    /// isolated; hoisting the constraint to the factory boundary
+    /// surfaces it to the SwiftUI host rather than hiding it inside
+    /// a VM initialiser call.
+    @MainActor
+    public func pushViewModel() -> PushViewModel {
+        PushViewModel(
+            registrar: pushRegistrar,
+            prompt: pushPrompt,
+            readAuthorization: pushReadAuthorization,
+            registerForRemoteNotifications: pushRegisterForRemote,
+        )
     }
 
     /// Concrete session factory used by ``liveViewModel``. Lives in
@@ -310,6 +350,9 @@ public struct AppComposition: Sendable {
         endpointStore: any EndpointStore & SessionLifecycleObserver,
         deviceTransportFactory: @escaping DeviceTransportFactory,
         pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
+        pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
+        pushReadAuthorization: @escaping PushViewModel.AuthorizationStatusReader,
+        pushRegisterForRemoteNotifications: @escaping PushViewModel.RegisterForRemoteNotifications,
         connectionConfiguration: ConnectionManager.Configuration = .default,
         clock: @escaping @Sendable () -> Date = { Date() },
     ) async -> AppComposition {
@@ -339,6 +382,18 @@ public struct AppComposition: Sendable {
         // that the docstring claim on ``KeychainEndpointStore`` is
         // actually true at runtime.
         await coordinator.addLifecycleObserver(endpointStore)
+
+        // The push-token registrar is the second composition-time
+        // lifecycle observer. Sign-out unregisters the APNs token
+        // with the paired device (and wipes the local cache) so the
+        // server does not keep delivering pushes to an account the
+        // user has abandoned. Sign-out hygiene here mirrors the
+        // endpoint store's: a refactor that builds a second registrar
+        // behind the back of the composition would have that second
+        // instance miss the observer hook and the keychain-bound
+        // paired device would keep receiving pushes.
+        let pushRegistrar = PushTokenRegistrar()
+        await coordinator.addLifecycleObserver(pushRegistrar)
 
         // Build the signed transport via the caller-supplied factory,
         // threading the composition's 401 callback. The factory is
@@ -418,6 +473,10 @@ public struct AppComposition: Sendable {
             liveAuthGate: liveAuthGate,
             pairingAuthGate: pairingAuthGate,
             endpointStore: endpointStore,
+            pushRegistrar: pushRegistrar,
+            pushPrompt: pushPrompt,
+            pushReadAuthorization: pushReadAuthorization,
+            pushRegisterForRemote: pushRegisterForRemoteNotifications,
             deviceTransportFactory: deviceTransportFactory,
             pathMonitorFactory: pathMonitorFactory,
             connectionConfiguration: connectionConfiguration,
@@ -495,6 +554,13 @@ public struct AppComposition: Sendable {
     /// between the two would manifest as nonsense session-history
     /// ranges or replay-cache misses on slow-clock builds.
     private let clock: @Sendable () -> Date
+    /// Cross-platform OS bridge for the push screen. Stored here so
+    /// ``pushViewModel()`` has a single source of truth (and a single
+    /// test-injection surface) for the ``UserNotifications`` /
+    /// ``UIApplication`` calls a Linux runner cannot issue.
+    private let pushPrompt: PushViewModel.AuthorizationPrompt
+    private let pushReadAuthorization: PushViewModel.AuthorizationStatusReader
+    private let pushRegisterForRemote: PushViewModel.RegisterForRemoteNotifications
 
     private init(
         authCoordinator: AuthCoordinator,
@@ -505,6 +571,10 @@ public struct AppComposition: Sendable {
         liveAuthGate: @escaping LiveViewModel.AuthGate,
         pairingAuthGate: @escaping PairingAuthGate,
         endpointStore: any EndpointStore & SessionLifecycleObserver,
+        pushRegistrar: PushTokenRegistrar,
+        pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
+        pushReadAuthorization: @escaping PushViewModel.AuthorizationStatusReader,
+        pushRegisterForRemote: @escaping PushViewModel.RegisterForRemoteNotifications,
         deviceTransportFactory: @escaping DeviceTransportFactory,
         pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
         connectionConfiguration: ConnectionManager.Configuration,
@@ -518,6 +588,10 @@ public struct AppComposition: Sendable {
         self.liveAuthGate = liveAuthGate
         self.pairingAuthGate = pairingAuthGate
         self.endpointStore = endpointStore
+        self.pushRegistrar = pushRegistrar
+        self.pushPrompt = pushPrompt
+        self.pushReadAuthorization = pushReadAuthorization
+        self.pushRegisterForRemote = pushRegisterForRemote
         self.deviceTransportFactory = deviceTransportFactory
         self.pathMonitorFactory = pathMonitorFactory
         self.connectionConfiguration = connectionConfiguration
@@ -527,7 +601,9 @@ public struct AppComposition: Sendable {
 
 // MARK: - Production factory (Darwin-only)
 
-#if canImport(Security) && canImport(Darwin) && canImport(LocalAuthentication)
+#if canImport(Security) && canImport(Darwin) && canImport(LocalAuthentication) && canImport(UserNotifications)
+import UserNotifications
+
 public extension AppComposition {
     /// Build the production object graph. Darwin-only because it
     /// wires the Secure-Enclave-backed identity store, the
@@ -598,6 +674,28 @@ public extension AppComposition {
         let pathMonitorFactory: @Sendable () -> any NetworkPathMonitor = {
             SystemNetworkPathMonitor()
         }
+        // Push OS bridge: one shared ``PushAuthorizationController``
+        // instance backs every closure. The controller is stateless
+        // (the shared ``UNUserNotificationCenter`` is a process-wide
+        // singleton anyway), so a single captured reference is
+        // correct. The ``PushTokenRegistrar`` lives on the composition
+        // itself — ``make`` registers it as a session-lifecycle
+        // observer so sign-out unregisters the APNs token without
+        // the Xcode app target having to remember. A product target
+        // that bypassed this factory would have to build both the
+        // controller AND the registrar themselves and could silently
+        // forget one — the composition is the belt-and-braces
+        // guarantee that both are wired.
+        let authController = PushAuthorizationController()
+        let pushPrompt: PushViewModel.AuthorizationPrompt = {
+            try await authController.prompt()
+        }
+        let pushReadAuthorization: PushViewModel.AuthorizationStatusReader = {
+            await authController.currentStatus()
+        }
+        let pushRegisterForRemote: PushViewModel.RegisterForRemoteNotifications = {
+            await authController.registerForRemoteNotifications()
+        }
         return await make(
             authConfig: config.authConfig,
             authHTTPClient: pinnedTransport,
@@ -609,6 +707,9 @@ public extension AppComposition {
             endpointStore: endpointStore,
             deviceTransportFactory: transportFactory,
             pathMonitorFactory: pathMonitorFactory,
+            pushPrompt: pushPrompt,
+            pushReadAuthorization: pushReadAuthorization,
+            pushRegisterForRemoteNotifications: pushRegisterForRemote,
         )
     }
 }
