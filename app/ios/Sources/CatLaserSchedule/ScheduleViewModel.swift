@@ -155,17 +155,109 @@ public final class ScheduleViewModel {
         lastActionError = nil
     }
 
-    /// Flip the ``enabled`` flag on one draft. A convenience so the
-    /// row-level toggle doesn't require the caller to look up, mutate,
-    /// and write back the full draft.
-    public func toggleEnabled(id: String) {
+    /// Flip the ``enabled`` flag on one draft and commit to the device
+    /// in one atomic round-trip.
+    ///
+    /// Called from the row-level ``Toggle`` where the user's mental
+    /// model is "flick the switch, it's saved." The commit is scoped
+    /// to the entry the user touched: the payload is the device's
+    /// baseline with only that one row's ``enabled`` flag flipped, so
+    /// other pending draft edits (a half-typed time window in the
+    /// sheet, for example) are never accidentally pushed to the wire
+    /// behind the user's back. Those edits still live on ``entries``
+    /// and surface via the main Save button.
+    ///
+    /// The UI gets optimistic feedback: the switch animates to its
+    /// new position immediately; ``isSaving`` is true while the
+    /// round-trip is in flight; on success the baseline is adopted
+    /// and other pending drafts survive; on failure the flip is
+    /// reverted verbatim so the switch snaps back and the banner
+    /// surfaces the diagnostic.
+    ///
+    /// Two guard cases are deliberate no-ops:
+    ///  1. A save already in flight — the earlier call is running
+    ///     against the same shared draft; a second wire round-trip
+    ///     would race the first. The caller (the ``Toggle``) is
+    ///     already disabled during save so this path is defensive.
+    ///  2. A locally-added row that has never been synced to the
+    ///     device. The baseline has no row to flip; committing a
+    ///     never-seen row on behalf of a toggle would violate the
+    ///     two-phase model Add + sheet-edit follows. The local flip
+    ///     still lands on ``entries`` so the draft stays faithful;
+    ///     the main Save button picks it up.
+    public func toggleEnabled(id: String) async {
         guard case let .loaded(draftSet, isRefreshing, isSaving) = state else {
             return
         }
+        guard !isSaving else { return }
+        guard draftSet.entries.contains(where: { $0.id == id }) else { return }
+
+        // Optimistic mutation: the switch under the user's finger
+        // animates to its new position before any wire traffic.
         var mutated = draftSet
         mutated.toggleEnabled(id: id)
-        state = .loaded(draftSet: mutated, isRefreshing: isRefreshing, isSaving: isSaving)
         lastActionError = nil
+
+        // Never-synced rows (added locally, not yet in baseline) fall
+        // back to the local-only mutation — matching the two-phase
+        // ``addEntry`` flow. The user's main Save button picks them
+        // up alongside any other pending draft edits.
+        guard let baselineIndex = draftSet.baseline.firstIndex(where: { $0.id == id }) else {
+            state = .loaded(draftSet: mutated, isRefreshing: isRefreshing, isSaving: false)
+            return
+        }
+
+        state = .loaded(draftSet: mutated, isRefreshing: isRefreshing, isSaving: true)
+
+        // The payload is the device's baseline with only this row's
+        // ``enabled`` flipped. Pending draft edits on OTHER rows are
+        // not committed — the toggle is atomic for this one entry.
+        var committedBaseline = draftSet.baseline
+        committedBaseline[baselineIndex].enabled.toggle()
+
+        var request = Catlaser_App_V1_AppRequest()
+        var setRequest = Catlaser_App_V1_SetScheduleRequest()
+        setRequest.entries = committedBaseline.map { $0.toWire() }
+        request.setSchedule = setRequest
+
+        do {
+            let event = try await deviceClient.request(request)
+            let list = try unwrapScheduleList(event)
+            let newBaseline = list.entries.map(ScheduleEntryDraft.init(wire:))
+            // Baseline follows the device's reply; entries keep the
+            // user's optimistic flip alongside any other pending
+            // draft edits so the sheet-scoped work is not lost.
+            let refreshed = ScheduleDraftSet(baseline: newBaseline, entries: mutated.entries)
+            state = .loaded(draftSet: refreshed, isRefreshing: false, isSaving: false)
+            lastActionError = nil
+        } catch let error as ScheduleError {
+            applyToggleFailure(error: error, priorSet: draftSet, isRefreshing: isRefreshing)
+        } catch let error as DeviceClientError {
+            applyToggleFailure(
+                error: ScheduleError.from(error),
+                priorSet: draftSet,
+                isRefreshing: isRefreshing,
+            )
+        } catch {
+            applyToggleFailure(
+                error: .internalFailure(error.localizedDescription),
+                priorSet: draftSet,
+                isRefreshing: isRefreshing,
+            )
+        }
+    }
+
+    /// Revert an in-flight toggle that the device refused, restoring
+    /// the switch to its pre-tap state and surfacing the diagnostic.
+    /// Other pending draft edits on the original ``draftSet`` survive
+    /// because ``priorSet`` was captured before any mutation.
+    private func applyToggleFailure(
+        error: ScheduleError,
+        priorSet: ScheduleDraftSet,
+        isRefreshing: Bool,
+    ) {
+        state = .loaded(draftSet: priorSet, isRefreshing: isRefreshing, isSaving: false)
+        lastActionError = error
     }
 
     /// Revert every pending edit to the server baseline. A no-op

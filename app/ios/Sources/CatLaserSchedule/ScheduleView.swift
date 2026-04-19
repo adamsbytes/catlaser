@@ -200,8 +200,18 @@ public struct ScheduleView: View {
                 ForEach(draftSet.entries) { entry in
                     ScheduleEntryRow(
                         entry: entry,
+                        isSaving: isSavingProjection,
                         onEdit: { editingEntryID = entry.id },
-                        onToggleEnabled: { viewModel.toggleEnabled(id: entry.id) },
+                        onToggleEnabled: {
+                            // Haptic at the gesture site so the user
+                            // gets a tick the moment their finger
+                            // leaves the switch; the VM fires a
+                            // success haptic on commit and the
+                            // screen-level error observer fires an
+                            // error haptic on failure.
+                            Haptics.selection.play()
+                            Task { await viewModel.toggleEnabled(id: entry.id) }
+                        },
                     )
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -408,6 +418,7 @@ public struct ScheduleView: View {
 
 private struct ScheduleEntryRow: View {
     let entry: ScheduleEntryDraft
+    let isSaving: Bool
     let onEdit: () -> Void
     let onToggleEnabled: () -> Void
 
@@ -434,12 +445,20 @@ private struct ScheduleEntryRow: View {
                     )
             }
             Spacer()
+            // Disable the toggle while a save is in flight so a rapid
+            // second tap cannot race the first commit. The VM's own
+            // guard is authoritative; disabling here suppresses the
+            // SwiftUI "wobble" that would otherwise appear when a
+            // second set-closure call gets silently dropped by the VM
+            // while the binding's get-closure still returns the old
+            // value.
             Toggle("", isOn: Binding(
                 get: { entry.enabled },
                 set: { _ in onToggleEnabled() },
             ))
             .labelsHidden()
             .tint(SemanticColor.accent)
+            .disabled(isSaving)
             .accessibilityID(.scheduleEntryToggle)
             .accessibilityLabel(Text(ScheduleStrings.entrySheetEnabledLabel))
             Button(action: onEdit) {
@@ -451,6 +470,7 @@ private struct ScheduleEntryRow: View {
             .background(SemanticColor.elevatedFill, in: Circle())
             .foregroundStyle(SemanticColor.textPrimary)
             .accessibilityID(.scheduleEntryEdit)
+            .disabled(isSaving)
         }
         .padding(12)
         .background(
