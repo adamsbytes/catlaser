@@ -74,7 +74,20 @@ public struct HistoryView: View {
         }
         .sheet(item: Binding(
             get: { viewModel.pendingNewCats.first },
-            set: { _ in /* dismissal routes through VM */ },
+            set: { newValue in
+                // A nil write is SwiftUI telling us the sheet was
+                // dismissed interactively (swipe down). Route the
+                // nil through the VM so the queue actually pops —
+                // otherwise the binding would re-render from the
+                // still-present head prompt and the sheet would
+                // spring back up the next time the view updates.
+                // Non-nil writes would be SwiftUI asking us to switch
+                // identity mid-sheet, which cannot happen for a queue
+                // we own; ignore them as structurally unreachable.
+                guard newValue == nil,
+                      let head = viewModel.pendingNewCats.first else { return }
+                viewModel.dismissNewCatPrompt(head.trackIDHint)
+            },
         )) { prompt in
             NameNewCatSheet(
                 prompt: prompt,

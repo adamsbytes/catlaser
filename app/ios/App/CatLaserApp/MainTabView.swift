@@ -27,6 +27,7 @@ struct MainTabView: View {
     let authCoordinator: AuthCoordinator
     let appVersion: String
     let buildNumber: String
+    let legalURLs: LegalURLs
 
     enum Tab: Hashable {
         case live
@@ -63,6 +64,7 @@ struct MainTabView: View {
                 authCoordinator: authCoordinator,
                 appVersion: appVersion,
                 buildNumber: buildNumber,
+                legalURLs: legalURLs,
             )
             .tabItem {
                 Label("Settings", systemImage: "gearshape.fill")
@@ -71,7 +73,19 @@ struct MainTabView: View {
         }
         .tint(SemanticColor.accent)
         .overlay(alignment: .top) {
-            ConnectionStatusPill(state: pairingViewModel.connectionState)
+            // Suppress the global connection pill while the Live tab is
+            // showing live video. Two reasons: (a) the Live overlay
+            // renders its own pill at the same top alignment, so
+            // stacking two pills was visually busy the rare moment the
+            // supervisor happened to be reconnecting mid-stream; and
+            // (b) a LiveKit-side drop surfaces via ``LiveView``'s own
+            // failure pane, which is the authoritative signal while
+            // streaming — the supervisor's state is a bystander. Other
+            // tabs always show the pill so a disconnected schedule /
+            // history never looks like a broken screen.
+            if !suppressesConnectionPill {
+                ConnectionStatusPill(state: pairingViewModel.connectionState)
+            }
         }
         .onChange(of: pushViewModel.pendingDeepLinks.count) { _, newValue in
             guard newValue > 0 else { return }
@@ -123,5 +137,20 @@ struct MainTabView: View {
         #else
         LiveView(viewModel: liveViewModel)
         #endif
+    }
+
+    /// Whether the global connection status pill should be hidden in
+    /// the current configuration. Only true when the user is on the
+    /// Live tab AND the VM is actively streaming video — the moment
+    /// the VM leaves ``.streaming`` (connecting, disconnected, failed)
+    /// the pill comes back so a network drop during stream setup or
+    /// after teardown is still surfaced. The Live tab's own failure
+    /// pane handles mid-stream drops via the VM's ``.failed`` phase,
+    /// which is a strictly more informative signal than the
+    /// supervisor's transport state while streaming.
+    private var suppressesConnectionPill: Bool {
+        guard selected == .live else { return false }
+        if case .streaming = liveViewModel.state { return true }
+        return false
     }
 }

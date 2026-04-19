@@ -207,6 +207,47 @@ enum DeploymentConfiguration {
         let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
         return (version ?? "0.0.0", build ?? "0")
     }
+
+    /// Read the legal URL pair (privacy policy, terms of service) that
+    /// the Settings → About section links to. Both keys are required
+    /// and both values must be absolute ``https://`` URLs — App Store
+    /// review rejects apps whose in-app legal links 404, and a plain
+    /// HTTP URL would be a downgrade attack surface. Failure here is
+    /// treated the same as any other deployment-config miss: the call
+    /// site fails loud at launch so a mis-built archive never ships.
+    static func legalURLs(
+        bundle: Bundle = .main,
+    ) throws(DeploymentConfigurationError) -> LegalURLs {
+        let privacyString = try readString(
+            bundle,
+            key: "CATLASER_PRIVACY_POLICY_URL",
+            reason: .missingPrivacyPolicyURL,
+        )
+        guard let privacyURL = URL(string: privacyString),
+              privacyURL.scheme?.lowercased() == "https"
+        else {
+            throw .malformedPrivacyPolicyURL(privacyString)
+        }
+        let termsString = try readString(
+            bundle,
+            key: "CATLASER_TERMS_OF_SERVICE_URL",
+            reason: .missingTermsOfServiceURL,
+        )
+        guard let termsURL = URL(string: termsString),
+              termsURL.scheme?.lowercased() == "https"
+        else {
+            throw .malformedTermsOfServiceURL(termsString)
+        }
+        return LegalURLs(privacyPolicy: privacyURL, termsOfService: termsURL)
+    }
+}
+
+/// Public-facing legal URLs surfaced on the Settings screen. Both are
+/// required at launch — App Store Review 5.1.1 requires these links
+/// from any app that collects user data or offers account creation.
+struct LegalURLs: Sendable, Equatable {
+    let privacyPolicy: URL
+    let termsOfService: URL
 }
 
 /// Typed failure surface for ``DeploymentConfiguration/load()``.
@@ -230,6 +271,10 @@ enum DeploymentConfigurationError: Error {
     case malformedTLSPin(index: Int, value: String)
     case missingLiveKitHosts
     case missingObservabilitySalt
+    case missingPrivacyPolicyURL
+    case malformedPrivacyPolicyURL(String)
+    case missingTermsOfServiceURL
+    case malformedTermsOfServiceURL(String)
     case authConfig(AuthConfigError)
     case tlsPinInit(TLSPin.InitError)
     case tlsPinningInit(TLSPinning.InitError)

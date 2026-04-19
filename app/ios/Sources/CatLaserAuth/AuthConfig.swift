@@ -102,6 +102,17 @@ public struct AuthConfig: Sendable, Equatable {
         baseURL.appendingPathComponent("api/v1/auth/sign-out")
     }
 
+    /// Endpoint the app posts to when the user chooses "Delete
+    /// account" in Settings. Distinct from ``signOutURL`` so the two
+    /// destructive operations share no handler and a captured `out:`
+    /// signature cannot be submitted to the delete-account path (and
+    /// vice versa); the server-side gate enforces the binding tag
+    /// match. Gated by a fresh `del:` attestation signed under the
+    /// same Secure-Enclave key the session was minted against.
+    public var deleteAccountURL: URL {
+        baseURL.appendingPathComponent("api/v1/me/delete")
+    }
+
     public var magicLinkRequestURL: URL {
         baseURL.appendingPathComponent("api/v1/auth/sign-in/magic-link")
     }

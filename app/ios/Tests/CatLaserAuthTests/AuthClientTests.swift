@@ -331,6 +331,66 @@ struct AuthClientTests {
     }
 
     @Test
+    func deleteAccountSendsBearerAndAttestationHeader() async throws {
+        let (client, mock) = try makeClient(outcomes: [.response(.json([:], status: 200, token: nil))])
+        let user = AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true)
+        let session = AuthSession(
+            bearerToken: "my-token",
+            user: user,
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        try await client.deleteAccount(session: session, attestationHeader: "DEL-HDR")
+        let request = try #require(await mock.lastRequest())
+        #expect(request.url?.absoluteString == "https://auth.example/api/v1/me/delete")
+        #expect(request.method == "POST")
+        #expect(request.headers["Authorization"] == "Bearer my-token")
+        #expect(
+            request.header(DeviceAttestationEncoder.headerName) == "DEL-HDR",
+            "account deletion must carry the device attestation — a leaked bearer must not suffice",
+        )
+    }
+
+    @Test
+    func deleteAccountRejectsEmptyAttestationHeader() async throws {
+        let (client, mock) = try makeClient(outcomes: [])
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        do {
+            try await client.deleteAccount(session: session, attestationHeader: "")
+            Issue.record("expected attestationFailed")
+        } catch let AuthError.attestationFailed(msg) {
+            #expect(msg.contains("empty"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(
+            await mock.sendCount() == 0,
+            "an unsigned delete-account must never hit the wire",
+        )
+    }
+
+    @Test
+    func deleteAccountServerErrorPropagates() async throws {
+        let (client, _) = try makeClient(
+            outcomes: [.response(HTTPResponse(statusCode: 500, headers: [:], body: Data()))],
+        )
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .google,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        await #expect(throws: AuthError.serverError(status: 500, message: nil)) {
+            try await client.deleteAccount(session: session, attestationHeader: "hdr")
+        }
+    }
+
+    @Test
     func decodesRealBetterAuthResponseShape() async throws {
         // Matches the actual /sign-in/social JSON emitted by better-auth when
         // ID-token flow succeeds: flat object with redirect/token/url/user keys.

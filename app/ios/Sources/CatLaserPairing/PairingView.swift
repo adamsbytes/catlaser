@@ -412,13 +412,24 @@ public struct PairingView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(SemanticColor.textSecondary)
                     .textCase(.uppercase)
-                Text(code.deviceID)
+                // Grouped for scannability at the commit point. The
+                // accessibility label reads the raw slug so a VoiceOver
+                // user hears exactly what is printed on the device.
+                // ``textSelection`` is intentionally NOT enabled here —
+                // the rendered string contains display-only separators,
+                // so enabling selection would leak them into a user's
+                // clipboard. The Settings → Device section offers the
+                // raw slug with ``textSelection(.enabled)`` for the
+                // copy-and-paste use case.
+                Text(PairingStrings.humanizedDeviceID(code.deviceID))
                     .font(.title3.weight(.semibold).monospaced())
                     .foregroundStyle(SemanticColor.textPrimary)
-                    .textSelection(.enabled)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 8)
                     .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityLabel(Text(
+                        "\(PairingStrings.confirmDeviceIDLabel): \(code.deviceID)",
+                    ))
             }
             Text(PairingStrings.confirmSubtitle)
                 .font(.callout)

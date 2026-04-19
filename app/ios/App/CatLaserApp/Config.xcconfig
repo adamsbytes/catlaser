@@ -105,3 +105,13 @@ CATLASER_OBSERVABILITY_DEVICE_ID_SALT = PLACEHOLDER-rotate-before-ship
 // which is the right posture: a placeholder pin MUST NOT accept any
 // real CA.
 CATLASER_TLS_SPKI_SHA256_PINS = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+// Public-facing privacy policy + terms URLs. Opened with Safari
+// (SFSafariViewController-style in-app browser) from the Settings →
+// About section. Must each be an absolute https URL; validated at
+// launch by ``DeploymentConfiguration.load()``. Placeholders land
+// on ``placeholder.invalid`` so the app launches but a tap on the
+// link cannot resolve — the fail-closed posture is consistent with
+// the rest of the placeholder config.
+CATLASER_PRIVACY_POLICY_URL = https://placeholder.invalid/privacy
+CATLASER_TERMS_OF_SERVICE_URL = https://placeholder.invalid/terms

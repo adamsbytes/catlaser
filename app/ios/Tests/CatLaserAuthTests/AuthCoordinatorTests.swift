@@ -647,6 +647,155 @@ struct AuthCoordinatorTests {
         #expect(try await store.load() == nil)
     }
 
+    // MARK: - deleteAccount
+
+    @Test
+    func deleteAccountSendsSignedRequestAndWipesStore() async throws {
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 200, headers: [:], body: Data())),
+        ])
+        let client = AuthClient(
+            config: try makeConfig(),
+            http: http,
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        let session = AuthSession(
+            bearerToken: "bearer-to-delete",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let recorder = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: attestation,
+            lifecycleObservers: [recorder],
+            clock: { Date(timeIntervalSince1970: 1_700_000_000) },
+        )
+        try await coord.deleteAccount()
+        #expect(try await store.load() == nil)
+        let req = try #require(await http.lastRequest())
+        #expect(req.url?.absoluteString == "https://auth.example/api/v1/me/delete")
+        #expect(req.headers["Authorization"] == "Bearer bearer-to-delete")
+        let header = try #require(req.header(DeviceAttestationEncoder.headerName))
+        let decoded = try DeviceAttestationEncoder.decodeHeaderValue(header)
+        #expect(
+            decoded.binding == .deleteAccount(timestamp: 1_700_000_000),
+            "delete-account must carry a freshness-bound attestation under the del: tag",
+        )
+        #expect(decoded.publicKeySPKI == (try await identity.publicKeySPKI()))
+        #expect(
+            await recorder.callCount == 1,
+            "successful delete-account must notify sign-out observers",
+        )
+    }
+
+    @Test
+    func deleteAccountWithNoSessionThrowsMissingBearer() async throws {
+        // Cold cache is the one case where the app must refuse to
+        // proceed rather than prompt via the userPresence ACL — the
+        // user is mid-destructive-confirmation and an OS-level
+        // biometric prompt on top would collide with "are you sure."
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let store = InMemoryBearerTokenStore()
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: attestation,
+        )
+        await #expect(throws: AuthError.missingBearerToken) {
+            try await coord.deleteAccount()
+        }
+        #expect(await http.sendCount() == 0, "a cold-cache delete-account must not hit the wire")
+    }
+
+    @Test
+    func deleteAccountWithNoAttestationProviderThrows() async throws {
+        let http = MockHTTPClient(outcomes: [])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: nil,
+        )
+        do {
+            try await coord.deleteAccount()
+            Issue.record("expected providerUnavailable")
+        } catch let AuthError.providerUnavailable(msg) {
+            #expect(msg.lowercased().contains("delete"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(await http.sendCount() == 0)
+        #expect(
+            try await store.load() != nil,
+            "a failed delete-account must NOT wipe local state — the account still exists server-side",
+        )
+    }
+
+    @Test
+    func deleteAccountServerErrorDoesNotWipeStore() async throws {
+        // Unlike sign-out, delete-account is the one destructive call
+        // where local state MUST survive a server failure: if the
+        // server didn't actually delete the account, wiping local
+        // credentials would leave the user unable to retry without
+        // re-signing-in from scratch (and without a way to finish
+        // the deletion).
+        let http = MockHTTPClient(outcomes: [
+            .response(HTTPResponse(statusCode: 500, headers: [:], body: Data())),
+        ])
+        let client = AuthClient(config: try makeConfig(), http: http, clock: { Date() })
+        let session = AuthSession(
+            bearerToken: "t",
+            user: AuthUser(id: "u", email: nil, name: nil, image: nil, emailVerified: true),
+            provider: .apple,
+            establishedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        )
+        let store = InMemoryBearerTokenStore(initial: session)
+        let identity = SoftwareIdentityStore()
+        let attestation = try await makeAttestationProvider(identity: identity)
+        let recorder = RecordingLifecycleObserver()
+        let coord = AuthCoordinator(
+            client: client,
+            store: store,
+            appleProvider: nil,
+            googleProvider: nil,
+            attestationProvider: attestation,
+            lifecycleObservers: [recorder],
+        )
+        await #expect(throws: AuthError.serverError(status: 500, message: nil)) {
+            try await coord.deleteAccount()
+        }
+        #expect(
+            try await store.load() != nil,
+            "local credentials must survive a server-side delete failure so the user can retry",
+        )
+        #expect(
+            await recorder.callCount == 0,
+            "lifecycle observers must not fire when the deletion didn't actually land",
+        )
+    }
+
     @Test
     func googleRawNonceDiffersAcrossCalls() async throws {
         let fixedSeconds: Int64 = 1_700_000_000

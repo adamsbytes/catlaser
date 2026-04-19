@@ -85,7 +85,7 @@ public struct ScheduleView: View {
     private var content: some View {
         switch viewModel.state {
         case .idle, .loading:
-            loadingPane(label: ScheduleStrings.loadingLabel)
+            skeletonPane
         case let .loaded(draftSet, isRefreshing, isSaving):
             loadedContent(
                 draftSet: draftSet,
@@ -315,19 +315,34 @@ public struct ScheduleView: View {
         .accessibilityLabel(Text(ScheduleStrings.addButton))
     }
 
-    private func loadingPane(label: String) -> some View {
-        VStack(spacing: 16) {
-            Spacer()
-            ProgressView()
-                .scaleEffect(1.4)
-                .accessibilityLabel(Text(label))
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(SemanticColor.textSecondary)
-                .accessibilityAddTraits(.updatesFrequently)
-            Spacer()
+    /// Skeleton placeholder shown during the initial schedule fetch.
+    /// Mirrors the ``ScheduleEntryRow`` layout (time + duration +
+    /// days block on the leading edge, a toggle-shaped pill and an
+    /// edit-shaped round on the trailing edge) so the real rows land
+    /// in the same slots when the load completes. SwiftUI's
+    /// ``.redacted(reason: .placeholder)`` paints the neutral wash;
+    /// a single combined accessibility element announces the load
+    /// once instead of five times.
+    ///
+    /// A row count of five matches what a typical schedule shows on
+    /// a phone without pushing below the safe area on a Pro Max —
+    /// aligned with ``HistoryView`` using six rows for its denser
+    /// list layout.
+    private var skeletonPane: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                ForEach(0 ..< 5, id: \.self) { _ in
+                    ScheduleEntrySkeletonRow()
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .redacted(reason: .placeholder)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(Text(ScheduleStrings.skeletonAccessibility))
+            .accessibilityAddTraits(.updatesFrequently)
         }
-        .accessibilityElement(children: .combine)
+        .scrollDisabled(true)
     }
 
     private func failedPane(error: ScheduleError, onRetry: @escaping () -> Void) -> some View {
@@ -643,6 +658,45 @@ private struct ScheduleEntrySheet: View {
         }
         validationFailure = nil
         onSave(draft)
+    }
+}
+
+// MARK: - Skeleton placeholder row
+
+/// Schedule-row skeleton used during the initial load. Shape matches
+/// ``ScheduleEntryRow`` — title, duration line, days line on the
+/// leading edge; a toggle-shaped capsule and an edit-shaped round on
+/// the trailing edge — so the real rows arrive without a visible
+/// reflow. Painted in a single neutral fill; the parent applies
+/// ``.redacted(reason: .placeholder)`` so SwiftUI handles the
+/// placeholder wash.
+private struct ScheduleEntrySkeletonRow: View {
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 96, height: 20)
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 72, height: 10)
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(SemanticColor.elevatedFill)
+                    .frame(width: 150, height: 10)
+            }
+            Spacer()
+            Capsule()
+                .fill(SemanticColor.elevatedFill)
+                .frame(width: 51, height: 31)
+            Circle()
+                .fill(SemanticColor.elevatedFill)
+                .frame(width: 36, height: 36)
+        }
+        .padding(12)
+        .background(
+            SemanticColor.groupedBackground,
+            in: RoundedRectangle(cornerRadius: 16),
+        )
     }
 }
 #endif

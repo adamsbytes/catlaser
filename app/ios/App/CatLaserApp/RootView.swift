@@ -15,6 +15,7 @@ struct RootView: View {
     @Bindable var shell: AppShell
     let appVersion: String
     let buildNumber: String
+    let legalURLs: LegalURLs
 
     var body: some View {
         switch shell.phase {
@@ -31,6 +32,7 @@ struct RootView: View {
                 composition: shell.composition,
                 appVersion: appVersion,
                 buildNumber: buildNumber,
+                legalURLs: legalURLs,
             )
         }
     }

@@ -68,9 +68,22 @@ import Foundation
 ///   prevents a captured device frame from being replayed against a
 ///   coordination-server endpoint.
 ///
+/// * `.deleteAccount(timestamp:)` — placed on the `POST /api/v1/me/delete`
+///   call. Permanent account deletion is the single most destructive
+///   operation the user can take through the app; a distinct tag
+///   prevents every other captured signature (`req:`, `out:`, `api:`,
+///   etc.) from being replayable against it. Same ±60s skew as the
+///   other timestamped bindings. The server revokes the user's device
+///   ACL grants and deletes the `user` row (cascade-dropping sessions,
+///   accounts, and per-session idempotency rows) in one transaction;
+///   the coordinator wipes local Keychain state afterwards only on the
+///   success path — a network / server failure leaves the session
+///   intact so the user can retry rather than being signed out with
+///   the server copy still live.
+///
 /// Wire format: the binding renders to a tagged UTF-8 string
 /// (`"req:<ts>"`, `"ver:<token>"`, `"sis:<ts>:<rawNonce>"`,
-/// `"out:<ts>"`, `"api:<ts>"`, or `"dev:<ts>"`) that is both:
+/// `"out:<ts>"`, `"api:<ts>"`, `"dev:<ts>"`, or `"del:<ts>"`) that is both:
 ///
 /// 1. Placed on the wire under the `bnd` key of the attestation payload.
 /// 2. Appended to the 32-byte `fph` hash and fed as the ECDSA message —
@@ -87,6 +100,7 @@ public enum AttestationBinding: Sendable, Equatable {
     case signOut(timestamp: Int64)
     case api(timestamp: Int64)
     case device(timestamp: Int64)
+    case deleteAccount(timestamp: Int64)
 
     /// Upper bound on the UTF-8 size of `wireBytes`. Magic-link tokens and
     /// raw nonces are small (tens of bytes); this bound exists so a
@@ -105,6 +119,7 @@ public enum AttestationBinding: Sendable, Equatable {
         case let .signOut(timestamp): "out:\(timestamp)"
         case let .api(timestamp): "api:\(timestamp)"
         case let .device(timestamp): "dev:\(timestamp)"
+        case let .deleteAccount(timestamp): "del:\(timestamp)"
         }
     }
 
@@ -181,8 +196,16 @@ public enum AttestationBinding: Sendable, Equatable {
             }
             return .device(timestamp: parsed)
         }
+        if let ts = wireValue.prefixStrippedIfMatches("del:") {
+            guard let parsed = Int64(ts), parsed > 0, String(parsed) == ts else {
+                throw .attestationFailed(
+                    "bnd delete-account timestamp is not a positive decimal Int64",
+                )
+            }
+            return .deleteAccount(timestamp: parsed)
+        }
         throw .attestationFailed(
-            "bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', 'out:', 'api:', or 'dev:')",
+            "bnd has no recognised tag (expected 'req:', 'ver:', 'sis:', 'out:', 'api:', 'dev:', or 'del:')",
         )
     }
 }

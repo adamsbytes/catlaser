@@ -31,6 +31,46 @@ public enum PairingStrings {
     public static let confirmButton = "Pair this Catlaser"
     public static let confirmCancelButton = "Cancel"
 
+    /// Render a device identifier in a human-scannable form.
+    ///
+    /// The identifier that rides the QR is a slug drawn from
+    /// `[A-Za-z0-9_-]{1..64}` (enforced by ``PairingCode.validateDeviceID``).
+    /// Two cases, chosen by inspection:
+    ///
+    /// - If the slug already carries a structural separator (hyphen or
+    ///   underscore) the device's firmware picked a human format; we
+    ///   keep it byte-for-byte so a support ticket citing the printed
+    ///   identifier can be cross-referenced verbatim.
+    /// - Otherwise the slug is an undifferentiated alphanumeric run
+    ///   (the common factory default). A run of 8+ characters is hard
+    ///   to read aloud or compare at a glance; insert a regular space
+    ///   every four characters so the user's eye can lock onto
+    ///   four-character groups while committing to the pair. Under 8
+    ///   characters the grouping gains nothing and would just add
+    ///   visual noise.
+    ///
+    /// The inserted spaces are *display-only*. Every wire use of the
+    /// device ID (the pair-exchange body, the settings-row `LabeledRow`,
+    /// ``textSelection(.enabled)`` copy-paste) reads from the raw
+    /// ``PairingCode.deviceID`` or ``PairedDevice.id`` string and is
+    /// unaffected.
+    public static func humanizedDeviceID(_ id: String) -> String {
+        if id.contains("-") || id.contains("_") { return id }
+        guard id.count >= 8 else { return id }
+        var chunks: [String] = []
+        var remaining = Substring(id)
+        while !remaining.isEmpty {
+            let end = remaining.index(
+                remaining.startIndex,
+                offsetBy: 4,
+                limitedBy: remaining.endIndex,
+            ) ?? remaining.endIndex
+            chunks.append(String(remaining[remaining.startIndex ..< end]))
+            remaining = remaining[end...]
+        }
+        return chunks.joined(separator: " ")
+    }
+
     public static let connectionStateIdle = "Idle"
     public static let connectionStateWaitingForNetwork = "Waiting for network"
     public static let connectionStateConnected = "Connected"

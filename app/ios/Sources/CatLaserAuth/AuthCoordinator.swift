@@ -297,6 +297,57 @@ public actor AuthCoordinator {
         await notifyLifecycleObservers()
     }
 
+    /// Permanently delete the user's account on the coordination
+    /// server, then wipe every locally-persisted session artefact and
+    /// notify lifecycle observers so the host returns to sign-in.
+    ///
+    /// Differences from ``signOut``:
+    ///
+    /// * Uses the ``.deleteAccount(timestamp:)`` binding (wire tag
+    ///   ``del:``) so a captured sign-out or protected-route
+    ///   attestation cannot be replayed at the delete-account
+    ///   endpoint.
+    /// * Does NOT pre-emptively wipe local state on a failed server
+    ///   call. A network blip that fails deletion leaves the session
+    ///   intact so the user can retry — wiping credentials after a
+    ///   failed server call would leave a half-deleted state where
+    ///   the server still holds the account but the device has lost
+    ///   the credentials needed to retry.
+    /// * Refuses to proceed without a warm in-memory session cache.
+    ///   Reaching into the keychain to hydrate a cold cache would
+    ///   require the OS-level ``userPresence`` ACL prompt, which is
+    ///   the wrong UX inside an explicit destructive confirmation
+    ///   that the user just tapped through — the OS prompt would
+    ///   land on top of the confirmation and confuse "are you sure"
+    ///   with "who are you". Returning ``missingBearerToken`` tells
+    ///   the UI to unwind to sign-in first.
+    public func deleteAccount() async throws {
+        let cachedSession = await store.cachedSession()
+        guard let cachedSession else {
+            throw AuthError.missingBearerToken
+        }
+        guard let attestationProvider else {
+            throw AuthError.providerUnavailable("Delete-account provider not configured")
+        }
+        let timestamp = try plausibleRequestTimestamp()
+        let header = try await attestationProvider.currentAttestationHeader(
+            binding: .deleteAccount(timestamp: timestamp),
+        )
+        try await client.deleteAccount(session: cachedSession, attestationHeader: header)
+        // Server call landed — the account is gone. Wipe local
+        // credentials and fire the same lifecycle observers that
+        // sign-out does so the endpoint store, push registrar, and
+        // observability sink all clean up. The observer protocol has
+        // only ``sessionDidSignOut`` and ``sessionDidExpire``; treat
+        // post-delete as a sign-out for cleanup purposes since the
+        // downstream wipes (Keychain endpoint row, APNs unregister,
+        // telemetry purge) are identical. A dedicated "account
+        // deleted" hook would let observers draw a different banner,
+        // but the actual work is the same either way.
+        try await store.delete()
+        await notifyLifecycleObservers()
+    }
+
     /// Fire every registered observer in registration order. Observers
     /// cannot throw; any storage failure they encounter is their own
     /// problem to log. Sign-out itself is complete either way.

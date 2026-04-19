@@ -52,6 +52,7 @@ struct PairedShell: View {
     let composition: AppComposition
     let appVersion: String
     let buildNumber: String
+    let legalURLs: LegalURLs
 
     /// Currently-bound device client. Tracked alongside the three VMs
     /// so a reconnect-induced swap is detected by reference identity
@@ -110,6 +111,7 @@ struct PairedShell: View {
                 authCoordinator: composition.authCoordinator,
                 appVersion: appVersion,
                 buildNumber: buildNumber,
+                legalURLs: legalURLs,
             )
             .id(sessionID)
         } else {

@@ -57,6 +57,21 @@ public struct LiveView: View {
     /// interaction; cancelled on tap-to-hide and on view disappear.
     @State private var controlsHideTask: Task<Void, Never>?
 
+    /// Last-rendered frame from the previous streaming session.
+    /// Captured by ``LiveVideoView`` on dismantle and rendered as a
+    /// blurred backdrop on ``disconnectedContent`` so the user sees
+    /// where the feed left off instead of a blank slate while
+    /// re-dialling. Scoped to the ``LiveView`` instance — switching
+    /// tabs preserves it (TabView keeps subviews alive), but a full
+    /// shell rebuild (sign-out, re-pair) tears the ``LiveView`` down
+    /// along with the poster. Kept in ``@State`` rather than on the
+    /// VM because the capture type (``UIImage``) is UIKit-only and
+    /// the VM is cross-platform; the image never leaves the view
+    /// layer and never touches disk.
+    #if canImport(UIKit) && !os(watchOS)
+    @State private var lastPoster: UIImage?
+    #endif
+
     /// Inactivity window before the Stop-button chrome auto-hides.
     /// Three seconds matches the pattern AVKit, Photos, and Home use
     /// for their full-screen video surfaces — long enough to press,
@@ -140,38 +155,74 @@ public struct LiveView: View {
     }
 
     private var disconnectedContent: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "video.slash")
-                .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.white.opacity(0.7))
-                .accessibilityDecorativeIcon()
-            Text(LiveViewStrings.disconnectedTitle)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-                .accessibilityHeader()
-            Text(disconnectedSubtitle)
-                .font(.callout)
-                .foregroundStyle(.white.opacity(0.75))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
-            Button {
-                Haptics.commit.play()
-                Task { await viewModel.start() }
-            } label: {
-                Text(LiveViewStrings.watchLiveButton)
-                    .font(.body.weight(.semibold))
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
-                    .background(SemanticColor.accent)
+        ZStack {
+            posterBackdrop
+            VStack(spacing: 16) {
+                Image(systemName: "video.slash")
+                    .font(.system(size: 48, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .accessibilityDecorativeIcon()
+                Text(LiveViewStrings.disconnectedTitle)
+                    .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
-                    .clipShape(Capsule())
+                    .accessibilityHeader()
+                Text(disconnectedSubtitle)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                Button {
+                    Haptics.commit.play()
+                    Task { await viewModel.start() }
+                } label: {
+                    Text(LiveViewStrings.watchLiveButton)
+                        .font(.body.weight(.semibold))
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(SemanticColor.accent)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityID(.liveWatchButton)
+                .accessibilityLabel(Text(LiveViewStrings.watchLiveButton))
             }
-            .buttonStyle(.plain)
-            .accessibilityID(.liveWatchButton)
-            .accessibilityLabel(Text(LiveViewStrings.watchLiveButton))
+            .frame(maxWidth: 420)
+            .padding()
         }
-        .frame(maxWidth: 420)
-        .padding()
+    }
+
+    /// Blurred last-seen-frame backdrop rendered behind the
+    /// ``disconnectedContent`` VStack. Uses the ``lastPoster`` cached
+    /// on ``@State`` — captured by ``LiveVideoView`` on the previous
+    /// stream's dismantle. When no poster exists yet (first Live tab
+    /// visit this session, or after a shell rebuild) the backdrop is
+    /// an empty view so the parent ``backgroundView`` (solid black)
+    /// shows through unchanged.
+    ///
+    /// The blur + dark scrim is deliberately heavy: the source frame
+    /// may contain people or interior detail we do not want to render
+    /// as a legible photograph on the lock screen of a shared device.
+    /// A 32-pt blur plus a 45% black scrim reduces the image to a
+    /// tonal field — the user reads "that was your living room" from
+    /// the dominant colour, not from any identifiable feature.
+    @ViewBuilder
+    private var posterBackdrop: some View {
+        #if canImport(UIKit) && !os(watchOS)
+        if let poster = lastPoster {
+            Image(uiImage: poster)
+                .resizable()
+                .scaledToFill()
+                .blur(radius: 32)
+                .overlay(Color.black.opacity(0.45))
+                .ignoresSafeArea()
+                .accessibilityHidden(true)
+        } else {
+            EmptyView()
+        }
+        #else
+        EmptyView()
+        #endif
     }
 
     /// Subtitle shown on the disconnected pane. Normally reads the
@@ -233,6 +284,19 @@ public struct LiveView: View {
     @ViewBuilder
     private func streamingContent(track: any LiveVideoTrackHandle) -> some View {
         ZStack(alignment: .top) {
+            #if canImport(UIKit) && !os(watchOS)
+            LiveVideoView(
+                track: track,
+                posterSink: { image in lastPoster = image },
+            )
+            .ignoresSafeArea()
+            .accessibilityID(.liveVideo)
+            .accessibilityLabel(Text(LiveViewStrings.videoAccessibilityLabel))
+            .accessibilityAddTraits(.updatesFrequently)
+            .accessibilityIgnoresInvertColors(true)
+            .contentShape(Rectangle())
+            .onTapGesture { toggleControls() }
+            #else
             LiveVideoView(track: track)
                 .ignoresSafeArea()
                 .accessibilityID(.liveVideo)
@@ -241,6 +305,7 @@ public struct LiveView: View {
                 .accessibilityIgnoresInvertColors(true)
                 .contentShape(Rectangle())
                 .onTapGesture { toggleControls() }
+            #endif
 
             if controlsVisible || voiceOverEnabled {
                 overlayChrome

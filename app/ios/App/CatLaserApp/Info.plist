@@ -106,5 +106,9 @@
 	<string>$(CATLASER_OBSERVABILITY_DEVICE_ID_SALT)</string>
 	<key>CATLASER_TLS_SPKI_SHA256_PINS</key>
 	<string>$(CATLASER_TLS_SPKI_SHA256_PINS)</string>
+	<key>CATLASER_PRIVACY_POLICY_URL</key>
+	<string>$(CATLASER_PRIVACY_POLICY_URL)</string>
+	<key>CATLASER_TERMS_OF_SERVICE_URL</key>
+	<string>$(CATLASER_TERMS_OF_SERVICE_URL)</string>
 </dict>
 </plist>

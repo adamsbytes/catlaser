@@ -32,6 +32,14 @@ final class AppState {
     private(set) var appVersion: String = "0.0.0"
     private(set) var buildNumber: String = "0"
 
+    /// Cached legal-URL pair, surfaced on the Settings screen. Loaded
+    /// once at bootstrap alongside the deployment config; a
+    /// malformed entry is fatal at launch via the same
+    /// ``preconditionFailure`` path that guards the network-facing
+    /// config, so a running process is guaranteed to have usable
+    /// legal links.
+    private(set) var legalURLs: LegalURLs?
+
     /// True once ``bootstrapIfNeeded()`` has produced a composition.
     private(set) var isBootstrapped: Bool = false
 
@@ -64,6 +72,22 @@ final class AppState {
                 "DeploymentConfiguration.load() failed: \(String(describing: error))",
             )
         }
+
+        let legal: LegalURLs
+        do {
+            legal = try DeploymentConfiguration.legalURLs()
+        } catch {
+            // Same fail-loud posture as the network-facing config —
+            // App Store Review rejects any build whose privacy or
+            // terms link 404s, so a missing/malformed URL at launch
+            // is a release-blocker and must be surfaced immediately,
+            // not papered over with a "Privacy policy unavailable"
+            // row that would pass review and then break post-submit.
+            preconditionFailure(
+                "DeploymentConfiguration.legalURLs() failed: \(String(describing: error))",
+            )
+        }
+        legalURLs = legal
 
         let builtComposition = await AppComposition.production(config: config)
         let builtPushVM = await builtComposition.pushViewModel()

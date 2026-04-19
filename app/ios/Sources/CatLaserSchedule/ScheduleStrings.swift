@@ -73,6 +73,12 @@ public enum ScheduleStrings {
         comment: "Spinner label shown while the schedule loads from the device.",
     )
 
+    public static let skeletonAccessibility = NSLocalizedString(
+        "schedule.loading.skeleton",
+        value: "Loading your schedule",
+        comment: "VoiceOver announcement while the schedule skeleton placeholder is visible.",
+    )
+
     public static let savingLabel = NSLocalizedString(
         "schedule.saving",
         value: "Saving schedule…",

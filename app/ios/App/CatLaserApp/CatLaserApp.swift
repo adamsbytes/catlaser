@@ -61,11 +61,12 @@ private struct AppRoot: View {
 
     var body: some View {
         Group {
-            if let shell = appState.shell {
+            if let shell = appState.shell, let legal = appState.legalURLs {
                 RootView(
                     shell: shell,
                     appVersion: appState.appVersion,
                     buildNumber: appState.buildNumber,
+                    legalURLs: legal,
                 )
             } else {
                 LaunchPlaceholder()

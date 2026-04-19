@@ -27,6 +27,13 @@ enum SettingsStrings {
     // MARK: - Notifications section
 
     static let notificationsSection = "Notifications"
+    static let notificationsRowLabel = "Push notifications"
+    static let notificationsStatusOn = "On"
+    static let notificationsStatusOff = "Off"
+    static let notificationsStatusConfiguring = "Setting up…"
+    static let notificationsStatusDenied = "Denied"
+    static let notificationsStatusNeedsAttention = "Needs attention"
+    static let notificationsScreenTitle = "Push notifications"
 
     // MARK: - Device section
 
@@ -47,6 +54,41 @@ enum SettingsStrings {
     static let aboutSection = "About"
     static let versionLabel = "Version"
     static let buildLabel = "Build"
+    static let privacyPolicyRow = "Privacy policy"
+    static let termsOfServiceRow = "Terms of service"
+
+    // MARK: - Delete account dialog
+
+    static let deleteAccountButton = "Delete account"
+    static let confirmDeleteAccountTitle = "Delete your account?"
+    static let confirmDeleteAccountMessage =
+        "Your sessions, cat profiles, schedule, and pairings will be permanently removed from the server. This can't be undone."
+    static let confirmDeleteAccountAction = "Delete account"
+    static let deleteAccountErrorTitle = "Couldn't delete account"
+    static let deleteAccountErrorOK = "OK"
+
+    /// Map an error thrown by ``AuthCoordinator/deleteAccount`` into a
+    /// user-presentable sentence. Mirrors ``signOutErrorMessage(for:)``
+    /// — typed ``AuthError`` cases route through the sign-in copy so
+    /// the wording stays consistent; everything else falls back to a
+    /// generic safe message so the alert never leaks raw error
+    /// descriptions (OSStatus codes, server messages, provider stack
+    /// fragments — developer artefacts that belong in logs, not UI).
+    static func deleteAccountErrorMessage(for error: Error) -> String {
+        if let authError = error as? AuthError {
+            return SignInStrings.message(for: authError)
+        }
+        return deleteAccountGenericFallback
+    }
+
+    /// Fallback shown when the error thrown by ``deleteAccount`` is
+    /// not an ``AuthError``. Unlike sign-out, delete-account does NOT
+    /// wipe local state when the server call fails — the account
+    /// still exists on the server and a half-deleted local state
+    /// would be worse than the error. This copy tells the user the
+    /// operation did not complete and they can try again.
+    private static let deleteAccountGenericFallback =
+        "We couldn't reach the server to delete your account. Try again in a moment."
 
     // MARK: - Confirm-unpair dialog
 

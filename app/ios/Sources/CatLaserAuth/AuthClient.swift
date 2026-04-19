@@ -242,6 +242,41 @@ public struct AuthClient: Sendable {
         }
     }
 
+    /// Permanently delete the user account on the coordination server.
+    /// The server revokes every device ACL grant for this user and
+    /// drops the ``user`` row in one transaction; cascade FKs clear
+    /// sessions, accounts, session-attestation rows, and per-session
+    /// idempotency records.
+    ///
+    /// Like ``signOut``, the call carries the bearer token plus a
+    /// dedicated ``x-device-attestation`` header signed with the
+    /// ``del:<unix_seconds>`` binding tag. A captured sign-out or
+    /// protected-route attestation cannot be replayed here because
+    /// the server-side gate enforces a tag match, and an empty /
+    /// missing attestation header is refused locally before the
+    /// request hits the wire so a misconfigured call never spends
+    /// a signing operation on an unusable round-trip.
+    public func deleteAccount(
+        session: AuthSession,
+        attestationHeader: String,
+    ) async throws {
+        guard !attestationHeader.isEmpty else {
+            throw AuthError.attestationFailed("empty attestation header")
+        }
+        var request = URLRequest(url: config.deleteAccountURL)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(session.bearerToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(attestationHeader, forHTTPHeaderField: DeviceAttestationEncoder.headerName)
+        let response = try await http.send(request)
+        guard (200 ..< 300).contains(response.statusCode) else {
+            throw AuthError.serverError(
+                status: response.statusCode,
+                message: extractMessage(from: response),
+            )
+        }
+    }
+
     private func parseSocialSuccess(
         _ response: HTTPResponse,
         provider: SocialProvider,

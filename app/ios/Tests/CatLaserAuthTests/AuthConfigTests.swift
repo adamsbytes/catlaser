@@ -112,6 +112,15 @@ struct AuthConfigTests {
     }
 
     @Test
+    func deleteAccountURLIsCorrect() throws {
+        let c = try config()
+        #expect(
+            c.deleteAccountURL.absoluteString
+                == "https://auth.catlaser.example/api/v1/me/delete",
+        )
+    }
+
+    @Test
     func acceptsUppercaseHTTPSScheme() throws {
         let c = try config(baseURL: URL(string: "HTTPS://auth.example")!)
         #expect(c.baseURL.absoluteString == "HTTPS://auth.example")

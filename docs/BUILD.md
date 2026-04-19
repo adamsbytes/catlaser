@@ -111,6 +111,8 @@ Before any build handed to a real user (TestFlight, App Store, side-loaded beta)
 - `CATLASER_LIVEKIT_HOSTS` — comma-separated hostnames of the operator-run LiveKit deployment. A `StreamOffer` whose URL host is not in this set is refused before the LiveKit SDK ever sees it.
 - `CATLASER_OBSERVABILITY_DEVICE_ID_SALT` — fresh 32-byte random string. Rotating it is a backwards-incompatible change (existing installs read as new devices afterwards).
 - `CATLASER_TLS_SPKI_SHA256_PINS` — comma-separated, base64-encoded SHA-256 digests of the `SubjectPublicKeyInfo` of each pinned certificate. Compute with: `openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64`. Pin intermediate CA(s) with one or more offline backup pins per RFC 7469.
+- `CATLASER_PRIVACY_POLICY_URL` — absolute `https://` URL of the privacy policy linked from Settings → About. App Store Review 5.1.1 rejects submissions whose in-app privacy link 404s; validate before every archive.
+- `CATLASER_TERMS_OF_SERVICE_URL` — absolute `https://` URL of the terms of service linked from Settings → About.
 
 Entitlements also need attention on the first real build:
 
