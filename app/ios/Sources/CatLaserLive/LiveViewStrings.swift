@@ -101,8 +101,13 @@ public enum LiveViewStrings {
     /// Render a `LiveViewError` into a human-readable message.
     public static func message(for error: LiveViewError) -> String {
         switch error {
-        case let .deviceError(_, message):
-            return message.isEmpty ? deviceGenericMessage : message
+        case .deviceError:
+            // The device-side message is a developer artefact — it
+            // may carry internal Python tracebacks or protocol-level
+            // diagnostic text the user has no use for. Surface the
+            // stable generic copy and rely on observability for the
+            // server-supplied detail.
+            return deviceGenericMessage
         case .streamOfferMissing:
             return NSLocalizedString(
                 "live.error.offer_missing",

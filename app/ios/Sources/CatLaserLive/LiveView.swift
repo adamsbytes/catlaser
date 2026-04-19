@@ -243,10 +243,20 @@ public struct LiveView: View {
                     .scaleEffect(1.4)
                     .tint(.white)
                     .accessibilityLabel(Text(loadingLabel))
+                // ``id(loadingLabel)`` forces SwiftUI to treat the
+                // text as a fresh view when the label changes
+                // (``requestingOffer`` → ``connecting``), so the
+                // parent's animation crossfades between the two
+                // phases. Without this the label string would silently
+                // replace in place and a user staring at a slow
+                // handshake would have no visual signal that the
+                // phase advanced.
                 Text(loadingLabel)
                     .font(.callout)
                     .foregroundStyle(.white.opacity(0.85))
                     .accessibilityAddTraits(.updatesFrequently)
+                    .id(loadingLabel)
+                    .transition(.opacity)
             }
             .accessibilityElement(children: .combine)
 

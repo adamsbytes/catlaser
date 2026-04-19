@@ -37,10 +37,47 @@ public enum ScheduleStrings {
         comment: "Toolbar button that commits the draft schedule to the device.",
     )
 
-    public static let discardButton = NSLocalizedString(
-        "schedule.discard",
+    /// Toolbar leading-button label. Reads "Cancel" rather than
+    /// "Discard changes" because the confirmation dialog presented on
+    /// tap is what surfaces the destructive intent — using the
+    /// system-conventional "Cancel" here matches every other modal /
+    /// edit-mode surface in the app and keeps the toolbar paired with
+    /// "Save" in the way users expect.
+    public static let cancelButton = NSLocalizedString(
+        "schedule.cancel",
+        value: "Cancel",
+        comment: "Toolbar leading button that, after confirmation, reverts the draft schedule to the server baseline.",
+    )
+
+    /// Localised "discard" verb used as the row-level VoiceOver label
+    /// for the toolbar Cancel button — the rendered text reads
+    /// "Cancel" but the assistive label spells out the destructive
+    /// intent so screen-reader users understand what activating the
+    /// button will do.
+    public static let cancelButtonAccessibilityLabel = NSLocalizedString(
+        "schedule.cancel.accessibility",
+        value: "Cancel and discard changes",
+        comment: "VoiceOver label for the toolbar Cancel button that reverts the draft schedule.",
+    )
+
+    /// Destructive confirmation title presented when the user taps the
+    /// toolbar leading button with pending edits in flight.
+    public static let discardConfirmTitle = NSLocalizedString(
+        "schedule.discard.confirm.title",
+        value: "Discard schedule changes?",
+        comment: "Confirmation dialog title before reverting an unsaved schedule draft.",
+    )
+
+    public static let discardConfirmMessage = NSLocalizedString(
+        "schedule.discard.confirm.message",
+        value: "Your unsaved edits will be lost.",
+        comment: "Confirmation dialog message before reverting an unsaved schedule draft.",
+    )
+
+    public static let discardConfirmAction = NSLocalizedString(
+        "schedule.discard.confirm.action",
         value: "Discard changes",
-        comment: "Toolbar button that reverts the draft schedule to the server baseline.",
+        comment: "Destructive button that confirms reverting the draft schedule.",
     )
 
     public static let refreshButton = NSLocalizedString(
@@ -107,7 +144,7 @@ public enum ScheduleStrings {
 
     public static let alwaysOnHint = NSLocalizedString(
         "schedule.footnote.always_on",
-        value: "No windows set — the device may play whenever it detects your cat.",
+        value: "No windows set. Your Catlaser will play whenever it detects your cat — add a window to limit it to specific times.",
         comment: "Explanatory footnote shown when no schedule entries exist.",
     )
 
@@ -141,6 +178,24 @@ public enum ScheduleStrings {
         "schedule.sheet.delete",
         value: "Delete window",
         comment: "Destructive button on the entry sheet.",
+    )
+
+    public static let entrySheetDeleteConfirmTitle = NSLocalizedString(
+        "schedule.sheet.delete.confirm.title",
+        value: "Delete this schedule window?",
+        comment: "Confirmation dialog title before deleting a schedule entry from the entry sheet.",
+    )
+
+    public static let entrySheetDeleteConfirmMessage = NSLocalizedString(
+        "schedule.sheet.delete.confirm.message",
+        value: "The window will be removed from your draft. Hit Save to make the change permanent.",
+        comment: "Confirmation dialog message before deleting a schedule entry from the entry sheet.",
+    )
+
+    public static let entrySheetDeleteConfirmAction = NSLocalizedString(
+        "schedule.sheet.delete.confirm.action",
+        value: "Delete window",
+        comment: "Destructive button that confirms deleting a schedule entry from the entry sheet.",
     )
 
     public static let entrySheetStartLabel = NSLocalizedString(
@@ -330,8 +385,13 @@ public enum ScheduleStrings {
                 value: "The device didn't respond in time. Refresh to make sure your changes saved.",
                 comment: "Error shown when a request timed out — the write may still have landed.",
             )
-        case let .deviceError(_, message):
-            return message.isEmpty ? genericDeviceMessage : message
+        case .deviceError:
+            // The device-side message is a developer artefact — it
+            // may carry internal Python tracebacks or protocol-level
+            // diagnostic text the user has no use for. Surface the
+            // stable generic copy and rely on observability for the
+            // server-supplied detail.
+            return genericDeviceMessage
         case .wrongEventKind:
             return NSLocalizedString(
                 "schedule.error.protocol",

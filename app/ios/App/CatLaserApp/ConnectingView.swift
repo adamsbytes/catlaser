@@ -22,6 +22,15 @@ struct ConnectingView: View {
     let connectionState: ConnectionState
     let onUnpair: () -> Void
 
+    /// Drives the destructive confirmation dialog. The Unpair button
+    /// on this screen is reachable while the supervisor is mid-
+    /// connect; users frustrated by a slow handshake have been
+    /// observed to tap Unpair impulsively. The dialog matches the
+    /// pattern Settings uses (``SettingsView.confirmUnpair``) so the
+    /// destructive verb is gated by an explicit second confirmation
+    /// regardless of which surface the user reached it from.
+    @State private var confirmUnpair = false
+
     var body: some View {
         ZStack {
             SemanticColor.background.ignoresSafeArea()
@@ -48,7 +57,9 @@ struct ConnectingView: View {
                         .accessibilityHidden(true)
                 }
                 Spacer()
-                Button(action: onUnpair) {
+                Button {
+                    confirmUnpair = true
+                } label: {
                     Text(PairingStrings.unpairButton)
                         .font(.body.weight(.semibold))
                         .padding(.horizontal, 20)
@@ -58,7 +69,21 @@ struct ConnectingView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.bottom, 24)
+                .accessibilityLabel(Text(PairingStrings.unpairButton))
             }
+        }
+        .confirmationDialog(
+            SettingsStrings.confirmUnpairTitle,
+            isPresented: $confirmUnpair,
+            titleVisibility: .visible,
+        ) {
+            Button(SettingsStrings.confirmUnpairAction, role: .destructive) {
+                Haptics.warning.play()
+                onUnpair()
+            }
+            Button(SettingsStrings.cancelButton, role: .cancel) {}
+        } message: {
+            Text(SettingsStrings.confirmUnpairMessage)
         }
     }
 

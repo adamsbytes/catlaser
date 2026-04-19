@@ -143,20 +143,25 @@ public enum PairingStrings {
         }
     }
 
+    /// Render a `PairingError` as a user-facing sentence.
+    ///
+    /// Associated string values (server messages, OSStatus codes,
+    /// transport diagnostics, attestation reasons) are deliberately
+    /// not interpolated into the result — they are developer artefacts
+    /// that belong in logs, not banners. The caller renders only the
+    /// stable category copy; observability surfaces the underlying
+    /// reason through structured logging.
     public static func errorMessage(for error: PairingError) -> String {
         switch error {
         case let .invalidCode(reason):
             return invalidCodeMessage(reason)
         case .missingSession:
             return "You're signed out. Sign back in to pair a Catlaser."
-        case let .sessionExpired(message):
+        case .sessionExpired:
             // Distinct from `.missingSession`: the user has a stored
             // session but the server rejected it. The remediation is a
             // fresh sign-in — the pairing itself is intact and the UI
             // must not imply the Catlaser has been un-paired.
-            if let message, !message.isEmpty {
-                return "Your sign-in session ended. Sign in again to continue. (\(message))"
-            }
             return "Your sign-in session ended. Sign in again to continue."
         case .codeAlreadyUsed:
             return "This pairing code has already been used. Generate a new QR on the Catlaser and try again."
@@ -164,24 +169,24 @@ public enum PairingStrings {
             return "This pairing code has expired. Generate a new QR on the Catlaser and try again."
         case .codeNotFound:
             return "The server didn't recognise this pairing code. Generate a new QR on the Catlaser."
-        case let .rateLimited(message):
-            if let message, !message.isEmpty {
-                return "Too many attempts. \(message)"
-            }
+        case .rateLimited:
             return "Too many attempts. Wait a minute and try again."
-        case let .serverError(status, message):
-            if let message, !message.isEmpty {
-                return "Server error (\(status)): \(message)"
-            }
-            return "Server error (\(status)). Try again in a moment."
-        case let .network(message):
-            return "Network failure: \(message)"
-        case let .invalidServerResponse(message):
-            return "Unexpected server response: \(message)"
-        case let .storage(message):
-            return "Couldn't save pairing: \(message)"
-        case let .attestation(message):
-            return "Device attestation failed: \(message)"
+        case let .serverError(status, _):
+            // 5xx is a service-side problem the user cannot fix; 4xx
+            // that reaches this fallback is a request the server
+            // rejected outright. Two stable buckets, no interpolated
+            // server text.
+            return status >= 500
+                ? "Our service is having trouble right now. Please try again in a moment."
+                : "The server rejected that request. Please try again."
+        case .network:
+            return "We couldn't reach the network. Check your connection and try again."
+        case .invalidServerResponse:
+            return "The server returned an unexpected response. Please try again."
+        case .storage:
+            return "Couldn't save the pairing on this device. Please try again."
+        case .attestation:
+            return "This device couldn't be verified. Restart the app and try again."
         case .authRevoked:
             return "Your access to this Catlaser was revoked. Pair again to reconnect."
         }

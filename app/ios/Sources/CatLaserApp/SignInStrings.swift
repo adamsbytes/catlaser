@@ -31,7 +31,7 @@ public enum SignInStrings {
     public static let emailFieldLabel = "Email"
     public static let emailFieldPlaceholder = "you@example.com"
     public static let emailSendButton = "Send sign-in link"
-    public static let emailSendingButton = "Sending..."
+    public static let emailSendingButton = "Sending…"
     public static let emailInvalid = "Enter a valid email address."
     public static let emailSentTitle = "Check your email"
     public static let emailSentHint =

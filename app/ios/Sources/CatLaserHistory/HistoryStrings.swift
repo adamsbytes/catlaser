@@ -68,6 +68,12 @@ public enum HistoryStrings {
         comment: "Row action that removes a cat profile from the device.",
     )
 
+    public static let catRowTapHint = NSLocalizedString(
+        "history.cats.row.tap_hint",
+        value: "Opens the edit sheet",
+        comment: "VoiceOver hint announced after a cat row's label, describing what tapping the row does.",
+    )
+
     public static let catRowDeleteConfirmTitle = NSLocalizedString(
         "history.cats.delete.title",
         value: "Remove this cat?",
@@ -238,8 +244,13 @@ public enum HistoryStrings {
                 value: "The device didn't respond in time. Please try again.",
                 comment: "Error shown when a request timed out.",
             )
-        case let .deviceError(_, message):
-            return message.isEmpty ? deviceGenericMessage : message
+        case .deviceError:
+            // The device-side message is a developer artefact — it
+            // may carry internal Python tracebacks or protocol-level
+            // diagnostic text the user has no use for. Surface the
+            // stable generic copy and rely on observability for the
+            // server-supplied detail.
+            return deviceGenericMessage
         case .notFound:
             return NSLocalizedString(
                 "history.error.not_found",

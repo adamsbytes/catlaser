@@ -14,6 +14,18 @@ import SwiftUI
 public struct ScheduleView: View {
     @Bindable private var viewModel: ScheduleViewModel
     @State private var editingEntryID: String?
+    /// Identifies the entry minted by the most recent ``addEntry`` tap
+    /// while its sheet is still on-screen. Drives the entry-sheet title
+    /// switch ("New window" vs "Edit window") so a user who just
+    /// pressed "+ Add time" reads the correct verb at the top of the
+    /// sheet. Cleared when the sheet dismisses (Save, Delete, Cancel,
+    /// or interactive swipe-down).
+    @State private var recentlyAddedEntryID: String?
+    /// Drives the destructive confirmation dialog presented when the
+    /// user taps the toolbar Cancel button with pending edits in
+    /// flight. The dialog itself owns the rollback — the button only
+    /// flips this flag.
+    @State private var confirmDiscard = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var errorFocus: Bool
 
@@ -57,17 +69,41 @@ public struct ScheduleView: View {
         .sheet(item: editingEntryBinding) { entry in
             ScheduleEntrySheet(
                 entry: entry,
+                isNewEntry: entry.id == recentlyAddedEntryID,
                 onSave: { updated in
                     viewModel.updateEntry(updated)
-                    editingEntryID = nil
+                    dismissSheet()
                 },
                 onDelete: {
                     viewModel.deleteEntry(id: entry.id)
-                    editingEntryID = nil
+                    dismissSheet()
                 },
-                onCancel: { editingEntryID = nil },
+                onCancel: { dismissSheet() },
             )
         }
+        .confirmationDialog(
+            ScheduleStrings.discardConfirmTitle,
+            isPresented: $confirmDiscard,
+            titleVisibility: .visible,
+        ) {
+            Button(ScheduleStrings.discardConfirmAction, role: .destructive) {
+                Haptics.warning.play()
+                viewModel.discardChanges()
+            }
+            Button(ScheduleStrings.cancelButton, role: .cancel) {}
+        } message: {
+            Text(ScheduleStrings.discardConfirmMessage)
+        }
+    }
+
+    /// Clear the per-sheet bookkeeping state in lockstep so a Save,
+    /// Delete, Cancel, or interactive swipe-down all leave the view in
+    /// the same shape — no orphaned ``recentlyAddedEntryID`` that would
+    /// flip the next sheet open against an existing row into a "New
+    /// window" title.
+    private func dismissSheet() {
+        editingEntryID = nil
+        recentlyAddedEntryID = nil
     }
 
     /// Projection of the `isSaving` flag so ``onChange`` has a simple
@@ -121,11 +157,16 @@ public struct ScheduleView: View {
         isSaving: Bool,
     ) -> some View {
         HStack(spacing: 12) {
+            // Convention-matching "Cancel" rather than "Discard
+            // changes" — the destructive intent is surfaced by the
+            // ``confirmDiscard`` dialog the tap presents, not by the
+            // button label. Keeps the toolbar paired with "Save" the
+            // way every other modal / edit-mode surface in the app
+            // does.
             Button {
-                Haptics.warning.play()
-                viewModel.discardChanges()
+                confirmDiscard = true
             } label: {
-                Text(ScheduleStrings.discardButton)
+                Text(ScheduleStrings.cancelButton)
                     .font(.callout.weight(.semibold))
             }
             .buttonStyle(.plain)
@@ -136,7 +177,7 @@ public struct ScheduleView: View {
                     : SemanticColor.textTertiary,
             )
             .accessibilityID(.scheduleDiscardButton)
-            .accessibilityLabel(Text(ScheduleStrings.discardButton))
+            .accessibilityLabel(Text(ScheduleStrings.cancelButtonAccessibilityLabel))
             Spacer()
             Button {
                 Task { await viewModel.refresh() }
@@ -295,6 +336,10 @@ public struct ScheduleView: View {
     private func addBar(isSaving: Bool) -> some View {
         Button {
             if let newID = viewModel.addEntry() {
+                // Track the freshly-minted id so the entry sheet titles
+                // itself "New window" rather than "Edit window" until
+                // the user dismisses it.
+                recentlyAddedEntryID = newID
                 editingEntryID = newID
             }
         } label: {
@@ -423,7 +468,18 @@ public struct ScheduleView: View {
                 return draftSet.entries.first { $0.id == id }
             },
             set: { newValue in
-                editingEntryID = newValue?.id
+                // Interactive swipe-down lands here with `nil`. Route
+                // it through ``dismissSheet`` so the per-sheet
+                // bookkeeping (``recentlyAddedEntryID``) is cleared in
+                // the same way Save/Delete/Cancel clear it. A non-nil
+                // write is structurally unreachable for a binding we
+                // own (SwiftUI only writes nil for dismissal); fall
+                // through to ``editingEntryID`` for that case.
+                if newValue == nil {
+                    dismissSheet()
+                } else {
+                    editingEntryID = newValue?.id
+                }
             },
         )
     }
@@ -459,6 +515,14 @@ private struct ScheduleEntryRow: View {
                             : SemanticColor.textTertiary,
                     )
             }
+            // The text-stack reads as a single label; combining it into
+            // the row's leading element lets VoiceOver announce the
+            // entry's identity once before it reaches the toggle and
+            // edit button. The interactive controls below stay
+            // independent so screen-reader users can activate them
+            // directly via the rotor or a swipe.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(Text(rowSummary))
             Spacer()
             // Disable the toggle while a save is in flight so a rapid
             // second tap cannot race the first commit. The VM's own
@@ -475,10 +539,10 @@ private struct ScheduleEntryRow: View {
             .tint(SemanticColor.accent)
             .disabled(isSaving)
             .accessibilityID(.scheduleEntryToggle)
-            .accessibilityLabel(Text(ScheduleStrings.entrySheetEnabledLabel))
+            .accessibilityLabel(Text("\(ScheduleStrings.entrySheetEnabledLabel), \(rowSummary)"))
             Button(action: onEdit) {
                 Image(systemName: "pencil")
-                    .accessibilityLabel(Text(ScheduleStrings.entrySheetEditTitle))
+                    .accessibilityLabel(Text("\(ScheduleStrings.entrySheetEditTitle), \(rowSummary)"))
             }
             .buttonStyle(.plain)
             .padding(10)
@@ -493,7 +557,22 @@ private struct ScheduleEntryRow: View {
             in: RoundedRectangle(cornerRadius: 16),
         )
         .accessibilityID(.scheduleEntryRow)
-        .accessibilityElement(children: .combine)
+        // No outer ``.accessibilityElement(children: .combine)``: a
+        // VoiceOver user must be able to focus and activate the toggle
+        // and the edit button independently, the way they would on
+        // any native list row.
+    }
+
+    /// Summary string ("8:00 AM, every day, 15m") used as a contextual
+    /// suffix on the toggle and edit-button labels, and as the label
+    /// of the combined leading text element. Lets a VoiceOver user
+    /// know which row they are currently inspecting without having to
+    /// re-read the static control labels.
+    private var rowSummary: String {
+        let time = ScheduleStrings.timeOfDay(minute: entry.startMinute)
+        let days = ScheduleStrings.daysSummary(entry.days)
+        let duration = ScheduleStrings.durationLabel(minutes: entry.durationMinutes)
+        return "\(time), \(days), \(duration)"
     }
 }
 
@@ -501,20 +580,34 @@ private struct ScheduleEntryRow: View {
 
 private struct ScheduleEntrySheet: View {
     let entry: ScheduleEntryDraft
+    /// True iff the entry was minted by the most-recent
+    /// ``addEntry`` tap. Selects the sheet title between
+    /// ``entrySheetAddTitle`` ("New window") and
+    /// ``entrySheetEditTitle`` ("Edit window") — a user who just
+    /// pressed "+ Add time" must read the correct verb at the top of
+    /// the sheet.
+    let isNewEntry: Bool
     let onSave: (ScheduleEntryDraft) -> Void
     let onDelete: () -> Void
     let onCancel: () -> Void
 
     @State private var draft: ScheduleEntryDraft
     @State private var validationFailure: ScheduleValidation.Failure?
+    /// Drives the destructive confirmation dialog presented when the
+    /// user taps the in-sheet Delete button. Matches the pattern every
+    /// other destructive surface in the app uses (cat delete, unpair,
+    /// sign out, delete account, toolbar Discard).
+    @State private var confirmDelete = false
 
     init(
         entry: ScheduleEntryDraft,
+        isNewEntry: Bool,
         onSave: @escaping (ScheduleEntryDraft) -> Void,
         onDelete: @escaping () -> Void,
         onCancel: @escaping () -> Void,
     ) {
         self.entry = entry
+        self.isNewEntry = isNewEntry
         self.onSave = onSave
         self.onDelete = onDelete
         self.onCancel = onCancel
@@ -545,15 +638,31 @@ private struct ScheduleEntrySheet: View {
                 }
                 Section {
                     Button(role: .destructive) {
-                        Haptics.warning.play()
-                        onDelete()
+                        confirmDelete = true
                     } label: {
                         Text(ScheduleStrings.entrySheetDeleteButton)
                     }
                     .accessibilityID(.scheduleEntrySheetDelete)
                 }
             }
-            .navigationTitle(ScheduleStrings.entrySheetEditTitle)
+            .confirmationDialog(
+                ScheduleStrings.entrySheetDeleteConfirmTitle,
+                isPresented: $confirmDelete,
+                titleVisibility: .visible,
+            ) {
+                Button(ScheduleStrings.entrySheetDeleteConfirmAction, role: .destructive) {
+                    Haptics.warning.play()
+                    onDelete()
+                }
+                Button(ScheduleStrings.entrySheetCancel, role: .cancel) {}
+            } message: {
+                Text(ScheduleStrings.entrySheetDeleteConfirmMessage)
+            }
+            .navigationTitle(
+                isNewEntry
+                    ? ScheduleStrings.entrySheetAddTitle
+                    : ScheduleStrings.entrySheetEditTitle,
+            )
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -580,12 +689,15 @@ private struct ScheduleEntrySheet: View {
                 }
         }
         // Entry sheet has a time picker, a stepper, seven day toggles,
-        // and an enabled switch. ``.large`` is the default because all
-        // those rows together push past ``.medium``; ``.medium`` is
-        // still offered so a user editing one specific field can
-        // collapse the sheet without dismissing.
+        // an enabled switch, an optional validation row, and a
+        // destructive Delete button — every layout pushes past
+        // ``.medium`` on every iPhone, so opening at ``.medium`` would
+        // show a clipped form and force the user to drag up before
+        // they could reach the bottom controls. ``.large`` only.
+        // The drag indicator stays visible so swipe-down still reads
+        // as a dismiss affordance.
         #if os(iOS)
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         #endif
     }

@@ -39,6 +39,9 @@ struct HistoryStringsTests {
                  let .transportFailure(reason):
                 #expect(!message.contains(reason),
                         "user-facing message must not echo developer reason: \(message)")
+            case let .deviceError(_, deviceMessage) where !deviceMessage.isEmpty:
+                #expect(!message.contains(deviceMessage),
+                        "user-facing message must not echo device-side message: \(message)")
             default:
                 break
             }
@@ -46,15 +49,18 @@ struct HistoryStringsTests {
     }
 
     @Test
-    func deviceErrorMessageSurfacesServerStringWhenPresent() {
-        // Server-supplied messages on typed device errors are
-        // surfaced verbatim — the device handler is the policy
-        // owner. An empty message falls back to the generic.
-        let withMessage = HistoryStrings.message(for: .deviceError(code: 9, message: "something"))
+    func deviceErrorMessageNeverLeaksServerString() {
+        // The device-side message is a developer artefact (Python
+        // traceback fragments, protocol diagnostics). The screen always
+        // surfaces the stable generic copy regardless of whether a
+        // message was supplied — the device handler is NOT a presentation
+        // policy owner.
+        let withMessage = HistoryStrings.message(for: .deviceError(code: 9, message: "internal: foo"))
         let withoutMessage = HistoryStrings.message(for: .deviceError(code: 9, message: ""))
-        #expect(withMessage == "something")
-        #expect(!withoutMessage.isEmpty)
-        #expect(withMessage != withoutMessage)
+        #expect(withMessage == withoutMessage)
+        #expect(!withMessage.contains("internal"))
+        #expect(!withMessage.contains("foo"))
+        #expect(!withMessage.isEmpty)
     }
 
     @Test

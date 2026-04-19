@@ -43,9 +43,16 @@ struct ConnectionStatusPill: View {
                 .accessibilityAddTraits(.updatesFrequently)
             }
         }
+        // Animate on the visual category (``Kind``), NOT on the rendered
+        // label. Keying on the label would crossfade the pill on every
+        // attempt-counter increment ("Reconnecting (attempt 2)…" →
+        // "Reconnecting (attempt 3)…"), producing a visible tick on
+        // every supervisor backoff retry that the situation does not
+        // warrant. Keying on the kind means the pill only animates when
+        // it actually appears, disappears, or shifts category.
         .animation(
             CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
-            value: visibleStatus?.label,
+            value: visibleStatus?.kind,
         )
     }
 
@@ -63,24 +70,28 @@ struct ConnectionStatusPill: View {
             nil
         case .waitingForNetwork:
             Status(
+                kind: .waitingForNetwork,
                 label: PairingStrings.connectionStateWaitingForNetwork,
                 tint: SemanticColor.warning,
                 accessibilityLabel: PairingStrings.pillAccessibilityWaitingForNetwork,
             )
         case let .connecting(attempt):
             Status(
+                kind: .connecting,
                 label: PairingStrings.pillConnectingLabel(attempt: attempt),
                 tint: SemanticColor.warning,
                 accessibilityLabel: PairingStrings.pillAccessibilityConnecting,
             )
         case .backingOff:
             Status(
+                kind: .backingOff,
                 label: PairingStrings.connectionStateBackingOff,
                 tint: SemanticColor.warning,
                 accessibilityLabel: PairingStrings.pillAccessibilityReconnecting,
             )
         case let .failed(error):
             Status(
+                kind: .failed,
                 label: PairingStrings.pillDisconnected,
                 tint: SemanticColor.destructive,
                 accessibilityLabel:
@@ -89,7 +100,20 @@ struct ConnectionStatusPill: View {
         }
     }
 
+    /// Stable visual category for the pill. The animation modifier
+    /// keys on this so a counter change inside ``connecting`` /
+    /// ``backingOff`` does not trigger a crossfade — only a true
+    /// category transition (or the pill appearing / disappearing
+    /// entirely) does.
+    private enum Kind: Equatable {
+        case waitingForNetwork
+        case connecting
+        case backingOff
+        case failed
+    }
+
     private struct Status {
+        let kind: Kind
         let label: String
         let tint: Color
         let accessibilityLabel: String

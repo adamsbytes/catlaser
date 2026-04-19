@@ -193,7 +193,6 @@ public struct HistoryView: View {
                 CatProfileRow(
                     profile: profile,
                     onEdit: { editingProfile = profile },
-                    onDelete: { pendingDeletion = profile },
                 )
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
@@ -273,15 +272,23 @@ public struct HistoryView: View {
         } else {
             profiles = []
         }
-        return ScrollView {
-            VStack(spacing: 12) {
-                ForEach(sessions, id: \.sessionID) { session in
-                    PlaySessionRow(session: session, profiles: profiles)
-                }
+        // Native ``List`` (matching ``catsList``) so pull-to-refresh
+        // engages the system-standard rubberband behaviour and the
+        // refresh trigger threshold is consistent across both panes.
+        // Plain style + cleared row chrome preserves the previous
+        // card-on-background look; ``scrollContentBackground(.hidden)``
+        // lets the parent's ``SemanticColor.background`` show through.
+        return List {
+            ForEach(sessions, id: \.sessionID) { session in
+                PlaySessionRow(session: session, profiles: profiles)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(SemanticColor.background)
         .overlay(alignment: .top) {
             if isRefreshing {
                 ProgressView()
@@ -408,7 +415,6 @@ public struct HistoryView: View {
 private struct CatProfileRow: View {
     let profile: Catlaser_App_V1_CatProfile
     let onEdit: () -> Void
-    let onDelete: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -431,35 +437,29 @@ private struct CatProfileRow: View {
                 .foregroundStyle(SemanticColor.textSecondary)
             }
             Spacer()
-            VStack(spacing: 8) {
-                Button(HistoryStrings.catRowEditButton, action: onEdit)
-                    .font(.caption.weight(.semibold))
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(SemanticColor.accent.opacity(0.85), in: Capsule())
-                    .foregroundStyle(.white)
-                    .accessibilityID(.historyCatEdit)
-                    .accessibilityLabel(
-                        Text("\(HistoryStrings.catRowEditButton) \(profile.name)"),
-                    )
-                Button(HistoryStrings.catRowDeleteButton, role: .destructive, action: onDelete)
-                    .font(.caption.weight(.semibold))
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(SemanticColor.elevatedFill, in: Capsule())
-                    .foregroundStyle(SemanticColor.destructive)
-                    .accessibilityID(.historyCatDelete)
-                    .accessibilityLabel(
-                        Text("\(HistoryStrings.catRowDeleteButton) \(profile.name)"),
-                    )
-            }
+            // Subtle chevron echoes Mail / Reminders / Contacts —
+            // signals that the row is interactive without consuming
+            // horizontal space the way the previous inline button
+            // pair did, and stays consistent with the system
+            // convention "tap drills in, swipe acts."
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(SemanticColor.textTertiary)
+                .accessibilityHidden(true)
         }
         .padding(12)
         .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 16))
+        // ``contentShape`` makes the entire card tappable so the user
+        // can hit any pixel of the row — not just the text — to open
+        // the edit sheet. The destructive Delete and the Edit actions
+        // both remain available via the parent's ``swipeActions``,
+        // matching the iOS-native row-action convention.
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .onTapGesture(perform: onEdit)
         .accessibilityID(.historyCatRow)
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(Text(HistoryStrings.catRowTapHint))
     }
 }
 
@@ -782,14 +782,12 @@ private struct CatProfileSkeletonRow: View {
                     .frame(width: 180, height: 10)
             }
             Spacer()
-            VStack(spacing: 8) {
-                Capsule()
-                    .fill(SemanticColor.elevatedFill)
-                    .frame(width: 56, height: 22)
-                Capsule()
-                    .fill(SemanticColor.elevatedFill)
-                    .frame(width: 56, height: 22)
-            }
+            // Match the live row's trailing chevron so the real row
+            // lands without a layout shift on the trailing edge when
+            // the load completes.
+            RoundedRectangle(cornerRadius: 2)
+                .fill(SemanticColor.elevatedFill)
+                .frame(width: 8, height: 14)
         }
         .padding(12)
         .background(

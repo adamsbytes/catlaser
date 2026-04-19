@@ -51,8 +51,6 @@ public enum AccessibilityID: String, Sendable, Hashable, CaseIterable {
     case historyPaneSegment = "history.segment.pane"
     case historyCatRow = "history.row.cat"
     case historySessionRow = "history.row.session"
-    case historyCatEdit = "history.button.catEdit"
-    case historyCatDelete = "history.button.catDelete"
     case historyEditNameField = "history.field.editName"
     case historyEditSave = "history.button.editSave"
     case historyEditCancel = "history.button.editCancel"
