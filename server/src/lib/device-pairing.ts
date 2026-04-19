@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { and, eq, isNull, lt, ne, sql } from 'drizzle-orm';
-import { devicePairingCode } from '~/db/schema.ts';
+import { device, devicePairingCode } from '~/db/schema.ts';
 import { db } from '~/lib/db.ts';
 import { loadSessionSpki, publishPairGrant } from '~/lib/device-acl.ts';
 
@@ -486,12 +486,21 @@ export const issuePairingCode = async (
 
 /**
  * Resolved device endpoint returned to a paired caller.
+ *
+ * `publicKeyEd25519` is the base64url-no-pad raw Ed25519 public key
+ * from the `device` row (published at factory provisioning). The iOS
+ * app persists this alongside the endpoint and uses it to verify
+ * every `AuthResponse` signature the device emits during the TCP
+ * handshake — without it, an impostor TCP listener at the Tailscale
+ * address could accept connections that the app then treats as
+ * legitimate.
  */
 export interface PairedDeviceRecord {
   readonly deviceId: string;
   readonly deviceName: string | null;
   readonly host: string;
   readonly port: number;
+  readonly publicKeyEd25519: string;
 }
 
 /**
@@ -562,6 +571,27 @@ interface ClaimedRow {
 }
 
 /**
+ * Look up the Ed25519 public key published for `deviceSlug` at
+ * factory provisioning. A pairing-code row carries the slug but not
+ * the key — every slug seen by `exchangePairingCode` /
+ * `listPairedDevicesForUser` is expected to have a matching `device`
+ * row, because the device's own pairing-code issuance is gated on
+ * its Ed25519 identity being registered via `/provision`. A missing
+ * row here is an inconsistent fleet state, not a regular
+ * user-visible failure; we return null and let the caller collapse
+ * it into a not-found equivalent rather than leak which half of the
+ * invariant was violated.
+ */
+const loadDevicePublicKey = async (deviceSlug: string): Promise<string | null> => {
+  const rows = await db
+    .select({ publicKeyEd25519: device.publicKeyEd25519 })
+    .from(device)
+    .where(eq(device.slug, deviceSlug))
+    .limit(1);
+  return rows[0]?.publicKeyEd25519 ?? null;
+};
+
+/**
  * Transaction body for the atomic pair-claim. Isolated in its own
  * function so `exchangePairingCode` stays simple and this function
  * has a single, unambiguous pair of return paths (the matched-claim
@@ -628,6 +658,38 @@ const runClaimTransaction = async (
   return row;
 };
 
+/**
+ * Shape a `ClaimedRow` into the success outcome by joining against
+ * the `device` table for the Ed25519 public key. Extracted so
+ * `exchangePairingCode` keeps a low cyclomatic complexity — the
+ * additional pubkey-lookup branch would otherwise push the main
+ * entry point past the codebase's 10-branch lint ceiling.
+ */
+const buildOkOutcome = async (claimed: ClaimedRow): Promise<ExchangeOutcome> => {
+  const publicKeyEd25519 = await loadDevicePublicKey(claimed.deviceId);
+  if (publicKeyEd25519 === null) {
+    // Pairing-code row exists but the `device` row it points to has
+    // no Ed25519 key. Unreachable in practice: every slug that ever
+    // minted a pairing code did so through the /:slug/pairing-code
+    // endpoint, which requires `/provision` to have published the
+    // key. Collapse to not_found rather than surface the
+    // inconsistency to the caller — the caller will prompt the user
+    // to rescan, and on the next attempt the fleet-operator tooling
+    // will have re-run provisioning.
+    return { kind: 'not_found' };
+  }
+  return {
+    kind: 'ok',
+    device: {
+      deviceId: claimed.deviceId,
+      deviceName: claimed.deviceName,
+      host: claimed.tailscaleHost,
+      port: claimed.tailscalePort,
+      publicKeyEd25519,
+    },
+  };
+};
+
 export const exchangePairingCode = async (
   input: ExchangePairingCodeInput,
 ): Promise<ExchangeOutcome> => {
@@ -671,15 +733,7 @@ export const exchangePairingCode = async (
   );
 
   if (claimed !== null) {
-    return {
-      kind: 'ok',
-      device: {
-        deviceId: claimed.deviceId,
-        deviceName: claimed.deviceName,
-        host: claimed.tailscaleHost,
-        port: claimed.tailscalePort,
-      },
-    };
+    return await buildOkOutcome(claimed);
   }
 
   const existing = await db
@@ -723,6 +777,7 @@ export interface ActivePairedDevice {
   readonly host: string;
   readonly port: number;
   readonly pairedAt: Date;
+  readonly publicKeyEd25519: string;
 }
 
 /**
@@ -743,6 +798,13 @@ export interface ActivePairedDevice {
 export const listPairedDevicesForUser = async (
   userId: string,
 ): Promise<readonly ActivePairedDevice[]> => {
+  // INNER JOIN on `device.slug = device_pairing_code.device_id` so
+  // every returned row carries its Ed25519 public key. A device that
+  // has a pairing-code row but no provisioning row is filtered out
+  // rather than surfaced with a missing key — the iOS app refuses to
+  // consume a paired-device entry that cannot verify the device's
+  // AuthResponse, so returning such a row would be worse than
+  // omission (the app would wipe the cached endpoint on next launch).
   const rows = await db
     .select({
       deviceId: devicePairingCode.deviceId,
@@ -750,8 +812,10 @@ export const listPairedDevicesForUser = async (
       tailscaleHost: devicePairingCode.tailscaleHost,
       tailscalePort: devicePairingCode.tailscalePort,
       claimedAt: devicePairingCode.claimedAt,
+      publicKeyEd25519: device.publicKeyEd25519,
     })
     .from(devicePairingCode)
+    .innerJoin(device, eq(device.slug, devicePairingCode.deviceId))
     .where(
       and(
         eq(devicePairingCode.claimedByUserId, userId),
@@ -771,6 +835,7 @@ export const listPairedDevicesForUser = async (
       // assert here rather than threading a narrowed type out of the
       // query.
       pairedAt: row.claimedAt ?? new Date(0),
+      publicKeyEd25519: row.publicKeyEd25519,
     }),
   );
 };

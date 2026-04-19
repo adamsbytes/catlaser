@@ -169,6 +169,11 @@ const pairHandler: IdempotentRouteHandler = async (request, session) => {
         device_name: outcome.device.deviceName,
         host: outcome.device.host,
         port: outcome.device.port,
+        // Ed25519 public key the device signs AuthResponse with.
+        // Emitted as base64url-no-pad — the exact shape the iOS
+        // verifier's `Curve25519.Signing.PublicKey(rawRepresentation:)`
+        // expects after url-safe decoding.
+        device_public_key: outcome.device.publicKeyEd25519,
       });
     case 'not_found':
       return errorResponse(
@@ -268,12 +273,16 @@ export const DEVICES_PAIRED_PATH = '/api/v1/devices/paired';
 const pairedListHandler: AttestedRouteHandler = async (_request, session) => {
   const devices = await listPairedDevicesForUser(session.user.id);
   return successResponse({
-    devices: devices.map((device) => ({
-      device_id: device.deviceId,
-      device_name: device.deviceName,
-      host: device.host,
-      port: device.port,
-      paired_at: device.pairedAt.toISOString(),
+    devices: devices.map((paired) => ({
+      device_id: paired.deviceId,
+      device_name: paired.deviceName,
+      host: paired.host,
+      port: paired.port,
+      paired_at: paired.pairedAt.toISOString(),
+      // Ed25519 public key used to verify the device's AuthResponse
+      // signatures on every TCP handshake. Same shape as the pair
+      // endpoint emits.
+      device_public_key: paired.publicKeyEd25519,
     })),
   });
 };

@@ -19,6 +19,7 @@ import {
 import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
+import { seedProvisionedDevice } from './support/signed-device-attestation.ts';
 
 /**
  * End-to-end coverage for the ownership-re-verification endpoint,
@@ -69,6 +70,7 @@ const listResponseShape = z.object({
         host: z.string().min(1),
         port: z.number().int().positive(),
         paired_at: z.string().min(1),
+        device_public_key: z.string().min(1),
       }),
     ),
   }),
@@ -284,18 +286,30 @@ describe('GET /api/v1/devices/paired', () => {
       host: string;
       port: number;
     }> = {},
-  ): Promise<{ readonly code: string; readonly deviceId: string }> => {
+  ): Promise<{
+    readonly code: string;
+    readonly deviceId: string;
+    readonly publicKeyBase64Url: string;
+  }> => {
     const code = overrides.code ?? randomPairingCode();
     const deviceId = overrides.deviceId ?? randomDeviceId();
+    const host = overrides.host ?? '100.64.0.42';
+    const port = overrides.port ?? 9820;
+    const identity = await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: host,
+      tailscalePort: port,
+      ...(overrides.deviceName === undefined ? {} : { deviceName: overrides.deviceName }),
+    });
     const { codeHash } = await issuePairingCode({
       code,
       deviceId,
-      tailscaleHost: overrides.host ?? '100.64.0.42',
-      tailscalePort: overrides.port ?? 9820,
+      tailscaleHost: host,
+      tailscalePort: port,
       ...(overrides.deviceName === undefined ? {} : { deviceName: overrides.deviceName }),
     });
     seededHashes.push(codeHash);
-    return { code, deviceId };
+    return { code, deviceId, publicKeyBase64Url: identity.publicKeyBase64Url };
   };
 
   beforeAll(async () => {
@@ -333,7 +347,7 @@ describe('GET /api/v1/devices/paired', () => {
   });
 
   test('single pair shows up on the claimant with endpoint details', async () => {
-    const { code, deviceId } = await seedIssuance({
+    const { code, deviceId, publicKeyBase64Url } = await seedIssuance({
       deviceName: 'Living Room',
       host: '100.64.0.42',
       port: 9820,
@@ -355,6 +369,10 @@ describe('GET /api/v1/devices/paired', () => {
     expect(device.port).toBe(9820);
     expect(typeof device.paired_at).toBe('string');
     expect(Date.parse(device.paired_at)).not.toBeNaN();
+    // The device_public_key is the same Ed25519 pubkey that was
+    // published at provisioning time; the iOS verifier uses this
+    // key to check every AuthResponse signature on the TCP channel.
+    expect(device.device_public_key).toBe(publicKeyBase64Url);
   });
 
   test("a different user sees an empty list for another user's pairing", async () => {
@@ -377,6 +395,14 @@ describe('GET /api/v1/devices/paired', () => {
     await pairAs(alice, { code: codeA, deviceId });
 
     const codeB = randomPairingCode();
+    // Re-provisioning the device updates the `device` row's host
+    // in place (idempotent-on-slug upsert). The pairing-code row
+    // then carries the new endpoint too so Bob's claim returns it.
+    await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: '100.64.0.43',
+      tailscalePort: 9820,
+    });
     const { codeHash: codeBHash } = await issuePairingCode({
       code: codeB,
       deviceId,
@@ -426,6 +452,11 @@ describe('GET /api/v1/devices/paired', () => {
     await pairAs(alice, { code: codeA, deviceId });
 
     const codeB = randomPairingCode();
+    await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: '100.64.1.11',
+      tailscalePort: 9820,
+    });
     const { codeHash: codeBHash } = await issuePairingCode({
       code: codeB,
       deviceId,

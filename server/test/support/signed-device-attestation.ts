@@ -6,6 +6,7 @@ import {
   DEVICE_TIMESTAMP_HEADER,
   buildDeviceSignedBytes,
 } from '~/lib/device-attestation.ts';
+import { provisionDevice } from '~/lib/device-provisioning.ts';
 
 /**
  * Test fixture for the Ed25519 device-identity key. Parallels
@@ -54,6 +55,30 @@ export const createTestDeviceIdentity = (): TestDeviceIdentity => {
     publicKeyRaw: rawKey,
     publicKeyBase64Url: toBase64Url(rawKey),
   };
+};
+
+/**
+ * Provision a fresh device row under a random Ed25519 key and
+ * return the corresponding identity. Every test that mints a
+ * pairing code and later claims it must ensure a matching `device`
+ * row exists so the pair-exchange handler can emit the
+ * `device_public_key` field the iOS client requires.
+ */
+export const seedProvisionedDevice = async (input: {
+  readonly slug: string;
+  readonly tailscaleHost: string;
+  readonly tailscalePort: number;
+  readonly deviceName?: string | null;
+}): Promise<TestDeviceIdentity> => {
+  const identity = createTestDeviceIdentity();
+  await provisionDevice({
+    slug: input.slug,
+    publicKeyEd25519: identity.publicKeyBase64Url,
+    tailscaleHost: input.tailscaleHost,
+    tailscalePort: input.tailscalePort,
+    deviceName: input.deviceName ?? null,
+  });
+  return identity;
 };
 
 export interface DeviceAttestationHeaderInput {

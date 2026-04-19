@@ -149,6 +149,12 @@ message UnregisterPushTokenRequest {
 // against the `fph` hash + `bnd` bytes, and then checks the signer's
 // SPKI (from `pk`) against its cached ACL of authorized users.
 //
+// `nonce` is a fresh 16-byte value generated per-connection by the
+// app. The device echoes it verbatim in the signed AuthResponse so
+// the app can verify liveness — a captured AuthResponse cannot be
+// replayed against a new AuthRequest that carries a different
+// nonce.
+//
 // The device emits exactly one AuthResponse back to confirm accept
 // or reject. On reject, the device closes the connection; on
 // accept, normal request-response traffic follows.
@@ -157,16 +163,50 @@ message AuthRequest {
   // The exact v4 wire format the app emits elsewhere, reused here
   // so the device needs only one attestation parser.
   string attestation_header = 1;
+  // 16-byte random challenge. Echoed verbatim in AuthResponse and
+  // covered by the Ed25519 signature. Shorter or longer values
+  // cause the device to reject the handshake.
+  bytes nonce = 2;
 }
 
 // Device's reply to an AuthRequest. Emitted once per handshake. On
 // `ok=false`, the device closes the connection after sending this
 // frame so the app can surface the specific reason.
+//
+// The device proves its identity by signing a canonical transcript
+// with its Ed25519 private key (the key that was published to the
+// coordination server at provisioning time and returned to the app
+// inside the pair/paired response as `device_public_key`). The
+// transcript is the byte concatenation:
+//
+//   b"catlaser-auth-response-v1\0"  // 26-byte domain separator
+//   || nonce                        // 16 bytes, echoed from request
+//   || u64_le(signed_at_unix_ns)    // little-endian int64
+//   || ok_byte                      // 0x01 if ok else 0x00
+//   || reason_utf8                  // variable-length UTF-8
+//
+// The app refuses any AuthResponse whose signature does not verify,
+// whose nonce does not match the request, or whose `signed_at_unix_ns`
+// falls outside a ±5 minute skew window. A captured-and-replayed
+// AuthResponse fails the nonce check (app's new nonce was not the
+// signed one). A signature from the wrong key fails verification.
+// Only a live device holding the published private key can pass.
 message AuthResponse {
   bool ok = 1;
   // Machine-readable reason when `ok=false`. Mirrors the
   // `DEVICE_AUTH_*` strings defined by the Python handshake module.
   string reason = 2;
+  // Echoed challenge from AuthRequest.nonce. Must equal the value
+  // the app sent, byte-for-byte, or the app rejects with
+  // `DEVICE_AUTH_NONCE_MISMATCH`.
+  bytes nonce = 3;
+  // Ed25519 signature (64 bytes) over the transcript above.
+  bytes signature = 4;
+  // Device's wall-clock reading at signing time, nanoseconds since
+  // Unix epoch. Covered by the signature; the app enforces a
+  // ±5-minute skew window to defeat long-lived replay of a past
+  // valid AuthResponse against a future captured nonce.
+  int64 signed_at_unix_ns = 5;
 }
 
 // Envelope for all app-to-device commands. Sent over WebRTC data channel or

@@ -20,6 +20,7 @@ import { handle } from '~/server.ts';
 import { uniqueClientIpHeader } from './support/client-ip.ts';
 import type { TestDeviceKey } from './support/signed-attestation.ts';
 import { buildSignedAttestationHeader, createTestDeviceKey } from './support/signed-attestation.ts';
+import { seedProvisionedDevice } from './support/signed-device-attestation.ts';
 
 /**
  * End-to-end coverage for the coordination server's device-pairing
@@ -277,11 +278,19 @@ describe('device pairing: happy path + replay', () => {
   ): Promise<SeededPairingCode> => {
     const code = overrides.code ?? randomPairingCode();
     const deviceId = overrides.deviceId ?? randomDeviceId();
+    const host = overrides.host ?? '100.64.0.42';
+    const port = overrides.port ?? 9820;
+    await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: host,
+      tailscalePort: port,
+      ...(overrides.deviceName === undefined ? {} : { deviceName: overrides.deviceName }),
+    });
     const issuance = {
       code,
       deviceId,
-      tailscaleHost: overrides.host ?? '100.64.0.42',
-      tailscalePort: overrides.port ?? 9820,
+      tailscaleHost: host,
+      tailscalePort: port,
       ...(overrides.deviceName === undefined ? {} : { deviceName: overrides.deviceName }),
       ...(overrides.expiresAt === undefined ? {} : { expiresAt: overrides.expiresAt }),
       ...(overrides.createdAt === undefined ? {} : { createdAt: overrides.createdAt }),
@@ -482,11 +491,18 @@ describe('device pairing: exchange failures', () => {
   ): Promise<SeededPairingCode> => {
     const code = overrides.code ?? randomPairingCode();
     const deviceId = overrides.deviceId ?? randomDeviceId();
+    const host = overrides.host ?? '100.64.0.42';
+    const port = overrides.port ?? 9820;
+    await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: host,
+      tailscalePort: port,
+    });
     const issuance = {
       code,
       deviceId,
-      tailscaleHost: overrides.host ?? '100.64.0.42',
-      tailscalePort: overrides.port ?? 9820,
+      tailscaleHost: host,
+      tailscalePort: port,
       ...(overrides.expiresAt === undefined ? {} : { expiresAt: overrides.expiresAt }),
     };
     const { codeHash } = await issuePairingCode(issuance);
@@ -851,6 +867,11 @@ describe('device pairing: attestation and idempotency gate ordering', () => {
   const seed = async (): Promise<SeededPairingCode> => {
     const code = randomPairingCode();
     const deviceId = randomDeviceId();
+    await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: '100.64.0.42',
+      tailscalePort: 9820,
+    });
     const { codeHash } = await issuePairingCode({
       code,
       deviceId,
@@ -1056,6 +1077,11 @@ describe('device pairing: user deletion cascades claimed_by_user_id → null, pr
 
     const code = randomPairingCode();
     const deviceId = randomDeviceId();
+    await seedProvisionedDevice({
+      slug: deviceId,
+      tailscaleHost: '100.64.0.42',
+      tailscalePort: 9820,
+    });
     const { codeHash } = await issuePairingCode({
       code,
       deviceId,
