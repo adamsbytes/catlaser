@@ -1,3 +1,8 @@
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 import CatLaserProto
 import Foundation
 import SwiftProtobuf
@@ -46,16 +51,29 @@ public actor DeviceClient {
     /// must not capture non-Sendable state.
     public typealias AttestationBuilder = @Sendable () async throws -> String
 
+    /// Generator for the 16-byte nonce included in every
+    /// ``AuthRequest``. Defaults to cryptographic-random bytes; the
+    /// test-only override in ``DeviceClient.init(..., nonceFactory:)``
+    /// lets tests feed deterministic values so transcripts are
+    /// predictable.
+    public typealias NonceFactory = @Sendable () -> Data
+
     /// Default per-request timeout. The wire protocol is request/response
     /// over a healthy Tailscale link; real responses are sub-second.
     /// 10 seconds gives room for transient RTT spikes without stalling
     /// the UI indefinitely when the server drops a request on the floor.
     public static let defaultRequestTimeout: TimeInterval = 10
 
+    /// Byte length of the handshake nonce. Must match the device's
+    /// :data:`catlaser_brain.auth.handshake_response.NONCE_LENGTH`.
+    public static let handshakeNonceLength = 16
+
     private let transport: any DeviceTransport
     private let idFactory: AppRequestIDFactory
     private let requestTimeout: TimeInterval
     private let clock: ClientClock
+    private let nonceFactory: NonceFactory
+    private let responseVerifier: HandshakeResponseVerifier?
 
     private enum State {
         case idle
@@ -93,17 +111,34 @@ public actor DeviceClient {
         idFactory: AppRequestIDFactory = AppRequestIDFactory(),
         requestTimeout: TimeInterval = DeviceClient.defaultRequestTimeout,
         clock: @escaping ClientClock = { Date() },
+        responseVerifier: HandshakeResponseVerifier? = nil,
+        nonceFactory: @escaping NonceFactory = DeviceClient.defaultNonceFactory,
     ) {
         self.transport = transport
         self.idFactory = idFactory
         self.requestTimeout = requestTimeout
         self.clock = clock
+        self.responseVerifier = responseVerifier
+        self.nonceFactory = nonceFactory
 
         var captured: AsyncStream<Catlaser_App_V1_DeviceEvent>.Continuation!
         self.eventStream = AsyncStream(bufferingPolicy: .unbounded) { continuation in
             captured = continuation
         }
         self.eventContinuation = captured
+    }
+
+    /// Production nonce source — 16 bytes from
+    /// ``SystemRandomNumberGenerator``. Exposed as a static member
+    /// so tests that want the production generator alongside an
+    /// override (e.g. a test that stubs one nonce then lets the
+    /// rest flow normally) can reference it directly.
+    public static let defaultNonceFactory: NonceFactory = {
+        var bytes = [UInt8](repeating: 0, count: DeviceClient.handshakeNonceLength)
+        for i in 0 ..< bytes.count {
+            bytes[i] = UInt8.random(in: 0 ... .max)
+        }
+        return Data(bytes)
     }
 
     /// Unsolicited device events — heartbeats, session summaries,
@@ -195,8 +230,19 @@ public actor DeviceClient {
                 reason: "attestation build failed: \(error.localizedDescription)",
             )
         }
+        // Generate a fresh 16-byte nonce for this handshake. Held
+        // locally so ``verifyResponse`` (below) can pass the exact
+        // bytes to ``HandshakeResponseVerifier.verify`` — the device
+        // echoes them in its reply, and a mismatch aborts the
+        // session before any application frame reaches the wire.
+        let nonce = nonceFactory()
+        precondition(
+            nonce.count == DeviceClient.handshakeNonceLength,
+            "nonceFactory must return exactly \(DeviceClient.handshakeNonceLength) bytes",
+        )
         var authRequest = Catlaser_App_V1_AppRequest()
         authRequest.auth.attestationHeader = header
+        authRequest.auth.nonce = nonce
         let event: Catlaser_App_V1_DeviceEvent
         do {
             // Use the internal send path rather than the public
@@ -228,6 +274,33 @@ public actor DeviceClient {
             throw DeviceClientError.handshakeFailed(
                 reason: "handshake reply was not AuthResponse (got \(String(describing: event.event)))",
             )
+        }
+
+        // VERIFY the device-side signature BEFORE trusting `ok`. A
+        // forged AuthResponse with `ok=true` from an impostor at the
+        // Tailscale endpoint cannot produce a signature that
+        // validates against the paired device's public key. If the
+        // caller did not wire a verifier (legacy test transport, or
+        // the one-shot in-memory path), the signature field is
+        // skipped — production callers always supply one. Verifying
+        // on the reject path too guards against an impostor that
+        // forged `ok=false` to trick the client into tearing down a
+        // legitimate session; only a signed `ok=false` from the real
+        // device is honoured as terminal.
+        if let verifier = responseVerifier {
+            do {
+                try verifier.verify(
+                    response: response,
+                    expectedNonce: nonce,
+                    now: clock(),
+                )
+            } catch let error as DeviceClientError {
+                await shutdownForHandshakeFailure()
+                throw error
+            } catch {
+                await shutdownForHandshakeFailure()
+                throw DeviceClientError.handshakeSignatureInvalid
+            }
         }
         if !response.ok {
             await shutdownForHandshakeFailure()

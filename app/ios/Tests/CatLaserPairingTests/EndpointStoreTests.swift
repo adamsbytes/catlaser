@@ -12,6 +12,7 @@ struct EndpointStoreTests {
             name: "Kitchen",
             endpoint: try DeviceEndpoint(host: "100.64.1.7", port: 9820),
             pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: Data(repeating: 0x42, count: 32),
         )
     }
 

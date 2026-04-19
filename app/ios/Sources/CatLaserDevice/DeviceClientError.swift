@@ -51,6 +51,26 @@ public enum DeviceClientError: Error, Equatable, Sendable {
     case wrongEventKind(expected: String, got: String)
     case handshakeFailed(reason: String)
     case authRevoked(message: String)
+    /// The device's AuthResponse carried a `nonce` that did not
+    /// match the 16 bytes the app sent in its AuthRequest. A live
+    /// device echoes the challenge verbatim; a mismatch means an
+    /// impostor replayed a signature captured from a previous
+    /// exchange — the only defence is to tear the connection down.
+    /// Treated as terminal-retry (reconnect-with-backoff): the next
+    /// attempt uses a fresh nonce that the attacker cannot have
+    /// anticipated.
+    case handshakeNonceMismatch
+    /// The device's AuthResponse verified structurally but the
+    /// `signed_at_unix_ns` timestamp was outside the ±5-minute
+    /// acceptance window. Defends against long-lived replay of a
+    /// captured AuthResponse against a nonce collision.
+    case handshakeSkewExceeded
+    /// The device's Ed25519 signature over the AuthResponse
+    /// transcript failed to verify against the public key the
+    /// coordination server published at pairing time. An impostor
+    /// at the Tailscale endpoint; tear the connection down and do
+    /// NOT retry against the same endpoint without re-pairing.
+    case handshakeSignatureInvalid
 
     /// Server-side ``DeviceError.code`` value the device daemon emits
     /// on the last frame of an ACL-revoked session, mirroring

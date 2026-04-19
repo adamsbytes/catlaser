@@ -9,6 +9,17 @@ import Testing
 @Suite("PairingViewModel", .serialized)
 @MainActor
 struct PairingViewModelTests {
+    /// Test pairing fixture's Ed25519 pubkey. The bytes are
+    /// deterministic (0x42 × 32) and the base64url-no-pad encoding
+    /// is what `PairingClient`/`PairedDevicesClient` expect on the
+    /// wire.
+    private static let testPublicKey = Data(repeating: 0x42, count: 32)
+    private static let testPublicKeyB64URL = testPublicKey
+        .base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+
     private func makeEndpoint() throws -> DeviceEndpoint {
         try DeviceEndpoint(host: "100.64.1.7", port: 9820)
     }
@@ -19,6 +30,7 @@ struct PairingViewModelTests {
             name: "Kitchen",
             endpoint: try makeEndpoint(),
             pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: Self.testPublicKey,
         )
     }
 
@@ -155,6 +167,7 @@ struct PairingViewModelTests {
             "device_name": "Kitchen",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -214,6 +227,7 @@ struct PairingViewModelTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -255,6 +269,7 @@ struct PairingViewModelTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -287,6 +302,7 @@ struct PairingViewModelTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -316,6 +332,7 @@ struct PairingViewModelTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -382,6 +399,7 @@ struct PairingViewModelTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -462,6 +480,7 @@ struct PairingViewModelTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.testPublicKeyB64URL,
         ])))
         let client = PairingClient(
             baseURL: URL(string: "https://api.example.com")!,
@@ -634,12 +653,18 @@ struct PairingViewModelTests {
         let entries: [[String: Any]] = devices.map { device in
             let pairedAt = ISO8601DateFormatter().string(from: device.pairedAt)
             let name: Any = device.name.isEmpty ? NSNull() : device.name
+            let pubkeyB64URL = device.devicePublicKey
+                .base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
             return [
                 "device_id": device.id,
                 "device_name": name,
                 "host": device.endpoint.host,
                 "port": Int(device.endpoint.port),
                 "paired_at": pairedAt,
+                "device_public_key": pubkeyB64URL,
             ]
         }
         return HTTPResponse.json(["ok": true, "data": ["devices": entries]])

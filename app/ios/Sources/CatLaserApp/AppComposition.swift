@@ -123,6 +123,67 @@ public struct AppComposition: Sendable {
     /// ``/denied(_:)`` for the ``LiveViewModel`` to route on.
     public let liveAuthGate: LiveViewModel.AuthGate
 
+    /// Construct a ``LiveViewModel`` wired to the paired device. The
+    /// slug is read from the trusted ``PairedDevice`` (Keychain) and
+    /// captured in the session factory closure — it is NEVER derived
+    /// from a received ``StreamOffer`` or any other field an
+    /// impostor server could influence.
+    ///
+    /// This is the single authorised construction site for a
+    /// ``LiveViewModel`` on a paired connection. A hypothetical
+    /// alternative path that derived the slug from the offer would
+    /// collapse the publisher-identity check to self-trust: the
+    /// attacker who sent the offer chooses the identity the app
+    /// expects to see. Routing everything through this factory
+    /// keeps the boundary narrow and testable.
+    ///
+    /// The factory is `@MainActor` because ``LiveViewModel`` itself
+    /// is MainActor-isolated — constructing it off the main thread
+    /// would require a hop anyway, so we surface that constraint at
+    /// the factory boundary.
+    @MainActor
+    public func liveViewModel(
+        pairedDevice: PairedDevice,
+        deviceClient: DeviceClient,
+    ) -> LiveViewModel {
+        let expectedIdentity = LiveStreamIdentity.expectedPublisherIdentity(
+            forDeviceSlug: pairedDevice.id,
+        )
+        // `expectedIdentity` is captured by value in the closure so
+        // a later mutation of `pairedDevice` (by this or any other
+        // reference) cannot retroactively change what the VM
+        // trusts.
+        let sessionFactory: @Sendable () -> any LiveStreamSession = {
+            Self.makeLiveStreamSession(expectedPublisherIdentity: expectedIdentity)
+        }
+        return LiveViewModel(
+            deviceClient: deviceClient,
+            authGate: liveAuthGate,
+            liveKitAllowlist: liveKitAllowlist,
+            sessionFactory: sessionFactory,
+        )
+    }
+
+    /// Concrete session factory used by ``liveViewModel``. Lives in
+    /// its own helper so the `#if canImport(LiveKit)` branch stays
+    /// tight: when LiveKit is linked (production + Xcode target),
+    /// the real session is built; when it isn't (SPM Linux CI),
+    /// the call fatal-errors because there is no on-device video
+    /// to subscribe to anyway, and the composition invariants tests
+    /// cover this path with mock sessions constructed by the test
+    /// target, not by this factory.
+    private static func makeLiveStreamSession(
+        expectedPublisherIdentity: String,
+    ) -> any LiveStreamSession {
+        #if canImport(LiveKit)
+        return LiveKitStreamSession(expectedPublisherIdentity: expectedPublisherIdentity)
+        #else
+        preconditionFailure(
+            "AppComposition.liveViewModel requires LiveKit; target must link client-sdk-swift",
+        )
+        #endif
+    }
+
     // MARK: - Cross-platform construction
 
     /// Closure that builds a ``SignedHTTPClient`` given the

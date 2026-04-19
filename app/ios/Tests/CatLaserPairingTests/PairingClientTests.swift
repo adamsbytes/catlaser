@@ -9,6 +9,16 @@ struct PairingClientTests {
     private let baseURL = URL(string: "https://api.example.com")!
     private let clock = Date(timeIntervalSince1970: 1_712_345_678)
 
+    /// Raw 32-byte Ed25519 public key used as a test fixture. The
+    /// base64url-no-pad encoding is what the coordination server
+    /// returns in `device_public_key`.
+    private static let samplePublicKey = Data(repeating: 0x42, count: 32)
+    private static let samplePublicKeyB64URL = samplePublicKey
+        .base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+
     private func makeCode() throws -> PairingCode {
         try PairingCode(code: "ABCDEFGHIJKLMNOP", deviceID: "cat-001")
     }
@@ -27,6 +37,7 @@ struct PairingClientTests {
             "device_name": "Kitchen",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.samplePublicKeyB64URL,
         ])))
         let client = makeClient(http: http)
         let paired = try await client.exchange(code: try makeCode(), now: clock)
@@ -36,6 +47,7 @@ struct PairingClientTests {
         #expect(paired.endpoint.host == "100.64.1.7")
         #expect(paired.endpoint.port == 9820)
         #expect(paired.pairedAt == clock)
+        #expect(paired.devicePublicKey == Self.samplePublicKey)
     }
 
     @Test
@@ -45,6 +57,7 @@ struct PairingClientTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.samplePublicKeyB64URL,
         ])))
         let client = makeClient(http: http)
         _ = try await client.exchange(code: try makeCode(), now: clock)
@@ -68,10 +81,64 @@ struct PairingClientTests {
             "device_id": "cat-001",
             "host": "100.64.1.7",
             "port": 9820,
+            "device_public_key": Self.samplePublicKeyB64URL,
         ])))
         let client = makeClient(http: http)
         let paired = try await client.exchange(code: try makeCode(), now: clock)
         #expect(paired.name == "")
+    }
+
+    @Test
+    func exchangeRejectsResponseWithMissingPublicKey() async throws {
+        let http = MockHTTPClient()
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "host": "100.64.1.7",
+            "port": 9820,
+        ])))
+        let client = makeClient(http: http)
+        do {
+            _ = try await client.exchange(code: try makeCode())
+            Issue.record("expected throw — missing device_public_key must fail pairing")
+        } catch let error as PairingError {
+            if case .invalidServerResponse = error {
+                // good — decode failure path
+            } else {
+                Issue.record("expected .invalidServerResponse, got \(error)")
+            }
+        }
+    }
+
+    @Test
+    func exchangeRejectsResponseWithWrongLengthPublicKey() async throws {
+        // A 31-byte key decodes cleanly as base64url but fails the
+        // length gate — Curve25519.Signing.PublicKey would reject
+        // downstream, but the pairing boundary catches it first so
+        // the app never persists an unverifiable row.
+        let shortKey = Data(repeating: 0x42, count: 31)
+        let shortKeyB64URL = shortKey
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let http = MockHTTPClient()
+        await http.enqueue(.response(.json([
+            "device_id": "cat-001",
+            "host": "100.64.1.7",
+            "port": 9820,
+            "device_public_key": shortKeyB64URL,
+        ])))
+        let client = makeClient(http: http)
+        do {
+            _ = try await client.exchange(code: try makeCode())
+            Issue.record("expected throw — short pubkey must fail pairing")
+        } catch let error as PairingError {
+            if case let .invalidServerResponse(msg) = error {
+                #expect(msg.contains("device_public_key"))
+            } else {
+                Issue.record("expected .invalidServerResponse, got \(error)")
+            }
+        }
     }
 
     // MARK: - Status-code mapping

@@ -158,12 +158,23 @@ public struct PairedDevicesClient: Sendable {
                     "invalid endpoint for \(trimmedID): \(String(describing: error))",
                 )
             }
+            guard let pubkey = decodeBase64URLNoPad(entry.devicePublicKey) else {
+                throw .invalidServerResponse(
+                    "device_public_key for \(trimmedID) is not valid base64url",
+                )
+            }
+            guard pubkey.count == PairedDevice.devicePublicKeyLength else {
+                throw .invalidServerResponse(
+                    "device_public_key for \(trimmedID) wrong length: \(pubkey.count)",
+                )
+            }
             devices.append(
                 PairedDevice(
                     id: trimmedID,
                     name: entry.deviceName ?? "",
                     endpoint: endpoint,
                     pairedAt: entry.pairedAt,
+                    devicePublicKey: pubkey,
                 ),
             )
         }
@@ -210,6 +221,7 @@ private struct ListEntry: Decodable {
     let host: String
     let port: Int
     let pairedAt: Date
+    let devicePublicKey: String
 
     enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"
@@ -217,5 +229,6 @@ private struct ListEntry: Decodable {
         case host
         case port
         case pairedAt = "paired_at"
+        case devicePublicKey = "device_public_key"
     }
 }

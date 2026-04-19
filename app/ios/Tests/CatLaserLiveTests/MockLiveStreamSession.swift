@@ -87,6 +87,14 @@ final class MockLiveStreamSession: LiveStreamSession, @unchecked Sendable {
         eventContinuation.yield(.disconnected(reason: disconnectReason))
     }
 
+    /// Push an `.unexpectedPublisher` event — the production
+    /// `LiveKitStreamSession.Delegate` yields this on identity
+    /// mismatch. Tests use it to exercise the VM's terminal-failure
+    /// path without spinning up a real LiveKit SDK.
+    func emitUnexpectedPublisher(identity: String) {
+        eventContinuation.yield(.unexpectedPublisher(identity: identity))
+    }
+
     func finishEvents() {
         eventContinuation.finish()
     }

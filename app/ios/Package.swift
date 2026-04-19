@@ -114,6 +114,11 @@ let package = Package(
             name: "CatLaserDevice",
             dependencies: [
                 "CatLaserProto",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux, .windows, .android, .wasi]),
+                ),
             ],
             path: "Sources/CatLaserDevice",
         ),
@@ -237,6 +242,7 @@ let package = Package(
                 "CatLaserLive",
                 "CatLaserPairing",
                 "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
                 "CatLaserProto",
             ],
             path: "Tests/CatLaserAppTests",

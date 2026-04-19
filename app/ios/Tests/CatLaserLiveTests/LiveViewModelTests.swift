@@ -694,6 +694,119 @@ struct LiveViewModelTests {
         #expect(counter.count == 2)
         #expect(collector.count == 1) // no session created on the denied run
     }
+
+    // MARK: - Connect watchdog + publisher-identity mismatch
+
+    /// A silent LiveKit hang (connect returns but no `.streaming` event)
+    /// used to wedge the UI on the spinner forever. The VM now arms a
+    /// wall-clock watchdog on every `.connecting` entry; firing transitions
+    /// to `.failed(.streamConnectTimeout)` and rolls back the device
+    /// stream. This test drives the mock into `manual`-connect mode,
+    /// waits past a tight deadline, and asserts the failure lands.
+    @Test
+    func connectTimeoutFiresWhenStreamingEventNeverArrives() async throws {
+        let session = MockLiveStreamSession()
+        await session.setConnectBehavior(.manual)
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        let server = ScriptedDeviceServer(transport: transport, handler: { request in
+            switch request.request {
+            case .startStream: return self.validOfferResponse()
+            case .stopStream:
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            default: return .error(code: 2, message: "unknown")
+            }
+        })
+        try await client.connect()
+        await server.run()
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: { session },
+            connectTimeout: 0.2,
+        )
+
+        // Start returns once the mock session's connect completes; with
+        // `manual` the connect itself will stall, so we race it against
+        // the watchdog.
+        let startTask = Task { await vm.start() }
+
+        await eventually { vm.state == .failed(.streamConnectTimeout) }
+        if case .failed(.streamConnectTimeout) = vm.state {
+            // good
+        } else {
+            Issue.record("expected .failed(.streamConnectTimeout), got \(vm.state)")
+        }
+
+        // Unblock the manual connect so `start` can complete.
+        await session.finishManualConnect(success: true)
+        _ = await startTask.value
+    }
+
+    /// An impostor with publish grants joins the LiveKit room. Its
+    /// `participant.identity` does not match
+    /// `catlaser-device-<slug>`. The VM must transition to
+    /// `.failed(.unexpectedPublisher)` — NOT sit silently on the
+    /// spinner, NOT render the impostor's track.
+    @Test
+    func unexpectedPublisherEventFailsTheStream() async throws {
+        let (vm, session, _, _) = try await makeHarness { request in
+            switch request.request {
+            case .startStream: return self.validOfferResponse()
+            case .stopStream:
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            default: return .error(code: 2, message: "unknown")
+            }
+        }
+        await session.setConnectBehavior(.succeed)
+        await vm.start()
+        // Emit a stray-publisher event the production
+        // `LiveKitStreamSession.Delegate` would yield on identity
+        // mismatch. The VM's event loop observes it and must lift
+        // it into a terminal `.failed(.unexpectedPublisher)` state.
+        session.emitUnexpectedPublisher(identity: "attacker")
+
+        await eventually {
+            if case let .failed(error) = vm.state,
+               case .unexpectedPublisher = error {
+                return true
+            }
+            return false
+        }
+        if case let .failed(error) = vm.state,
+           case let .unexpectedPublisher(identity) = error {
+            #expect(identity == "attacker")
+        } else {
+            Issue.record("expected .failed(.unexpectedPublisher), got \(vm.state)")
+        }
+    }
+
+    /// `canStop` must hold while the VM is still busy, so a user whose
+    /// stream is hanging mid-connect can back out. Gating stop on
+    /// `.streaming` alone used to trap the user behind a disabled
+    /// button whenever the connect stalled.
+    @Test
+    func canStopHoldsDuringConnectingAndRequestingOffer() async throws {
+        // `.requestingOffer` and `.connecting` both need to accept
+        // `.stop()`. The equality-only assertion here is a structural
+        // check against the enum surface, not against a live VM.
+        #expect(LiveViewState.requestingOffer.canStop)
+        // We need a sample LiveStreamCredentials; the exact contents
+        // don't matter for the canStop getter.
+        let allowlist = Self.testAllowlist()
+        var offer = Catlaser_App_V1_StreamOffer()
+        offer.livekitURL = "wss://livekit.test"
+        offer.subscriberToken = "tok"
+        let creds = try LiveStreamCredentials(offer: offer, allowlist: allowlist)
+        #expect(LiveViewState.connecting(creds).canStop)
+        #expect(!LiveViewState.disconnected.canStop)
+        #expect(!LiveViewState.disconnecting.canStop)
+    }
 }
 
 /// Scriptable gate: returns the next outcome from a preset sequence,

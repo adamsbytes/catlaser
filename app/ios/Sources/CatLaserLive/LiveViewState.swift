@@ -44,9 +44,16 @@ public enum LiveViewState: Sendable, Equatable {
 
     public var canStop: Bool {
         switch self {
-        case .streaming:
+        case .streaming, .connecting, .requestingOffer:
+            // A user who tapped "Watch live" and got stuck on the
+            // spinner MUST be able to back out. Gating stop behind
+            // `.streaming` only meant a rogue publisher or a silent
+            // LiveKit failure wedged the UI with no recovery short
+            // of leaving the screen. Allow stop throughout the busy
+            // phases — the VM idempotently tears down whatever it
+            // has.
             true
-        case .requestingOffer, .connecting, .disconnected, .disconnecting, .failed:
+        case .disconnected, .disconnecting, .failed:
             false
         }
     }

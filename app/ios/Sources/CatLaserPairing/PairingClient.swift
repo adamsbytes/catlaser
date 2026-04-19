@@ -159,11 +159,20 @@ public struct PairingClient: Sendable {
         guard !trimmedID.isEmpty else {
             throw .invalidServerResponse("device_id missing in response")
         }
+        guard let pubkey = decodeBase64URLNoPad(decoded.devicePublicKey) else {
+            throw .invalidServerResponse("device_public_key is not valid base64url")
+        }
+        guard pubkey.count == PairedDevice.devicePublicKeyLength else {
+            throw .invalidServerResponse(
+                "device_public_key wrong length: \(pubkey.count) (expected \(PairedDevice.devicePublicKeyLength))",
+            )
+        }
         return PairedDevice(
             id: trimmedID,
             name: decoded.deviceName ?? "",
             endpoint: endpoint,
             pairedAt: now,
+            devicePublicKey: pubkey,
         )
     }
 
@@ -205,11 +214,13 @@ struct PairExchangeResponse: Decodable, Equatable {
     let deviceName: String?
     let host: String
     let port: Int
+    let devicePublicKey: String
 
     enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"
         case deviceName = "device_name"
         case host
         case port
+        case devicePublicKey = "device_public_key"
     }
 }

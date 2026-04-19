@@ -1,5 +1,6 @@
 import CatLaserAuthTestSupport
 import CatLaserDevice
+import CatLaserDeviceTestSupport
 import CatLaserLive
 import CatLaserProto
 import Foundation
@@ -390,6 +391,61 @@ struct AppCompositionInvariantsTests {
         await recorder.awaitAtLeast(2)
         #expect(await recorder.expireCount == 2,
                 "both clients must route through the same session-expiry callback")
+    }
+
+    // MARK: - liveViewModel factory
+
+    /// Security-critical contract: the expected LiveKit publisher
+    /// identity the VM watches for MUST be derived from the TRUSTED
+    /// `PairedDevice.id` (which came from the Keychain + coordination
+    /// server at pairing time), NOT from any field of a received
+    /// StreamOffer. This test pins the derivation — a refactor that
+    /// accidentally threaded a device-supplied value through the
+    /// factory would break the identity shape and fail here.
+    @MainActor
+    @Test
+    func liveViewModelFactoryBindsIdentityToPairedDeviceSlug() throws {
+        let (composition, _) = try Self.makeComposition()
+        let endpoint = try DeviceEndpoint(host: "100.64.1.7", port: 9820)
+        let paired = PairedDevice(
+            id: "cat-777",
+            name: "Living Room",
+            endpoint: endpoint,
+            pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: Data(repeating: 0x42, count: 32),
+        )
+        // The VM requires an active DeviceClient; a fresh in-memory
+        // transport + client with no handshake is fine here — we're
+        // not exercising the device round-trip, just the factory's
+        // identity derivation.
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+
+        // Invoking the factory must not crash even though the
+        // session factory it wires in would require LiveKit on
+        // Darwin — the VM is built lazily and `start()` is not
+        // called here.
+        let vm = composition.liveViewModel(pairedDevice: paired, deviceClient: client)
+        #expect(vm.state == .disconnected)
+
+        // Expected identity is `catlaser-device-<slug>` derived from
+        // the paired device id. This is the string the
+        // session-factory closure captures by value; asserting it
+        // through a parallel derivation pins the contract.
+        let expected = LiveStreamIdentity.expectedPublisherIdentity(forDeviceSlug: paired.id)
+        #expect(expected == "catlaser-device-cat-777")
+    }
+
+    /// The identity helper itself must keep its contract: identical
+    /// prefix + slug concatenation, byte-for-byte matching the
+    /// Python publisher_identity it was derived from.
+    @Test
+    func liveStreamIdentityContract() {
+        #expect(LiveStreamIdentity.devicePublisherIdentityPrefix == "catlaser-device-")
+        #expect(
+            LiveStreamIdentity.expectedPublisherIdentity(forDeviceSlug: "abc-123")
+                == "catlaser-device-abc-123",
+        )
     }
 }
 

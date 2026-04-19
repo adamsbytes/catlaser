@@ -49,6 +49,15 @@ public enum LiveStreamEvent: Sendable, Equatable {
     case connecting
     case streaming(any LiveVideoTrackHandle)
     case disconnected(reason: LiveStreamDisconnectReason)
+    /// A participant joined the room and published a video track,
+    /// but their `identity` did not match the expected
+    /// `catlaser-device-<slug>` identity derived from the
+    /// pairing. An impostor with publish grants. The VM turns this
+    /// into a terminal `.failed` state so the user sees a clear
+    /// error rather than spinning indefinitely behind a silent
+    /// drop. ``identity`` surfaces the offender's claimed identity
+    /// for diagnostics — never rendered unescaped to the UI.
+    case unexpectedPublisher(identity: String)
 
     public static func == (lhs: LiveStreamEvent, rhs: LiveStreamEvent) -> Bool {
         switch (lhs, rhs) {
@@ -57,6 +66,8 @@ public enum LiveStreamEvent: Sendable, Equatable {
         case let (.streaming(a), .streaming(b)):
             a.trackID == b.trackID
         case let (.disconnected(a), .disconnected(b)):
+            a == b
+        case let (.unexpectedPublisher(a), .unexpectedPublisher(b)):
             a == b
         default:
             false
@@ -71,4 +82,23 @@ public enum LiveStreamDisconnectReason: Sendable, Equatable {
     case serverClosed(String?)
     /// The network underneath LiveKit failed (e.g. Wi-Fi drop, TLS).
     case networkFailure(String?)
+}
+
+/// Constants shared between the LiveKit-backed session and the
+/// composition root. Kept out of ``LiveKitStreamSession`` itself so
+/// non-LiveKit targets (SPM Linux CI) can still reference the
+/// expected-identity derivation without conditionally importing the
+/// LiveKit SDK.
+public enum LiveStreamIdentity {
+    /// Prefix the device daemon uses for its LiveKit publisher
+    /// identity. Must match `_PUBLISHER_IDENTITY_PREFIX` in
+    /// `python/catlaser_brain/network/streaming.py`.
+    public static let devicePublisherIdentityPrefix = "catlaser-device-"
+
+    /// Compose the expected publisher identity from a paired device
+    /// slug. The composition root calls this once per pairing and
+    /// threads the result into the session factory.
+    public static func expectedPublisherIdentity(forDeviceSlug slug: String) -> String {
+        "\(devicePublisherIdentityPrefix)\(slug)"
+    }
 }

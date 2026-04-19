@@ -115,6 +115,18 @@ public enum LiveViewStrings {
                 value: "Couldn't connect to the video stream. Please try again.",
                 comment: "Error shown when the LiveKit connect / subscribe failed.",
             )
+        case .streamConnectTimeout:
+            return NSLocalizedString(
+                "live.error.stream_connect_timeout",
+                value: "The video stream took too long to start. Please try again.",
+                comment: "Error shown when the LiveKit connect watchdog timed out.",
+            )
+        case .unexpectedPublisher:
+            return NSLocalizedString(
+                "live.error.unexpected_publisher",
+                value: "Couldn't verify the video source. Stop the stream and re-pair your device if this keeps happening.",
+                comment: "Error shown when a non-device participant published into the room.",
+            )
         case .streamDropped:
             return NSLocalizedString(
                 "live.error.stream_dropped",

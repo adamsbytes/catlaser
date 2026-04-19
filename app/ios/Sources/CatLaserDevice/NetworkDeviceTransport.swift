@@ -37,14 +37,63 @@ public final class NetworkDeviceTransport: DeviceTransport, @unchecked Sendable 
     // Guards `open()` so a double-call is detected and refused.
     private let state = StateTracker()
 
-    public init(endpoint: DeviceEndpoint) {
+    /// Construct the transport. Throws
+    /// :enum:`TailscaleInterfaceError.noTailscaleInterfaceAvailable`
+    /// when the resolver reports no ``utun*`` interface carrying a
+    /// Tailscale-shaped address — production callers
+    /// (`ConnectionManager`) treat this as transient and retry with
+    /// backoff rather than terminally failing the pairing.
+    ///
+    /// - Parameters:
+    ///   - endpoint: validated tailnet address + port.
+    ///   - resolver: supplies the ``utunN`` to pin the
+    ///     ``NWConnection`` to. Defaults to the production
+    ///     ``getifaddrs``-backed resolver; tests pass an injected
+    ///     resolver so they exercise the "Tailscale down" branch
+    ///     without manipulating the real network stack.
+    public init(
+        endpoint: DeviceEndpoint,
+        resolver: any TailscaleInterfaceResolver = GetifaddrsTailscaleResolver(),
+    ) throws(TailscaleInterfaceError) {
         self.endpoint = endpoint
         self.queue = DispatchQueue(
             label: "catlaser.device.transport.\(endpoint.host).\(endpoint.port)",
             qos: .userInitiated,
         )
 
+        // Fail CLOSED if Tailscale isn't up. An unpinned NWConnection
+        // against a 100.x.x.x address follows the kernel's routing
+        // table; a profile-installed VPN advertising a more-specific
+        // route for 100.64.0.0/10 would otherwise steer the socket
+        // onto an attacker interface. Running the resolver before
+        // building any NW object means we never create a
+        // half-configured connection.
+        let candidates = resolver.enumerate()
+        guard let chosen = candidates.first else {
+            // Rare but real: the user paused Tailscale or it's still
+            // booting after a device restart. The supervisor treats
+            // this as transient and retries.
+            throw .noTailscaleInterfaceAvailable
+        }
+
         let params = NWParameters.tcp
+        // Belt-and-braces: exclude every non-utun interface type
+        // explicitly. Even if `requiredInterface` is somehow
+        // unrespected (OS bug, future API change), the NWConnection
+        // refuses to fall back to Wi-Fi / cellular / Ethernet —
+        // fail-closed is the only acceptable posture here.
+        params.prohibitedInterfaceTypes = [.wifi, .cellular, .wiredEthernet, .loopback]
+        // Pin to the specific utun. `requiredInterface` accepts an
+        // NWInterface; we look it up by name from the current path
+        // snapshot. Falling back to `requiredInterfaceType = .other`
+        // alone would accept *any* non-wifi/cellular/ethernet
+        // interface, which includes a second rogue VPN tunnel.
+        let monitor = NWPathMonitor()
+        let targetInterface = monitor.currentPath.availableInterfaces.first(where: { $0.name == chosen.name })
+        monitor.cancel()
+        params.requiredInterface = targetInterface
+        params.requiredInterfaceType = .other
+
         // No multipath; Tailscale gives us one interface and the
         // server is bound to one address. No QUIC either — the
         // Python server speaks plain TCP per spec.

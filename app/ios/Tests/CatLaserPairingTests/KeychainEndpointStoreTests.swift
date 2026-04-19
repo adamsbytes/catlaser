@@ -17,12 +17,15 @@ struct KeychainEndpointStoreTests {
         )
     }
 
+    private static let samplePublicKey = Data(repeating: 0x42, count: 32)
+
     private func makeDevice() throws -> PairedDevice {
         PairedDevice(
             id: "cat-001",
             name: "Kitchen",
             endpoint: try DeviceEndpoint(host: "100.64.1.7", port: 9820),
             pairedAt: Date(timeIntervalSince1970: 1_712_345_678),
+            devicePublicKey: Self.samplePublicKey,
         )
     }
 
@@ -54,6 +57,7 @@ struct KeychainEndpointStoreTests {
             name: "Office",
             endpoint: try DeviceEndpoint(host: "100.64.2.3", port: 9821),
             pairedAt: Date(timeIntervalSince1970: 1_712_345_900),
+            devicePublicKey: Data(repeating: 0xAB, count: 32),
         )
         try await store.save(second)
 

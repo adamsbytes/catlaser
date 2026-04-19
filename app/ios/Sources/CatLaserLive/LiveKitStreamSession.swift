@@ -40,17 +40,19 @@ public actor LiveKitStreamSession: LiveStreamSession {
     private var connected = false
     private var terminated = false
 
-    /// Prefix the device daemon uses for its LiveKit publisher identity.
-    /// Must match `_PUBLISHER_IDENTITY_PREFIX` in
-    /// `python/catlaser_brain/network/streaming.py`. The full identity
-    /// is `"\(devicePublisherIdentityPrefix)\(slug)"`.
-    public static let devicePublisherIdentityPrefix = "catlaser-device-"
+    /// Prefix the device daemon uses for its LiveKit publisher
+    /// identity. Mirrors ``LiveStreamIdentity.devicePublisherIdentityPrefix``
+    /// so call sites reaching for the LiveKit-gated type still find
+    /// the constant; the authoritative definition lives in the
+    /// un-gated ``LiveStreamIdentity`` enum so non-LiveKit targets
+    /// (Linux SPM) can also derive the expected identity.
+    public static let devicePublisherIdentityPrefix = LiveStreamIdentity.devicePublisherIdentityPrefix
 
     /// Compose the expected publisher identity from a paired device
-    /// slug. The composition root typically calls this once per
-    /// pairing and threads the result into the session factory.
+    /// slug. Delegates to ``LiveStreamIdentity`` — the single source
+    /// of truth now lives there.
     public static func expectedPublisherIdentity(forDeviceSlug slug: String) -> String {
-        "\(devicePublisherIdentityPrefix)\(slug)"
+        LiveStreamIdentity.expectedPublisherIdentity(forDeviceSlug: slug)
     }
 
     public init(expectedPublisherIdentity: String) {
@@ -127,12 +129,14 @@ public actor LiveKitStreamSession: LiveStreamSession {
             // publish into it. Without this check, any rogue
             // participant that gained publish grants on the same
             // room could surface a video track the app would render
-            // as "the cat's home". Track is dropped silently on
-            // mismatch — logging plus silent drop lets a legitimate
-            // viewer experience age-out gracefully if somehow two
-            // publishers collide, while denying a spoofed stream.
+            // as "the cat's home". On mismatch we emit a typed
+            // event the view-model turns into a terminal failure
+            // — silent drop used to wedge the `.connecting` UI
+            // behind the spinner, which masked active intrusions
+            // and denied the user any recovery path.
             let identity = participant.identity?.stringValue ?? ""
             guard identity == expectedPublisherIdentity else {
+                continuation.yield(.unexpectedPublisher(identity: identity))
                 return
             }
             guard publication.kind == .video,

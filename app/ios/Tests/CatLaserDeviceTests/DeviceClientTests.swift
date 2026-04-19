@@ -1,3 +1,8 @@
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 import CatLaserDeviceTestSupport
 import CatLaserProto
 import Foundation
@@ -767,6 +772,210 @@ struct DeviceClientTests {
             Issue.record("expected post-rejection request to throw")
         } catch let error as DeviceClientError {
             #expect(error == .notConnected)
+        }
+    }
+
+    // MARK: - Handshake response verification (Ed25519)
+
+    @Test
+    func authRequestCarriesANonceOfCorrectLength() async throws {
+        // The client-side nonce is 16 bytes — matches the device's
+        // NONCE_LENGTH constant. A different length would make the
+        // device reject the handshake with DEVICE_AUTH_NONCE_INVALID.
+        let (client, transport) = makeClient()
+        async let connectResult: Void = client.connect(handshake: { "header" })
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+        #expect(auth.auth.nonce.count == 16)
+
+        // Reply with an ok response so the handshake completes (no
+        // verifier wired, so the signature on the response is
+        // ignored — the test is about the request-side nonce).
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = true
+        reply.authResponse.nonce = auth.auth.nonce
+        reply.requestID = auth.requestID
+        try transport.deliver(event: reply)
+        try await connectResult
+        await client.disconnect()
+    }
+
+    @Test
+    func handshakeRejectsResponseFromWrongSigningKey() async throws {
+        // Wire a verifier that expects signatures under pubkey A; the
+        // device server (mock) signs with pubkey B. The client must
+        // reject with `.handshakeSignatureInvalid` and refuse to
+        // transition to `.connected`.
+        let genuineKey = Curve25519.Signing.PrivateKey()
+        let impostorKey = Curve25519.Signing.PrivateKey()
+        let verifier = HandshakeResponseVerifier(
+            devicePublicKey: genuineKey.publicKey.rawRepresentation,
+        )
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(
+            transport: transport,
+            requestTimeout: 2.0,
+            responseVerifier: verifier,
+        )
+        async let connectResult: Void = client.connect(handshake: { "header" })
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+
+        // Forge an AuthResponse signed by the WRONG key.
+        let signedAt: Int64 = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let transcript = HandshakeResponseVerifier.buildTranscript(
+            nonce: auth.auth.nonce,
+            signedAtUnixNs: signedAt,
+            ok: true,
+            reason: "",
+        )
+        let badSignature = try impostorKey.signature(for: transcript)
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.requestID = auth.requestID
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = true
+        reply.authResponse.nonce = auth.auth.nonce
+        reply.authResponse.signature = badSignature
+        reply.authResponse.signedAtUnixNs = signedAt
+        try transport.deliver(event: reply)
+
+        do {
+            try await connectResult
+            Issue.record("expected throw when impostor signs response")
+        } catch let error as DeviceClientError {
+            #expect(error == .handshakeSignatureInvalid)
+        }
+        #expect(await client.isConnected == false)
+    }
+
+    @Test
+    func handshakeAcceptsResponseFromCorrectKey() async throws {
+        let genuineKey = Curve25519.Signing.PrivateKey()
+        let verifier = HandshakeResponseVerifier(
+            devicePublicKey: genuineKey.publicKey.rawRepresentation,
+        )
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(
+            transport: transport,
+            requestTimeout: 2.0,
+            responseVerifier: verifier,
+        )
+        async let connectResult: Void = client.connect(handshake: { "header" })
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+
+        let signedAt: Int64 = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let transcript = HandshakeResponseVerifier.buildTranscript(
+            nonce: auth.auth.nonce,
+            signedAtUnixNs: signedAt,
+            ok: true,
+            reason: "",
+        )
+        let signature = try genuineKey.signature(for: transcript)
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.requestID = auth.requestID
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = true
+        reply.authResponse.nonce = auth.auth.nonce
+        reply.authResponse.signature = signature
+        reply.authResponse.signedAtUnixNs = signedAt
+        try transport.deliver(event: reply)
+
+        try await connectResult
+        #expect(await client.isConnected == true)
+        await client.disconnect()
+    }
+
+    @Test
+    func handshakeRejectsReplayedResponseAgainstFreshNonce() async throws {
+        // A captured AuthResponse (valid signature, from the real
+        // device) cannot be replayed against a *fresh* AuthRequest
+        // because the fresh request's nonce differs from the one the
+        // signature binds to. The verifier's nonce-echo check
+        // catches this before crypto work.
+        let genuineKey = Curve25519.Signing.PrivateKey()
+        let verifier = HandshakeResponseVerifier(
+            devicePublicKey: genuineKey.publicKey.rawRepresentation,
+        )
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(
+            transport: transport,
+            requestTimeout: 2.0,
+            responseVerifier: verifier,
+        )
+        async let connectResult: Void = client.connect(handshake: { "header" })
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+
+        // Sign a response bound to a DIFFERENT nonce (what a
+        // captured-response attacker would have on hand). Both
+        // transcript nonce and echoed nonce are the old value.
+        let oldNonce = Data(repeating: 0xAA, count: 16)
+        let signedAt: Int64 = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let transcript = HandshakeResponseVerifier.buildTranscript(
+            nonce: oldNonce,
+            signedAtUnixNs: signedAt,
+            ok: true,
+            reason: "",
+        )
+        let signature = try genuineKey.signature(for: transcript)
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.requestID = auth.requestID
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = true
+        reply.authResponse.nonce = oldNonce // echoes the OLD nonce
+        reply.authResponse.signature = signature
+        reply.authResponse.signedAtUnixNs = signedAt
+        try transport.deliver(event: reply)
+
+        do {
+            try await connectResult
+            Issue.record("expected replay to be rejected")
+        } catch let error as DeviceClientError {
+            #expect(error == .handshakeNonceMismatch)
+        }
+    }
+
+    @Test
+    func handshakeRejectsResponseSignedLongAgo() async throws {
+        // The attacker replayed a perfectly-valid response whose
+        // timestamp is outside the ±5-minute skew window. Even if a
+        // nonce collision somehow occurred (2⁻¹²⁸), the timestamp
+        // covered by the signature gives the verifier a second line
+        // of defence.
+        let genuineKey = Curve25519.Signing.PrivateKey()
+        let verifier = HandshakeResponseVerifier(
+            devicePublicKey: genuineKey.publicKey.rawRepresentation,
+        )
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(
+            transport: transport,
+            requestTimeout: 2.0,
+            responseVerifier: verifier,
+        )
+        async let connectResult: Void = client.connect(handshake: { "header" })
+        let auth = try await transport.nextAppRequest(timeout: 2.0)
+
+        // Sign a response whose signed_at is 10 minutes in the past.
+        let staleSignedAt: Int64 = Int64((Date().timeIntervalSince1970 - 600) * 1_000_000_000)
+        let transcript = HandshakeResponseVerifier.buildTranscript(
+            nonce: auth.auth.nonce,
+            signedAtUnixNs: staleSignedAt,
+            ok: true,
+            reason: "",
+        )
+        let signature = try genuineKey.signature(for: transcript)
+        var reply = Catlaser_App_V1_DeviceEvent()
+        reply.requestID = auth.requestID
+        reply.authResponse = Catlaser_App_V1_AuthResponse()
+        reply.authResponse.ok = true
+        reply.authResponse.nonce = auth.auth.nonce
+        reply.authResponse.signature = signature
+        reply.authResponse.signedAtUnixNs = staleSignedAt
+        try transport.deliver(event: reply)
+
+        do {
+            try await connectResult
+            Issue.record("expected stale timestamp to be rejected")
+        } catch let error as DeviceClientError {
+            #expect(error == .handshakeSkewExceeded)
         }
     }
 }

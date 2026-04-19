@@ -8,6 +8,13 @@ import Testing
 struct PairedDevicesClientTests {
     private let baseURL = URL(string: "https://api.example.com")!
 
+    private static let samplePublicKey = Data(repeating: 0x42, count: 32)
+    private static let samplePublicKeyB64URL = samplePublicKey
+        .base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+
     // MARK: - Happy paths
 
     @Test
@@ -46,6 +53,7 @@ struct PairedDevicesClientTests {
                         "host": "100.64.0.42",
                         "port": 9820,
                         "paired_at": "2026-03-05T12:34:56Z",
+                        "device_public_key": Self.samplePublicKeyB64URL,
                     ],
                 ],
             ],
@@ -59,6 +67,7 @@ struct PairedDevicesClientTests {
         #expect(device.name == "Kitchen")
         #expect(device.endpoint.host == "100.64.0.42")
         #expect(device.endpoint.port == 9820)
+        #expect(device.devicePublicKey == Self.samplePublicKey)
     }
 
     @Test
@@ -76,6 +85,7 @@ struct PairedDevicesClientTests {
                         "host": "100.64.0.42",
                         "port": 9820,
                         "paired_at": "2026-03-05T12:34:56Z",
+                        "device_public_key": Self.samplePublicKeyB64URL,
                     ],
                 ],
             ],
@@ -84,6 +94,41 @@ struct PairedDevicesClientTests {
         let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
         let devices = try await client.list()
         #expect(devices.first?.name == "")
+    }
+
+    @Test
+    func rejectsEntryWithoutDevicePublicKey() async throws {
+        // A list entry whose device_public_key field is absent
+        // cannot be verified, so the app treats the whole response
+        // as invalid (the alternative — dropping just the offending
+        // entry — risks silently downgrading an otherwise-hardened
+        // pairing).
+        let body: [String: Any] = [
+            "ok": true,
+            "data": [
+                "devices": [
+                    [
+                        "device_id": "cat-alpha",
+                        "device_name": "Kitchen",
+                        "host": "100.64.0.42",
+                        "port": 9820,
+                        "paired_at": "2026-03-05T12:34:56Z",
+                    ],
+                ],
+            ],
+        ]
+        let http = MockHTTPClient(outcomes: [.response(HTTPResponse.json(body))])
+        let client = PairedDevicesClient(baseURL: baseURL, http: signedTestClient(wrapping: http))
+        do {
+            _ = try await client.list()
+            Issue.record("expected throw — missing device_public_key")
+        } catch let error as PairingError {
+            if case .invalidServerResponse = error {
+                // good
+            } else {
+                Issue.record("expected .invalidServerResponse, got \(error)")
+            }
+        }
     }
 
     // MARK: - Error mapping

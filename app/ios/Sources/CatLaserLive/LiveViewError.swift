@@ -37,6 +37,23 @@ public enum LiveViewError: Error, Equatable, Sendable {
     /// LiveKit connect / subscribe failed.
     case streamConnectFailed(String)
 
+    /// The `.connecting` phase exceeded its wall-clock deadline.
+    /// Catches a silent LiveKit hang (e.g. the SDK's connect
+    /// returns but no `.streaming` event ever arrives) so the UI
+    /// doesn't wedge on the spinner. Transient: retry typically
+    /// works on the next attempt once the rogue publisher leaves
+    /// or the network heals.
+    case streamConnectTimeout
+
+    /// A LiveKit room participant published a video track but
+    /// their identity did not match the expected
+    /// `catlaser-device-<slug>` identity derived from the paired
+    /// device. Terminal for this `start()` — the UI tells the
+    /// user something is wrong; the composition root may choose
+    /// to route to unpair / re-pair. ``identity`` is the claimed
+    /// identity of the offending participant for diagnostics.
+    case unexpectedPublisher(identity: String)
+
     /// The LiveKit server dropped the stream after we connected.
     case streamDropped(String?)
 
@@ -93,6 +110,16 @@ public enum LiveViewError: Error, Equatable, Sendable {
             // the time the live-view sees this error the pairing
             // flow has already started.
             .transportFailure("access revoked: \(message)")
+        case .handshakeNonceMismatch,
+             .handshakeSkewExceeded,
+             .handshakeSignatureInvalid:
+            // The device's AuthResponse did not verify. At the
+            // live-view layer this surfaces as a transport failure
+            // — the UI asks the user to retry; the supervisor in
+            // `ConnectionManager` treats these as transient so a
+            // clock-drift or nonce-collision blip recovers without
+            // forcing a re-pair.
+            .transportFailure("device handshake verification failed")
         }
     }
 }

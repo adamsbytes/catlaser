@@ -496,6 +496,12 @@ public struct Catlaser_App_V1_UnregisterPushTokenRequest: Sendable {
 /// against the `fph` hash + `bnd` bytes, and then checks the signer's
 /// SPKI (from `pk`) against its cached ACL of authorized users.
 ///
+/// `nonce` is a fresh 16-byte value generated per-connection by the
+/// app. The device echoes it verbatim in the signed AuthResponse so
+/// the app can verify liveness — a captured AuthResponse cannot be
+/// replayed against a new AuthRequest that carries a different
+/// nonce.
+///
 /// The device emits exactly one AuthResponse back to confirm accept
 /// or reject. On reject, the device closes the connection; on
 /// accept, normal request-response traffic follows.
@@ -509,6 +515,11 @@ public struct Catlaser_App_V1_AuthRequest: Sendable {
   /// so the device needs only one attestation parser.
   public var attestationHeader: String = String()
 
+  /// 16-byte random challenge. Echoed verbatim in AuthResponse and
+  /// covered by the Ed25519 signature. Shorter or longer values
+  /// cause the device to reject the handshake.
+  public var nonce: Data = Data()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -517,6 +528,25 @@ public struct Catlaser_App_V1_AuthRequest: Sendable {
 /// Device's reply to an AuthRequest. Emitted once per handshake. On
 /// `ok=false`, the device closes the connection after sending this
 /// frame so the app can surface the specific reason.
+///
+/// The device proves its identity by signing a canonical transcript
+/// with its Ed25519 private key (the key that was published to the
+/// coordination server at provisioning time and returned to the app
+/// inside the pair/paired response as `device_public_key`). The
+/// transcript is the byte concatenation:
+///
+///   b"catlaser-auth-response-v1\0"  // 26-byte domain separator
+///   || nonce                        // 16 bytes, echoed from request
+///   || u64_le(signed_at_unix_ns)    // little-endian int64
+///   || ok_byte                      // 0x01 if ok else 0x00
+///   || reason_utf8                  // variable-length UTF-8
+///
+/// The app refuses any AuthResponse whose signature does not verify,
+/// whose nonce does not match the request, or whose `signed_at_unix_ns`
+/// falls outside a ±5 minute skew window. A captured-and-replayed
+/// AuthResponse fails the nonce check (app's new nonce was not the
+/// signed one). A signature from the wrong key fails verification.
+/// Only a live device holding the published private key can pass.
 public struct Catlaser_App_V1_AuthResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -527,6 +557,20 @@ public struct Catlaser_App_V1_AuthResponse: Sendable {
   /// Machine-readable reason when `ok=false`. Mirrors the
   /// `DEVICE_AUTH_*` strings defined by the Python handshake module.
   public var reason: String = String()
+
+  /// Echoed challenge from AuthRequest.nonce. Must equal the value
+  /// the app sent, byte-for-byte, or the app rejects with
+  /// `DEVICE_AUTH_NONCE_MISMATCH`.
+  public var nonce: Data = Data()
+
+  /// Ed25519 signature (64 bytes) over the transcript above.
+  public var signature: Data = Data()
+
+  /// Device's wall-clock reading at signing time, nanoseconds since
+  /// Unix epoch. Covered by the signature; the app enforces a
+  /// ±5-minute skew window to defeat long-lived replay of a past
+  /// valid AuthResponse against a future captured nonce.
+  public var signedAtUnixNs: Int64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1601,7 +1645,7 @@ extension Catlaser_App_V1_UnregisterPushTokenRequest: SwiftProtobuf.Message, Swi
 
 extension Catlaser_App_V1_AuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}attestation_header\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}attestation_header\0\u{1}nonce\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1610,6 +1654,7 @@ extension Catlaser_App_V1_AuthRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.attestationHeader) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.nonce) }()
       default: break
       }
     }
@@ -1619,11 +1664,15 @@ extension Catlaser_App_V1_AuthRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.attestationHeader.isEmpty {
       try visitor.visitSingularStringField(value: self.attestationHeader, fieldNumber: 1)
     }
+    if !self.nonce.isEmpty {
+      try visitor.visitSingularBytesField(value: self.nonce, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Catlaser_App_V1_AuthRequest, rhs: Catlaser_App_V1_AuthRequest) -> Bool {
     if lhs.attestationHeader != rhs.attestationHeader {return false}
+    if lhs.nonce != rhs.nonce {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1631,7 +1680,7 @@ extension Catlaser_App_V1_AuthRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Catlaser_App_V1_AuthResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthResponse"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ok\0\u{1}reason\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ok\0\u{1}reason\0\u{1}nonce\0\u{1}signature\0\u{3}signed_at_unix_ns\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1641,6 +1690,9 @@ extension Catlaser_App_V1_AuthResponse: SwiftProtobuf.Message, SwiftProtobuf._Me
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.nonce) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.signature) }()
+      case 5: try { try decoder.decodeSingularInt64Field(value: &self.signedAtUnixNs) }()
       default: break
       }
     }
@@ -1653,12 +1705,24 @@ extension Catlaser_App_V1_AuthResponse: SwiftProtobuf.Message, SwiftProtobuf._Me
     if !self.reason.isEmpty {
       try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
     }
+    if !self.nonce.isEmpty {
+      try visitor.visitSingularBytesField(value: self.nonce, fieldNumber: 3)
+    }
+    if !self.signature.isEmpty {
+      try visitor.visitSingularBytesField(value: self.signature, fieldNumber: 4)
+    }
+    if self.signedAtUnixNs != 0 {
+      try visitor.visitSingularInt64Field(value: self.signedAtUnixNs, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Catlaser_App_V1_AuthResponse, rhs: Catlaser_App_V1_AuthResponse) -> Bool {
     if lhs.ok != rhs.ok {return false}
     if lhs.reason != rhs.reason {return false}
+    if lhs.nonce != rhs.nonce {return false}
+    if lhs.signature != rhs.signature {return false}
+    if lhs.signedAtUnixNs != rhs.signedAtUnixNs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

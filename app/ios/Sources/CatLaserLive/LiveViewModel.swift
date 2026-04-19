@@ -66,23 +66,35 @@ public final class LiveViewModel {
 
     public private(set) var state: LiveViewState = .disconnected
 
+    /// Wall-clock deadline for the ``.connecting`` phase. A legitimate
+    /// LiveKit connect over Tailscale settles in a few seconds; 30
+    /// seconds is generous even on slow cellular. If no ``.streaming``
+    /// event arrives before the deadline, the VM tears down and
+    /// lands on ``LiveViewError.streamConnectTimeout`` so the user
+    /// isn't left staring at a spinner that will never resolve.
+    public static let connectTimeout: TimeInterval = 30
+
     private let deviceClient: DeviceClient
     private let sessionFactory: @Sendable () -> any LiveStreamSession
     private let authGate: AuthGate
     private let liveKitAllowlist: LiveKitHostAllowlist
+    private let connectTimeout: TimeInterval
     private var currentSession: (any LiveStreamSession)?
     private var eventsTask: Task<Void, Never>?
+    private var connectTimeoutTask: Task<Void, Never>?
 
     public init(
         deviceClient: DeviceClient,
         authGate: @escaping AuthGate,
         liveKitAllowlist: LiveKitHostAllowlist,
         sessionFactory: @escaping @Sendable () -> any LiveStreamSession,
+        connectTimeout: TimeInterval = LiveViewModel.connectTimeout,
     ) {
         self.deviceClient = deviceClient
         self.authGate = authGate
         self.liveKitAllowlist = liveKitAllowlist
         self.sessionFactory = sessionFactory
+        self.connectTimeout = connectTimeout
     }
 
     // No deinit: `LiveViewModel` is `@MainActor` so `eventsTask` is
@@ -152,10 +164,12 @@ public final class LiveViewModel {
         let session = sessionFactory()
         currentSession = session
         bindEvents(from: session)
+        scheduleConnectTimeout()
 
         do {
             try await session.connect(using: credentials)
         } catch {
+            cancelConnectTimeout()
             state = .failed(.streamConnectFailed(error.localizedDescription))
             await tearDownSession()
             await rollbackDeviceStream()
@@ -166,14 +180,24 @@ public final class LiveViewModel {
         // through `bindEvents`. On some timings the event is already
         // in-flight by the time `connect` returns; the binder is
         // idempotent with respect to repeated `.streaming` events for
-        // the same track.
+        // the same track. The timeout task started above remains
+        // armed until either the streaming event lands (armed task
+        // cancelled in `apply`) or the deadline fires.
     }
 
     /// Stop an in-progress stream. Sends the device `StopStreamRequest`,
     /// tears down the LiveKit session, and returns to `.disconnected`.
+    ///
+    /// Callable in any busy phase (`.requestingOffer`, `.connecting`,
+    /// `.streaming`) — the user must always have a back-out. The VM
+    /// idempotently tears down whatever state exists: a stop during
+    /// `.requestingOffer` finds no session yet, a stop during
+    /// `.connecting` tears the session down before `.streaming`
+    /// arrives, a stop during `.streaming` is the common case.
     public func stop() async {
         guard state.canStop else { return }
         state = .disconnecting
+        cancelConnectTimeout()
         await tearDownSession()
         await rollbackDeviceStream()
         state = .disconnected
@@ -232,10 +256,42 @@ public final class LiveViewModel {
     private func tearDownSession() async {
         eventsTask?.cancel()
         eventsTask = nil
+        cancelConnectTimeout()
         if let session = currentSession {
             await session.disconnect()
         }
         currentSession = nil
+    }
+
+    /// Arm the wall-clock watchdog for the `.connecting` phase.
+    /// Cancelled when a `.streaming` event arrives, when the user
+    /// taps stop, when the session tears down for any reason, or
+    /// when the deadline fires (at which point the VM transitions
+    /// to `.failed(.streamConnectTimeout)` and rolls back).
+    private func scheduleConnectTimeout() {
+        connectTimeoutTask?.cancel()
+        let deadline = connectTimeout
+        connectTimeoutTask = Task { [weak self] in
+            let nanos = UInt64(max(deadline, 0) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            guard !Task.isCancelled else { return }
+            await self?.handleConnectTimeoutFired()
+        }
+    }
+
+    private func cancelConnectTimeout() {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+    }
+
+    private func handleConnectTimeoutFired() async {
+        // Only act if we're still in `.connecting` — if the track
+        // already arrived (or the user bailed), the task is a stale
+        // echo of a cancellation that didn't catch in time.
+        guard case .connecting = state else { return }
+        state = .failed(.streamConnectTimeout)
+        await tearDownSession()
+        await rollbackDeviceStream()
     }
 
     private func bindEvents(from session: any LiveStreamSession) {
@@ -259,11 +315,24 @@ public final class LiveViewModel {
             return
         case let .streaming(track):
             if case .connecting = state {
+                cancelConnectTimeout()
                 state = .streaming(track)
             } else if case .streaming = state {
                 // Replace with the latest track — LiveKit can re-publish.
                 state = .streaming(track)
             }
+        case let .unexpectedPublisher(identity):
+            // A participant published a track whose identity did
+            // not match the one the pairing binds us to. Terminal
+            // for this start attempt — re-trying against the same
+            // room will hit the same impostor. The composition root
+            // sees `.failed(.unexpectedPublisher)` and may surface a
+            // "report this device" affordance; at minimum the user
+            // is NOT left staring at a spinner that will never
+            // resolve.
+            state = .failed(.unexpectedPublisher(identity: identity))
+            await tearDownSession()
+            await rollbackDeviceStream()
         case let .disconnected(reason):
             switch reason {
             case .localRequest:
