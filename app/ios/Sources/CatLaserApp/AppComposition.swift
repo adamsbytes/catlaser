@@ -3,6 +3,7 @@ import CatLaserDevice
 import CatLaserHistory
 import CatLaserLive
 import CatLaserPairing
+import CatLaserSchedule
 import Foundation
 
 /// Single production wiring for the app's object graph.
@@ -207,6 +208,26 @@ public struct AppComposition: Sendable {
     @MainActor
     public func historyViewModel(deviceClient: DeviceClient) -> HistoryViewModel {
         HistoryViewModel(deviceClient: deviceClient, clock: clock)
+    }
+
+    /// Construct a ``ScheduleViewModel`` wired to the supplied
+    /// ``DeviceClient``. Like ``historyViewModel``, the SAME
+    /// supervisor-owned client instance MUST be threaded through so
+    /// every screen shares the post-handshake connection (a
+    /// background-built second client would miss the
+    /// ``HandshakeResponseVerifier`` wiring and race the supervisor's
+    /// reconnect logic).
+    ///
+    /// The schedule VM does not subscribe to the
+    /// ``DeviceClient.events`` stream — see the module docstring
+    /// on ``ScheduleViewModel`` for why — so it cannot contend with
+    /// ``HistoryViewModel`` for the single-consumer surface.
+    ///
+    /// ``@MainActor`` because ``ScheduleViewModel`` is MainActor-
+    /// isolated.
+    @MainActor
+    public func scheduleViewModel(deviceClient: DeviceClient) -> ScheduleViewModel {
+        ScheduleViewModel(deviceClient: deviceClient)
     }
 
     /// Concrete session factory used by ``liveViewModel``. Lives in

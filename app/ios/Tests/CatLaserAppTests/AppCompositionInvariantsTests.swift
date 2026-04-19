@@ -5,6 +5,7 @@ import CatLaserHistory
 import CatLaserLive
 import CatLaserPairingTestSupport
 import CatLaserProto
+import CatLaserSchedule
 import Foundation
 import Testing
 
@@ -683,6 +684,93 @@ struct AppCompositionInvariantsTests {
                 == UInt64(Self.fixedClockTimestamp)
                 - UInt64(HistoryViewModel.defaultHistoryWindow),
         )
+    }
+
+    // MARK: - scheduleViewModel factory
+
+    /// The schedule factory must hand back a fresh, idle VM bound
+    /// to the supplied ``DeviceClient``. Like the history factory,
+    /// the call itself is side-effect free — no wire traffic until
+    /// ``start()`` is invoked — so the host can construct the VM on
+    /// the main thread before the screen appears without triggering
+    /// a round-trip.
+    @MainActor
+    @Test
+    func scheduleViewModelFactoryReturnsIdleVM() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport)
+        let vm = composition.scheduleViewModel(deviceClient: client)
+        #expect(vm.state == .idle)
+        #expect(vm.lastActionError == nil)
+    }
+
+    /// The schedule factory returns a VM bound to the SAME
+    /// ``DeviceClient`` instance the caller passed in. This is the
+    /// load-bearing contract: the supervisor owns the single
+    /// handshake-verified client, and a second background-built
+    /// client would miss the verifier wiring AND race the
+    /// supervisor's reconnect logic.
+    @MainActor
+    @Test
+    func scheduleViewModelFactoryRoutesThroughSuppliedClient() async throws {
+        let (composition, _, _) = try await Self.makeComposition()
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 0.5)
+        try await client.connect()
+        let captured = CapturedScheduleRequest.shared
+        captured.reset()
+        let server = ScriptedDeviceServer(transport: transport) { req in
+            switch req.request {
+            case .getSchedule:
+                captured.recordGet()
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.schedule = Catlaser_App_V1_ScheduleList()
+                return .reply(event)
+            default:
+                return .error(code: 99, message: "unexpected")
+            }
+        }
+        await server.run()
+        defer {
+            Task {
+                await server.stop()
+                await client.disconnect()
+            }
+        }
+
+        let vm = composition.scheduleViewModel(deviceClient: client)
+        await vm.start()
+        // A ``GetScheduleRequest`` MUST have reached the scripted
+        // server — the factory routed through the supplied client
+        // rather than building a second one behind the back of the
+        // test.
+        #expect(captured.getCount == 1)
+    }
+}
+
+/// Process-wide capture for the schedule-routing invariant test.
+/// Lives at file scope so the scripted server's ``@Sendable``
+/// handler closure can write to it without capturing a non-Sendable
+/// test fixture.
+private final class CapturedScheduleRequest: @unchecked Sendable {
+    static let shared = CapturedScheduleRequest()
+    private let lock = NSLock()
+    private var gets: Int = 0
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        gets = 0
+    }
+
+    func recordGet() {
+        lock.lock(); defer { lock.unlock() }
+        gets += 1
+    }
+
+    var getCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return gets
     }
 }
 

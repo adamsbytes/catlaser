@@ -34,6 +34,10 @@ let package = Package(
             targets: ["CatLaserHistory"],
         ),
         .library(
+            name: "CatLaserSchedule",
+            targets: ["CatLaserSchedule"],
+        ),
+        .library(
             name: "CatLaserApp",
             targets: ["CatLaserApp"],
         ),
@@ -243,6 +247,32 @@ let package = Package(
             ],
             path: "Tests/CatLaserHistoryTests",
         ),
+        // Schedule setup screen. Owns the ``GetScheduleRequest`` /
+        // ``SetScheduleRequest`` round-trip, the in-memory draft
+        // model, per-field validation, and the SwiftUI editor.
+        // Depends only on ``CatLaserDevice`` (for ``DeviceClient``)
+        // and ``CatLaserProto`` — the view uses SwiftUI behind a
+        // ``canImport(SwiftUI)`` gate so the pure logic (VM, draft
+        // set, validation, strings) builds and tests on Linux SPM
+        // runners the same as on Darwin.
+        .target(
+            name: "CatLaserSchedule",
+            dependencies: [
+                "CatLaserDevice",
+                "CatLaserProto",
+            ],
+            path: "Sources/CatLaserSchedule",
+        ),
+        .testTarget(
+            name: "CatLaserScheduleTests",
+            dependencies: [
+                "CatLaserSchedule",
+                "CatLaserDevice",
+                "CatLaserDeviceTestSupport",
+                "CatLaserProto",
+            ],
+            path: "Tests/CatLaserScheduleTests",
+        ),
         .target(
             name: "CatLaserApp",
             dependencies: [
@@ -251,6 +281,7 @@ let package = Package(
                 "CatLaserHistory",
                 "CatLaserLive",
                 "CatLaserPairing",
+                "CatLaserSchedule",
             ],
             path: "Sources/CatLaserApp",
         ),
