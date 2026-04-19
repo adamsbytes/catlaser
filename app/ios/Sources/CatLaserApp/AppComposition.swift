@@ -123,6 +123,32 @@ public struct AppComposition: Sendable {
     /// ``/denied(_:)`` for the ``LiveViewModel`` to route on.
     public let liveAuthGate: LiveViewModel.AuthGate
 
+    /// Pairing-confirmation user-presence gate. Always prompts the
+    /// user before the ``PairingClient/exchange`` HTTP call adds a
+    /// device to the user's account, even if the bearer cache's idle
+    /// window is still fresh. The exposure is the same shape as
+    /// ``liveAuthGate``: the ``PairingViewModel`` invokes the closure
+    /// at the start of ``confirmPairing`` and routes on the typed
+    /// outcome. Without this gate a momentarily-unlocked phone could
+    /// be coerced into silently pairing an attacker-controlled device
+    /// — the bearer comes from the in-memory cache, the
+    /// Secure-Enclave attestation signs, and the coordination server
+    /// records the new pairing with no biometric prompt.
+    public let pairingAuthGate: PairingAuthGate
+
+    /// Single shared `EndpointStore` instance used by both the
+    /// ``PairingViewModel`` and the auth coordinator's lifecycle
+    /// observation. Wiring one instance through both paths is
+    /// load-bearing for sign-out hygiene: the coordinator's
+    /// ``sessionDidSignOut`` notification must reach the SAME store
+    /// the pairing flow reads / writes, otherwise the keychain row
+    /// survives sign-out and is inherited by the next user on the
+    /// device. Documented as ``EndpointStore & SessionLifecycleObserver``
+    /// so production conformers (``KeychainEndpointStore``) and test
+    /// doubles both fit, and so the type system refuses a wiring
+    /// that omits the lifecycle hook.
+    public let endpointStore: any EndpointStore & SessionLifecycleObserver
+
     /// Construct a ``LiveViewModel`` wired to the paired device. The
     /// slug is read from the trusted ``PairedDevice`` (Keychain) and
     /// captured in the session factory closure — it is NEVER derived
@@ -215,6 +241,24 @@ public struct AppComposition: Sendable {
     /// ``AppCompositionInvariantsTests`` suite with test doubles so
     /// the wiring invariants are asserted on a real composition, not
     /// a bespoke per-test rig.
+    /// Builder for the per-attempt device transport.
+    ///
+    /// The composition owns ``DeviceClient`` construction directly so
+    /// the ``HandshakeResponseVerifier`` cannot be omitted at the
+    /// production callsite (Finding 2: DeviceClient's verifier slot
+    /// is optional, and the composition is the place to make sure it
+    /// always carries the right key). Callers supply the transport
+    /// factory; the composition wires the verifier from the trusted
+    /// ``PairedDevice/devicePublicKey`` and constructs the client
+    /// itself.
+    ///
+    /// On Darwin production: returns a ``NetworkDeviceTransport``
+    /// pinned to the Tailscale ``utunN`` interface. On Linux SPM
+    /// tests: returns an ``InMemoryDeviceTransport`` so the
+    /// composition-invariants suite can exercise the wiring without
+    /// a live socket.
+    public typealias DeviceTransportFactory = @Sendable (DeviceEndpoint) throws -> any DeviceTransport
+
     public static func make(
         authConfig: AuthConfig,
         authHTTPClient: any HTTPClient,
@@ -223,8 +267,12 @@ public struct AppComposition: Sendable {
         attestationProvider: any DeviceAttestationProviding,
         bearerStore: any BearerTokenStore & SessionInvalidating,
         liveVideoGate: any LiveVideoGate,
+        endpointStore: any EndpointStore & SessionLifecycleObserver,
+        deviceTransportFactory: @escaping DeviceTransportFactory,
+        pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
+        connectionConfiguration: ConnectionManager.Configuration = .default,
         clock: @escaping @Sendable () -> Date = { Date() },
-    ) -> AppComposition {
+    ) async -> AppComposition {
         let authClient = AuthClient(
             config: authConfig,
             http: authHTTPClient,
@@ -237,6 +285,20 @@ public struct AppComposition: Sendable {
             store: bearerStore,
             attestationProvider: attestationProvider,
         )
+
+        // Wire the endpoint store as a sign-out observer at composition
+        // time. Without this hook the store conforms to
+        // ``SessionLifecycleObserver`` for nothing — sign-out wipes
+        // the bearer keychain row but leaves the paired-device row
+        // behind, so the next user signing in on the same device
+        // inherits the prior user's pairing until the
+        // ``PairingViewModel/start`` ownership re-check catches it
+        // (and that path fails open on transient/offline launches,
+        // making the inheritance window large enough to matter).
+        // Registering here is the single composition-level guarantee
+        // that the docstring claim on ``KeychainEndpointStore`` is
+        // actually true at runtime.
+        await coordinator.addLifecycleObserver(endpointStore)
 
         // Build the signed transport via the caller-supplied factory,
         // threading the composition's 401 callback. The factory is
@@ -290,6 +352,23 @@ public struct AppComposition: Sendable {
             }
         }
 
+        // The pairing auth gate uses the same conformer as
+        // ``liveAuthGate`` but routes through the pairing-specific
+        // method so the OS biometric sheet renders an action-specific
+        // reason. Same default-deny posture: every non-success error
+        // class maps to ``.denied`` so a failure to obtain user
+        // presence cannot silently let the exchange proceed.
+        let pairingAuthGate: PairingAuthGate = { [liveVideoGate] in
+            do {
+                try await liveVideoGate.requirePairing()
+                return .allowed
+            } catch AuthError.cancelled {
+                return .cancelled
+            } catch {
+                return .denied(String(describing: error))
+            }
+        }
+
         return AppComposition(
             authCoordinator: coordinator,
             pairingClient: pairingClient,
@@ -297,10 +376,78 @@ public struct AppComposition: Sendable {
             liveKitAllowlist: liveKitAllowlist,
             handshakeBuilder: handshakeBuilder,
             liveAuthGate: liveAuthGate,
+            pairingAuthGate: pairingAuthGate,
+            endpointStore: endpointStore,
+            deviceTransportFactory: deviceTransportFactory,
+            pathMonitorFactory: pathMonitorFactory,
+            connectionConfiguration: connectionConfiguration,
+        )
+    }
+
+    // MARK: - ConnectionManager factory
+
+    /// Build a ``ConnectionManager`` for `device`.
+    ///
+    /// The factory is THE single authorised construction site for a
+    /// supervisor on a paired connection. It threads three
+    /// security-critical wirings into the manager:
+    ///
+    /// 1. The ``HandshakeResponseVerifier`` constructed from the
+    ///    trusted ``PairedDevice/devicePublicKey`` (sourced from the
+    ///    Keychain row written at pairing time and re-checked on
+    ///    every ownership re-verification). The verifier rejects any
+    ///    ``AuthResponse`` not signed by that key, closing the
+    ///    impostor-at-the-Tailscale-endpoint gap.
+    /// 2. The ``handshakeBuilder``, producing a freshly-signed `dev:`
+    ///    attestation under a fresh ECDSA ``k`` per attempt.
+    /// 3. A fresh ``NetworkPathMonitor`` per supervisor — each
+    ///    instance owns its own monitor lifecycle so two supervisors
+    ///    cannot share a monitor and silently disagree on the path
+    ///    state.
+    ///
+    /// Without this factory the Xcode app target would have to wire
+    /// the verifier itself; forgetting that one parameter would
+    /// silently weaken the security posture to the level of the v1
+    /// (one-way handshake) design. Routing every paired-connection
+    /// supervisor through here makes the verifier wiring impossible
+    /// to forget — the call site has no way to construct a
+    /// ``DeviceClient`` that skips signature verification.
+    public func connectionManager(for device: PairedDevice) -> ConnectionManager {
+        let verifier = HandshakeResponseVerifier(devicePublicKey: device.devicePublicKey)
+        let captured = handshakeBuilder
+        let transports = deviceTransportFactory
+        // Build the DeviceClient HERE, wiring the verifier from the
+        // trusted Keychain-stored public key. The verifier is
+        // captured by value in the closure so a later mutation of
+        // `device` cannot retroactively change what the supervisor
+        // trusts. The composition is the only place where a
+        // production DeviceClient gets constructed against a paired
+        // device; `DeviceClient.connect` itself enforces (with a
+        // typed `handshakeVerifierMissing` error) that the verifier
+        // is non-nil whenever a handshake is supplied, so a refactor
+        // that bypasses this factory would crash loudly on the first
+        // connect attempt instead of silently weakening the posture.
+        let verifyingFactory: ConnectionManager.DeviceClientFactory = { endpoint in
+            let transport = try transports(endpoint)
+            return DeviceClient(
+                transport: transport,
+                responseVerifier: verifier,
+            )
+        }
+        return ConnectionManager(
+            endpoint: device.endpoint,
+            clientFactory: verifyingFactory,
+            pathMonitor: pathMonitorFactory(),
+            handshakeBuilder: captured,
+            configuration: connectionConfiguration,
         )
     }
 
     // MARK: - Private memberwise
+
+    private let deviceTransportFactory: DeviceTransportFactory
+    private let pathMonitorFactory: @Sendable () -> any NetworkPathMonitor
+    private let connectionConfiguration: ConnectionManager.Configuration
 
     private init(
         authCoordinator: AuthCoordinator,
@@ -309,6 +456,11 @@ public struct AppComposition: Sendable {
         liveKitAllowlist: LiveKitHostAllowlist,
         handshakeBuilder: @escaping ConnectionManager.HandshakeBuilder,
         liveAuthGate: @escaping LiveViewModel.AuthGate,
+        pairingAuthGate: @escaping PairingAuthGate,
+        endpointStore: any EndpointStore & SessionLifecycleObserver,
+        deviceTransportFactory: @escaping DeviceTransportFactory,
+        pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
+        connectionConfiguration: ConnectionManager.Configuration,
     ) {
         self.authCoordinator = authCoordinator
         self.pairingClient = pairingClient
@@ -316,6 +468,11 @@ public struct AppComposition: Sendable {
         self.liveKitAllowlist = liveKitAllowlist
         self.handshakeBuilder = handshakeBuilder
         self.liveAuthGate = liveAuthGate
+        self.pairingAuthGate = pairingAuthGate
+        self.endpointStore = endpointStore
+        self.deviceTransportFactory = deviceTransportFactory
+        self.pathMonitorFactory = pathMonitorFactory
+        self.connectionConfiguration = connectionConfiguration
     }
 }
 
@@ -336,12 +493,26 @@ public extension AppComposition {
     /// header, and the idempotency key; the ``onSessionExpired`` path
     /// routes into ``authCoordinator`` / ``bearerStore`` to drop the
     /// in-memory cache on a 401 without disturbing the keychain row.
-    static func production(config: DeploymentConfig) -> AppComposition {
+    static func production(config: DeploymentConfig) async -> AppComposition {
         let identity = SecureEnclaveIdentityStore()
         let attestationProvider = SystemDeviceAttestationProvider(identity: identity)
         let bearerStore = GatedBearerTokenStore(
             underlying: KeychainBearerTokenStore(accessGroup: config.keychainAccessGroup),
             gate: SessionAccessGate(),
+        )
+        // Single shared endpoint store. Constructed here and passed
+        // BOTH to ``make`` (which registers it as a sign-out
+        // observer on the auth coordinator) AND held on the returned
+        // composition so the Xcode app target threads the same
+        // instance into ``PairingViewModel``. Any future code path
+        // that builds a second ``KeychainEndpointStore`` instance
+        // would race with this one — sign-out would wipe the row
+        // owned by the registered observer while the pairing flow
+        // would still observe a populated keychain via the other
+        // instance until the next read coincided. Sharing one
+        // instance closes that gap.
+        let endpointStore = KeychainEndpointStore(
+            accessGroup: config.keychainAccessGroup,
         )
         let pinnedTransport = PinnedHTTPClient(pinning: config.tlsPinning)
         // The signed-client factory uses the Darwin-only
@@ -361,7 +532,24 @@ public extension AppComposition {
                 onSessionExpired: onExpired,
             )
         }
-        return make(
+        // Production transport factory: pin every TCP socket to the
+        // Tailscale ``utunN`` interface via the production resolver.
+        // ``NetworkDeviceTransport.init`` throws when no Tailscale
+        // interface is available; the ``ConnectionManager`` catches
+        // that and treats it as a transient connect failure (back off
+        // and retry once Tailscale comes up).
+        let transportFactory: DeviceTransportFactory = { endpoint in
+            try NetworkDeviceTransport(endpoint: endpoint)
+        }
+        // Each ``ConnectionManager`` constructed via
+        // ``connectionManager(for:)`` gets its own
+        // ``SystemNetworkPathMonitor`` — the protocol forbids more
+        // than one consumer of a monitor's stream, so two supervisors
+        // sharing one would deadlock the second.
+        let pathMonitorFactory: @Sendable () -> any NetworkPathMonitor = {
+            SystemNetworkPathMonitor()
+        }
+        return await make(
             authConfig: config.authConfig,
             authHTTPClient: pinnedTransport,
             signedHTTPClientFactory: pinnedFactory,
@@ -369,6 +557,9 @@ public extension AppComposition {
             attestationProvider: attestationProvider,
             bearerStore: bearerStore,
             liveVideoGate: bearerStore,
+            endpointStore: endpointStore,
+            deviceTransportFactory: transportFactory,
+            pathMonitorFactory: pathMonitorFactory,
         )
     }
 }
