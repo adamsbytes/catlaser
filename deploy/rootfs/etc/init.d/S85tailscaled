@@ -1,0 +1,98 @@
+#!/bin/sh
+# S85tailscaled - Bring up the tailnet interface before S91behavior.
+#
+# S91behavior waits for tailscale0 to appear with an IPv4 address and
+# aborts after 60s if it doesn't. This script is responsible for making
+# that happen: it launches tailscaled and, on first boot, consumes a
+# one-time authkey to join the tailnet.
+#
+# State (node key, tailnet assignment, peer data) lives under
+# /userdata/tailscale so it persists across firmware updates of the
+# read-only root. The authkey file is shredded immediately after a
+# successful login; only the node key is long-lived on disk.
+
+DAEMON="/usr/sbin/tailscaled"
+CLI="/usr/bin/tailscale"
+STATE_DIR="/userdata/tailscale"
+STATE_FILE="${STATE_DIR}/tailscaled.state"
+SOCKET_DIR="/var/run/tailscale"
+SOCKET="${SOCKET_DIR}/tailscaled.sock"
+AUTHKEY_FILE="${STATE_DIR}/authkey"
+PIDFILE="/var/run/tailscaled.pid"
+
+wait_for_socket() {
+    retries=0
+    while [ ! -S "${SOCKET}" ] && [ "${retries}" -lt 50 ]; do
+        sleep 0.1
+        retries=$((retries + 1))
+    done
+    if [ ! -S "${SOCKET}" ]; then
+        echo "ERROR: ${SOCKET} never appeared after 5s" >&2
+        return 1
+    fi
+}
+
+authenticate_if_needed() {
+    # Already logged in — nothing to do. tailscaled restores session
+    # from ${STATE_FILE} on every restart after first enrolment.
+    if "${CLI}" --socket="${SOCKET}" status >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ ! -f "${AUTHKEY_FILE}" ]; then
+        # Fail loud rather than silently skipping — without an authkey
+        # this device cannot reach the coordination server and is
+        # effectively bricked until one is provisioned via flash.sh
+        # or a support intervention.
+        echo "ERROR: not logged in and no authkey at ${AUTHKEY_FILE}" >&2
+        echo "       provision an authkey into /userdata/tailscale/authkey and reboot" >&2
+        return 1
+    fi
+
+    hostname="catlaser-$(hostname 2>/dev/null || echo unknown)"
+    echo "Logging in to tailnet as ${hostname}..."
+    if ! "${CLI}" --socket="${SOCKET}" up \
+        --authkey="$(cat "${AUTHKEY_FILE}")" \
+        --hostname="${hostname}" \
+        --ssh=false \
+        --accept-dns=false; then
+        echo "ERROR: tailscale up failed" >&2
+        return 1
+    fi
+
+    # shred rather than rm so the key isn't recoverable from flash
+    # wear-levelled spare blocks. Fall back to rm if shred is absent
+    # (some busybox builds drop it).
+    if command -v shred >/dev/null 2>&1; then
+        shred -u "${AUTHKEY_FILE}"
+    else
+        rm -f "${AUTHKEY_FILE}"
+    fi
+    echo "Tailscale login successful."
+}
+
+case "$1" in
+    start)
+        echo "Starting tailscaled..."
+        mkdir -p "${STATE_DIR}" "${SOCKET_DIR}"
+        start-stop-daemon -S -b -m -p "${PIDFILE}" -x "${DAEMON}" -- \
+            --state="${STATE_FILE}" \
+            --socket="${SOCKET}" \
+            --tun=tailscale0
+        wait_for_socket || exit 1
+        authenticate_if_needed || exit 1
+        ;;
+    stop)
+        echo "Stopping tailscaled..."
+        start-stop-daemon -K -p "${PIDFILE}"
+        rm -f "${PIDFILE}"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

@@ -35,6 +35,9 @@ build-vision-cross:
 
 build-all: build-mcu-all build-vision-cross
 
+setup-sdk:
+    ./deploy/setup-sdk.sh
+
 build-image *args:
     ./deploy/build-image.sh {{args}}
 
