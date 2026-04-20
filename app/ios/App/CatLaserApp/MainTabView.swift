@@ -1,5 +1,6 @@
 import CatLaserAuth
 import CatLaserDesign
+import CatLaserDevice
 import CatLaserHistory
 import CatLaserLive
 import CatLaserPairing
@@ -24,6 +25,11 @@ struct MainTabView: View {
     @Bindable var scheduleViewModel: ScheduleViewModel
     @Bindable var pushViewModel: PushViewModel
     @Bindable var pairingViewModel: PairingViewModel
+    /// Currently-bound event broker the Settings tab reads
+    /// ``latestStatus`` from to render the hopper row. Refreshed by
+    /// ``PairedShell`` on every supervisor reconnect so the broker
+    /// instance in scope always matches the live ``DeviceClient``.
+    let deviceEventBroker: DeviceEventBroker
     let authCoordinator: AuthCoordinator
     let appVersion: String
     let buildNumber: String
@@ -61,6 +67,7 @@ struct MainTabView: View {
             SettingsView(
                 pushViewModel: pushViewModel,
                 pairingViewModel: pairingViewModel,
+                deviceEventBroker: deviceEventBroker,
                 authCoordinator: authCoordinator,
                 appVersion: appVersion,
                 buildNumber: buildNumber,

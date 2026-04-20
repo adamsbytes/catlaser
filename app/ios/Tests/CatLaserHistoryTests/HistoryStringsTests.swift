@@ -72,4 +72,39 @@ struct HistoryStringsTests {
         let message = HistoryStrings.message(for: .validation(custom))
         #expect(message == custom)
     }
+
+    /// The queue-aware naming-sheet title surfaces both numbers so a
+    /// user who was away while multiple new cats were detected
+    /// understands the sheet is going to re-present N-1 more times —
+    /// not looping or stuck.
+    @Test
+    func namingSheetTitleWithQueueContainsBothPositionals() {
+        let title = HistoryStrings.namingSheetTitleWithQueue(index: 2, total: 5)
+        #expect(title.contains("2"),
+                "the title must contain the 1-based queue index")
+        #expect(title.contains("5"),
+                "the title must contain the queue total")
+        #expect(!title.isEmpty)
+    }
+
+    /// Positional argument order in ``String(format:)`` is fragile —
+    /// a future localisation that drops the ``%1$d`` / ``%2$d`` index
+    /// markers and instead uses bare ``%d`` will silently swap the
+    /// index and total at runtime (C-style positional fallback reads
+    /// the varargs in call order, which Swift already satisfies, but
+    /// it only takes one localisation merge that reorders the numbers
+    /// in-copy to break the expansion). This test assertion protects
+    /// the expansion at refactor time.
+    @Test
+    func namingSheetTitleWithQueueRendersIndexBeforeTotal() {
+        let title = HistoryStrings.namingSheetTitleWithQueue(index: 1, total: 3)
+        let indexPosition = title.range(of: "1")?.lowerBound
+        let totalPosition = title.range(of: "3")?.lowerBound
+        guard let indexPosition, let totalPosition else {
+            Issue.record("expected both 1 and 3 to appear in \(title)")
+            return
+        }
+        #expect(indexPosition < totalPosition,
+                "queue index must render before queue total")
+    }
 }

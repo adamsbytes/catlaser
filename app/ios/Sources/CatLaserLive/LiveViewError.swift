@@ -57,9 +57,6 @@ public enum LiveViewError: Error, Equatable, Sendable {
     /// The LiveKit server dropped the stream after we connected.
     case streamDropped(String?)
 
-    /// The network underneath LiveKit failed mid-stream.
-    case networkFailure(String?)
-
     /// The pre-stream user-presence gate refused the stream (biometric
     /// unavailable, lockout, repeated failures — anything other than a
     /// plain user cancellation, which returns silently to `.disconnected`

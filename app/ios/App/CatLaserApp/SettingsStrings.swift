@@ -1,4 +1,5 @@
 import CatLaserAuth
+import CatLaserProto
 import Foundation
 
 /// User-facing copy for the Settings tab.
@@ -43,6 +44,36 @@ enum SettingsStrings {
     static let deviceStatusLabel = "Status"
     static let deviceFallbackName = "Catlaser"
     static let deviceNotPaired = "No Catlaser paired."
+
+    // MARK: - Hopper row
+
+    static let hopperLabel = "Treat hopper"
+    static let hopperLevelPending = "Waiting for device…"
+    static let hopperLevelOk = "Full"
+    static let hopperLevelLow = "Low"
+    static let hopperLevelEmpty = "Empty"
+
+    /// Map a wire-level ``HopperLevel`` into the trailing-text label
+    /// shown on the hopper row. Matches the severity-tint pattern the
+    /// Push section already uses: a healthy reading is muted text, a
+    /// ``low`` reading is the warning tint, ``empty`` is destructive
+    /// so the user reaches for the next refill before they next tap
+    /// "Watch live" and discover it the hard way.
+    ///
+    /// ``.unspecified`` / ``.UNRECOGNIZED`` falls back to the same
+    /// "waiting for device" copy as ``latestStatus == nil`` so the
+    /// row never shows a confusing placeholder while the first
+    /// heartbeat is still in flight.
+    static func hopperLevelLabel(_ level: Catlaser_App_V1_HopperLevel?) -> String {
+        guard let level else { return hopperLevelPending }
+        switch level {
+        case .ok: return hopperLevelOk
+        case .low: return hopperLevelLow
+        case .empty: return hopperLevelEmpty
+        case .unspecified, .UNRECOGNIZED:
+            return hopperLevelPending
+        }
+    }
 
     // MARK: - Account section
 

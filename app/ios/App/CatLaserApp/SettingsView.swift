@@ -1,6 +1,8 @@
 import CatLaserAuth
 import CatLaserDesign
+import CatLaserDevice
 import CatLaserPairing
+import CatLaserProto
 import CatLaserPush
 import SwiftUI
 
@@ -22,18 +24,48 @@ import UIKit
 struct SettingsView: View {
     @Bindable var pushViewModel: PushViewModel
     @Bindable var pairingViewModel: PairingViewModel
+    /// Live device-event fanout the Settings screen reads
+    /// ``latestStatus`` from to render the hopper row. ``@Bindable``
+    /// so SwiftUI observes ``latestStatus`` changes and re-renders the
+    /// row on every device heartbeat; passed as a fresh instance on
+    /// same-device reconnect (a new broker is minted per supervisor
+    /// cycle, and PairedShell's ``@State`` reassignment propagates the
+    /// swap through here).
+    @Bindable var deviceEventBroker: DeviceEventBroker
     let authCoordinator: AuthCoordinator
     let appVersion: String
     let buildNumber: String
     let legalURLs: LegalURLs
 
-    /// Confirmation sheet state for destructive actions. Both default
-    /// to false; a tap on the row presents the respective dialog.
-    @State private var confirmUnpair = false
-    @State private var confirmSignOut = false
-    @State private var signOutError: String?
-    @State private var confirmDeleteAccount = false
-    @State private var deleteAccountError: String?
+    /// Mutually-exclusive modal state.
+    ///
+    /// The five dialogs the Settings screen can surface are driven
+    /// through a single optional enum rather than five independent
+    /// ``Bool`` flags. Two properties follow from that choice:
+    ///
+    /// * The modals are mutually exclusive by construction — a second
+    ///   tap on another destructive row while an earlier dialog is
+    ///   still animating replaces rather than stacks. SwiftUI's
+    ///   ``.confirmationDialog`` / ``.alert`` modifiers independently
+    ///   cannot enforce this; each modifier sees only its own
+    ///   ``isPresented`` binding, so two dialogs whose booleans both
+    ///   went true at once could flash or stack depending on the iOS
+    ///   version. The single-source enum closes that gap.
+    /// * Each dialog's ``isPresented`` binding is a projection off
+    ///   the enum that reads true iff the current case matches and
+    ///   writes ``nil`` on dismiss. There is no way to open two
+    ///   dialogs concurrently — the act of opening one closes the
+    ///   others.
+    private enum Dialog: Equatable {
+        case confirmUnpair
+        case confirmSignOut
+        case signOutError(String)
+        case confirmDeleteAccount
+        case deleteAccountError(String)
+    }
+
+    @State private var dialog: Dialog?
+
     /// True while the ``deleteAccount()`` round-trip is in flight.
     /// Disables the destructive confirmation dialog's re-entry path
     /// and spins a row-level ``ProgressView`` on the account section
@@ -55,11 +87,12 @@ struct SettingsView: View {
             .background(SemanticColor.background.ignoresSafeArea())
             .confirmationDialog(
                 SettingsStrings.confirmUnpairTitle,
-                isPresented: $confirmUnpair,
+                isPresented: dialogBinding(.confirmUnpair),
                 titleVisibility: .visible,
             ) {
                 Button(SettingsStrings.confirmUnpairAction, role: .destructive) {
                     Haptics.warning.play()
+                    dialog = nil
                     Task { await pairingViewModel.unpair() }
                 }
                 Button(SettingsStrings.cancelButton, role: .cancel) {}
@@ -68,11 +101,12 @@ struct SettingsView: View {
             }
             .confirmationDialog(
                 SettingsStrings.confirmSignOutTitle,
-                isPresented: $confirmSignOut,
+                isPresented: dialogBinding(.confirmSignOut),
                 titleVisibility: .visible,
             ) {
                 Button(SettingsStrings.confirmSignOutAction, role: .destructive) {
                     Haptics.warning.play()
+                    dialog = nil
                     Task { await performSignOut() }
                 }
                 Button(SettingsStrings.cancelButton, role: .cancel) {}
@@ -81,24 +115,22 @@ struct SettingsView: View {
             }
             .alert(
                 SettingsStrings.signOutErrorTitle,
-                isPresented: Binding(
-                    get: { signOutError != nil },
-                    set: { if !$0 { signOutError = nil } },
-                ),
+                isPresented: signOutErrorBinding,
             ) {
                 Button(SettingsStrings.signOutErrorOK, role: .cancel) {}
             } message: {
-                if let signOutError {
-                    Text(signOutError)
+                if case let .signOutError(message) = dialog {
+                    Text(message)
                 }
             }
             .confirmationDialog(
                 SettingsStrings.confirmDeleteAccountTitle,
-                isPresented: $confirmDeleteAccount,
+                isPresented: dialogBinding(.confirmDeleteAccount),
                 titleVisibility: .visible,
             ) {
                 Button(SettingsStrings.confirmDeleteAccountAction, role: .destructive) {
                     Haptics.warning.play()
+                    dialog = nil
                     Task { await performDeleteAccount() }
                 }
                 Button(SettingsStrings.cancelButton, role: .cancel) {}
@@ -107,18 +139,64 @@ struct SettingsView: View {
             }
             .alert(
                 SettingsStrings.deleteAccountErrorTitle,
-                isPresented: Binding(
-                    get: { deleteAccountError != nil },
-                    set: { if !$0 { deleteAccountError = nil } },
-                ),
+                isPresented: deleteAccountErrorBinding,
             ) {
                 Button(SettingsStrings.deleteAccountErrorOK, role: .cancel) {}
             } message: {
-                if let deleteAccountError {
-                    Text(deleteAccountError)
+                if case let .deleteAccountError(message) = dialog {
+                    Text(message)
                 }
             }
         }
+    }
+
+    /// Bridge a confirmation-dialog's ``isPresented`` binding into
+    /// the single-source ``dialog`` enum. The getter matches the
+    /// enum case; the setter clears the enum on ``false`` and is a
+    /// no-op on ``true`` (only the button handlers assign cases —
+    /// SwiftUI never writes ``true`` through this binding itself).
+    private func dialogBinding(_ target: Dialog) -> Binding<Bool> {
+        Binding(
+            get: { dialog == target },
+            set: { isPresented in
+                if !isPresented, dialog == target {
+                    dialog = nil
+                }
+            },
+        )
+    }
+
+    /// Projection for the sign-out-error alert. Payload-bearing
+    /// cases need their own getter because ``Dialog.Equatable``
+    /// compares the whole case including the associated value —
+    /// a ``==`` check against a synthetic sentinel would miss real
+    /// messages.
+    private var signOutErrorBinding: Binding<Bool> {
+        Binding(
+            get: {
+                if case .signOutError = dialog { return true }
+                return false
+            },
+            set: { isPresented in
+                if !isPresented, case .signOutError = dialog {
+                    dialog = nil
+                }
+            },
+        )
+    }
+
+    private var deleteAccountErrorBinding: Binding<Bool> {
+        Binding(
+            get: {
+                if case .deleteAccountError = dialog { return true }
+                return false
+            },
+            set: { isPresented in
+                if !isPresented, case .deleteAccountError = dialog {
+                    dialog = nil
+                }
+            },
+        )
     }
 
     // MARK: - Sections
@@ -158,8 +236,9 @@ struct SettingsView: View {
                     label: SettingsStrings.deviceStatusLabel,
                     value: PairingStrings.connectionStateLabel(pairingViewModel.connectionState),
                 )
+                HopperRow(level: deviceEventBroker.latestStatus?.hopperLevel)
                 Button(role: .destructive) {
-                    confirmUnpair = true
+                    dialog = .confirmUnpair
                 } label: {
                     Text(PairingStrings.unpairButton)
                 }
@@ -174,14 +253,14 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section(SettingsStrings.accountSection) {
             Button(role: .destructive) {
-                confirmSignOut = true
+                dialog = .confirmSignOut
             } label: {
                 Text(SettingsStrings.signOutButton)
             }
             .disabled(isDeletingAccount)
             .accessibilityLabel(Text(SettingsStrings.signOutButton))
             Button(role: .destructive) {
-                confirmDeleteAccount = true
+                dialog = .confirmDeleteAccount
             } label: {
                 HStack {
                     Text(SettingsStrings.deleteAccountButton)
@@ -238,7 +317,7 @@ struct SettingsView: View {
             // description, which would leak Swift's structured error
             // type into the UI. The lifecycle observer still fires on
             // throw, so the app still returns to the sign-in flow.
-            signOutError = SettingsStrings.signOutErrorMessage(for: error)
+            dialog = .signOutError(SettingsStrings.signOutErrorMessage(for: error))
         }
     }
 
@@ -258,7 +337,7 @@ struct SettingsView: View {
             // ``AuthCoordinator/deleteAccount`` docstring). Surface
             // a presentable sentence so the user understands the
             // server-side deletion didn't land and they can retry.
-            deleteAccountError = SettingsStrings.deleteAccountErrorMessage(for: error)
+            dialog = .deleteAccountError(SettingsStrings.deleteAccountErrorMessage(for: error))
         }
     }
 }
@@ -280,6 +359,48 @@ private struct LabeledRow: View {
                 .textSelection(.enabled)
                 .lineLimit(1)
                 .truncationMode(.middle)
+        }
+    }
+}
+
+/// Hopper-level row shown inside the Device section. Mirrors the
+/// visual shape of ``LabeledRow`` — label on the leading edge, a
+/// severity-tinted status word on the trailing edge — so the Device
+/// section reads as one coherent stack rather than a labeled-content
+/// sandwich around one custom widget. The trailing colour matches
+/// the pattern ``PushSummaryRow`` uses: a healthy reading is secondary
+/// text (steady-state, nothing to act on), ``low`` is the warning
+/// tint, ``empty`` is destructive so a user glancing at Settings
+/// reaches for the next refill before they next tap "Watch live"
+/// and discover it the hard way.
+///
+/// A nil level — no heartbeat has arrived yet — renders a muted
+/// "Waiting for device…" placeholder. That state is transient on
+/// any healthy connection (the device heartbeats at 1–5 Hz), so the
+/// row converges on a real value within the first few seconds of
+/// the Settings tab being on screen.
+private struct HopperRow: View {
+    let level: Catlaser_App_V1_HopperLevel?
+
+    var body: some View {
+        LabeledContent(SettingsStrings.hopperLabel) {
+            Text(SettingsStrings.hopperLevelLabel(level))
+                .font(.body)
+                .foregroundStyle(tint)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(SettingsStrings.hopperLabel))
+        .accessibilityValue(Text(SettingsStrings.hopperLevelLabel(level)))
+    }
+
+    private var tint: Color {
+        switch level {
+        case .low:
+            return SemanticColor.warning
+        case .empty:
+            return SemanticColor.destructive
+        case .ok, .unspecified, .UNRECOGNIZED, .none:
+            return SemanticColor.textSecondary
         }
     }
 }

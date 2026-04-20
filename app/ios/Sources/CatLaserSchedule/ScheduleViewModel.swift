@@ -185,12 +185,26 @@ public final class ScheduleViewModel {
     ///     two-phase model Add + sheet-edit follows. The local flip
     ///     still lands on ``entries`` so the draft stays faithful;
     ///     the main Save button picks it up.
-    public func toggleEnabled(id: String) async {
+    ///
+    /// Returns ``true`` iff the tap was accepted — either as an
+    /// optimistic flip that started a wire commit, or as a local-only
+    /// flip on a never-synced row. Returns ``false`` when any guard
+    /// dropped the tap (concurrent save in flight, state not
+    /// ``.loaded``, or the id is not in the draft set). The caller
+    /// uses this to gate its selection haptic so a user never feels
+    /// a "done" tick for a no-op — the SwiftUI ``.disabled(isSaving)``
+    /// modifier covers the common case, but the ~single-frame race
+    /// between a rapid second tap and SwiftUI re-rendering the toggle
+    /// as disabled can still slip through. The return value closes
+    /// that window by making haptic feedback contingent on actual
+    /// acceptance rather than tap site.
+    @discardableResult
+    public func toggleEnabled(id: String) async -> Bool {
         guard case let .loaded(draftSet, isRefreshing, isSaving) = state else {
-            return
+            return false
         }
-        guard !isSaving else { return }
-        guard draftSet.entries.contains(where: { $0.id == id }) else { return }
+        guard !isSaving else { return false }
+        guard draftSet.entries.contains(where: { $0.id == id }) else { return false }
 
         // Optimistic mutation: the switch under the user's finger
         // animates to its new position before any wire traffic.
@@ -204,7 +218,7 @@ public final class ScheduleViewModel {
         // up alongside any other pending draft edits.
         guard let baselineIndex = draftSet.baseline.firstIndex(where: { $0.id == id }) else {
             state = .loaded(draftSet: mutated, isRefreshing: isRefreshing, isSaving: false)
-            return
+            return true
         }
 
         state = .loaded(draftSet: mutated, isRefreshing: isRefreshing, isSaving: true)
@@ -245,6 +259,16 @@ public final class ScheduleViewModel {
                 isRefreshing: isRefreshing,
             )
         }
+        // Every post-guard path reaches here, including the wire-
+        // failure → ``applyToggleFailure`` branches. The tap is still
+        // "accepted" in those cases: the guards passed, the optimistic
+        // mutation landed, the user saw the switch flip and will see
+        // it flip back with an error banner + error haptic. The
+        // selection haptic confirms the tap was registered; the later
+        // error haptic (fired from the ``lastActionError`` observer on
+        // the view side) confirms the rejection. Two haptics, two
+        // distinct state transitions — the right feel for this flow.
+        return true
     }
 
     /// Revert an in-flight toggle that the device refused, restoring

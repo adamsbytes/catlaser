@@ -31,6 +31,19 @@ public enum LiveViewStrings {
         comment: "Subtitle shown after the user cancelled the biometric / passcode prompt on the live-view screen.",
     )
 
+    /// Variant subtitle shown on the disconnected screen right after
+    /// a network-class drop (wifi roam, cellular hiccup, app
+    /// suspended in the background so iOS closed the socket). The
+    /// VM lands in ``.disconnected`` rather than ``.failed`` for
+    /// this class because a routine background trip shouldn't look
+    /// like a crash; this copy tells the user the feed paused on
+    /// its own and reassures them a single tap resumes it.
+    public static let disconnectedNetworkDropSubtitle = NSLocalizedString(
+        "live.disconnected.network_drop.subtitle",
+        value: "Stream paused when your phone lost the connection. Tap Watch live to resume.",
+        comment: "Subtitle shown after a network-class drop while a live stream was active.",
+    )
+
     public static let watchLiveButton = NSLocalizedString(
         "live.watch_live.button",
         value: "Watch live",
@@ -161,12 +174,6 @@ public enum LiveViewStrings {
                 "live.error.stream_dropped",
                 value: "The stream ended unexpectedly. Please try again.",
                 comment: "Error shown when the LiveKit server dropped the stream.",
-            )
-        case .networkFailure:
-            return NSLocalizedString(
-                "live.error.network",
-                value: "Your network connection dropped during the stream.",
-                comment: "Error shown when the network failed mid-stream.",
             )
         case .authenticationRequired:
             return NSLocalizedString(

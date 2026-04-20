@@ -244,14 +244,24 @@ public struct ScheduleView: View {
                         isSaving: isSavingProjection,
                         onEdit: { editingEntryID = entry.id },
                         onToggleEnabled: {
-                            // Haptic at the gesture site so the user
-                            // gets a tick the moment their finger
-                            // leaves the switch; the VM fires a
-                            // success haptic on commit and the
-                            // screen-level error observer fires an
-                            // error haptic on failure.
-                            Haptics.selection.play()
-                            Task { await viewModel.toggleEnabled(id: entry.id) }
+                            // Gate the selection haptic on the VM's
+                            // acceptance of the tap. ``@MainActor``
+                            // VM hop is a few ms, so the haptic still
+                            // feels instant, but it never fires for
+                            // a tap the VM dropped — which can happen
+                            // when a rapid second tap slips through
+                            // the single-frame window before SwiftUI
+                            // re-renders the Toggle as disabled on
+                            // the prior tap's in-flight save. The
+                            // error haptic on a wire-failure path is
+                            // fired from the ``lastActionError``
+                            // observer on the screen root, so a
+                            // rejected commit still surfaces.
+                            Task {
+                                if await viewModel.toggleEnabled(id: entry.id) {
+                                    Haptics.selection.play()
+                                }
+                            }
                         },
                     )
                     .listRowSeparator(.hidden)

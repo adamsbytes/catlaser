@@ -82,6 +82,23 @@ public final class LiveViewModel {
     /// single intervening disconnected frame.
     public private(set) var didCancelAuthGate: Bool = false
 
+    /// True when the most recent stream ended because of a network-
+    /// class drop (wifi roam, cellular hiccup, app suspended in
+    /// background → socket dropped by iOS). The VM lands in
+    /// ``.disconnected`` rather than ``.failed`` for this class — the
+    /// red error pane and Retry button are the wrong UX for a
+    /// transient condition the user probably caused themselves by
+    /// switching apps. The screen reads this flag and surfaces a
+    /// softened "Stream paused when your phone lost the connection.
+    /// Tap Watch live to resume." subtitle so the user understands
+    /// the feed stopped rather than thinking their first tap was
+    /// never registered.
+    ///
+    /// Cleared at the top of ``start()`` so a retry rewrites the
+    /// subtitle, and cleared on any subsequent ``.failed`` path so a
+    /// follow-up hard error surfaces its own message cleanly.
+    public private(set) var didDropFromNetwork: Bool = false
+
     /// View-facing snapshot of the device's play-session status and
     /// hopper reading. Updated by the broker subscription; renders the
     /// top-of-stream overlay ("Playing now • 1m 20s") and the
@@ -169,11 +186,12 @@ public final class LiveViewModel {
     public func start() async {
         guard state.canStart else { return }
 
-        // Clear the transient "user cancelled the biometric prompt"
-        // flag at the top of each attempt. If the gate cancels again
-        // below, the flag is re-raised; otherwise the softened
-        // subtitle goes away the moment the user tries again.
+        // Clear both transient subtitle flags at the top of each
+        // attempt. If the gate cancels or the network drops again
+        // below, the relevant flag is re-raised; otherwise the
+        // softened subtitle goes away the moment the user tries again.
         didCancelAuthGate = false
+        didDropFromNetwork = false
 
         switch await authGate() {
         case .allowed:
@@ -329,13 +347,14 @@ public final class LiveViewModel {
         await rollbackDeviceStream()
     }
 
-    /// Dismiss a `.failed` state. No-op otherwise. Also clears the
-    /// ``didCancelAuthGate`` flag so a user who lands on the error
-    /// screen after a cancel-then-denial sequence doesn't see a
-    /// stale "couldn't confirm" subtitle once the error is
-    /// dismissed.
+    /// Dismiss a `.failed` state. No-op otherwise. Also clears both
+    /// transient subtitle flags so a user who lands on the error
+    /// screen after a cancel-then-denial or a network-drop-then-
+    /// hard-failure sequence doesn't see a stale softened subtitle
+    /// once the error is dismissed.
     public func dismissError() {
         didCancelAuthGate = false
+        didDropFromNetwork = false
         if case .failed = state {
             state = .disconnected
         }
@@ -592,8 +611,24 @@ public final class LiveViewModel {
                 state = .failed(.streamDropped(message))
                 await tearDownSession()
                 await rollbackDeviceStream()
-            case let .networkFailure(message):
-                state = .failed(.networkFailure(message))
+            case .networkFailure:
+                // Network-class drops are almost always transient: the
+                // app was backgrounded (iOS suspends the socket), Wi-Fi
+                // roamed, cellular had a brief hiccup. Surfacing the
+                // red error pane for these would make a routine
+                // home-button press feel like a crash. Land in
+                // ``.disconnected`` with the softened subtitle so the
+                // user can tap Watch live to resume. The posterBackdrop
+                // (blurred last frame) stays rendered behind the
+                // disconnected pane so the transition reads as "paused"
+                // rather than "broken."
+                //
+                // The global ``ConnectionStatusPill`` (reinstated the
+                // moment the VM leaves ``.streaming``) communicates any
+                // underlying transport issue — the LiveView itself does
+                // not need to re-surface it here.
+                didDropFromNetwork = true
+                state = .disconnected
                 await tearDownSession()
                 await rollbackDeviceStream()
             }

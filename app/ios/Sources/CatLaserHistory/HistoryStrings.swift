@@ -132,6 +132,27 @@ public enum HistoryStrings {
         comment: "Title of the sheet that appears when an unknown cat was detected during a session.",
     )
 
+    /// Title variant used when more than one ``NewCatDetected`` prompt
+    /// is queued — the device reported multiple new cats in flight
+    /// (either in a single session or because the user was away when
+    /// several sessions ran back-to-back). The "X of Y" affordance
+    /// prevents the user from thinking the sheet is buggy or looping
+    /// when it re-presents on dismiss: they know they're on prompt N
+    /// of M, so each dismiss is making forward progress.
+    ///
+    /// Positional args: queue index (1-based, matches what the user
+    /// reads), queue total. The index-position format "%1$d of %2$d"
+    /// is explicit so future localisations that need to reorder the
+    /// numbers don't break the expansion.
+    public static func namingSheetTitleWithQueue(index: Int, total: Int) -> String {
+        let format = NSLocalizedString(
+            "history.naming.title.with_queue",
+            value: "New cat seen (%1$d of %2$d)",
+            comment: "Title of the new-cat naming sheet when multiple cats are queued. Arg 1 is the current 1-based queue position; arg 2 is the total count.",
+        )
+        return String(format: format, index, total)
+    }
+
     public static let namingSheetBody = NSLocalizedString(
         "history.naming.body",
         value: "Give this cat a name so we can recognise them next time.",

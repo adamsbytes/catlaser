@@ -773,8 +773,15 @@ struct LiveViewModelTests {
         #expect(!vm.hasActiveSession)
     }
 
+    /// A network-class drop during an active stream lands the VM in
+    /// ``.disconnected`` (not ``.failed``) so a routine background
+    /// trip or wifi roam doesn't feel like a crash. The VM raises
+    /// the ``didDropFromNetwork`` flag so the disconnected pane can
+    /// render the softened "stream paused" subtitle, and the session
+    /// teardown + device rollback still run exactly like the
+    /// hard-failure path.
     @Test
-    func networkDropTransitionsToFailedNetworkFailure() async throws {
+    func networkDropTransitionsToDisconnectedWithFlagSet() async throws {
         let (vm, session, server, client) = try await makeHarness { request in
             switch request.request {
             case .startStream: return self.validOfferResponse()
@@ -797,14 +804,46 @@ struct LiveViewModelTests {
         await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
 
         session.emit(disconnectReason: .networkFailure("wifi gone"))
-        await eventually {
-            if case .failed(.networkFailure) = vm.state { true } else { false }
+        await eventually { vm.state == .disconnected && vm.didDropFromNetwork }
+        #expect(vm.state == .disconnected)
+        #expect(vm.didDropFromNetwork)
+        #expect(!vm.hasActiveSession)
+    }
+
+    /// A fresh ``start()`` after a network-drop clears the
+    /// ``didDropFromNetwork`` flag so the disconnected pane's
+    /// softened subtitle goes away the moment the user retries.
+    /// The flag is re-raised only if another network drop fires
+    /// against the new session.
+    @Test
+    func networkDropFlagClearsOnStart() async throws {
+        let (vm, session, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .startStream: return self.validOfferResponse()
+            case .stopStream:
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            default: return .error(code: 2, message: "unknown")
+            }
         }
-        if case .failed(.networkFailure) = vm.state {
-            // Good.
-        } else {
-            Issue.record("expected .failed(.networkFailure), got \(vm.state)")
+        defer {
+            Task {
+                await server.stop()
+                await client.disconnect()
+            }
         }
+
+        await vm.start()
+        session.emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+
+        session.emit(disconnectReason: .networkFailure("wifi gone"))
+        await eventually { vm.didDropFromNetwork }
+
+        await vm.start()
+        #expect(!vm.didDropFromNetwork,
+                "start() must clear the network-drop flag before re-arming the stream")
     }
 
     // MARK: - dismissError + retry

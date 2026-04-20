@@ -495,13 +495,86 @@ struct ScheduleViewModelTests {
         await pollUntil { !vm.state.canRefresh }
 
         // A row toggle that arrives while the save is parked must
-        // early-exit without firing a second wire call.
-        await vm.toggleEnabled(id: "morning")
+        // early-exit without firing a second wire call — and the
+        // return value must report ``false`` so the view's haptic
+        // gate skips the "done" tick for a tap the VM dropped.
+        let accepted = await vm.toggleEnabled(id: "morning")
         #expect(setCount.value == 1,
                 "concurrent toggle must not race an in-flight save")
+        #expect(accepted == false,
+                "a dropped toggle must return false so the view skips the selection haptic")
 
         setGate.signal()
         _ = await saveTask
+    }
+
+    /// ``toggleEnabled`` returns ``true`` for every post-guard path —
+    /// including optimistic commits that the wire round-trip later
+    /// rejects — so the view's tap-site haptic confirms the tap was
+    /// registered. The error haptic fired from the ``lastActionError``
+    /// observer covers the rejection; a user sees two haptics for
+    /// two distinct state transitions, which is the correct feel.
+    @Test
+    func toggleEnabledReturnsTrueEvenOnWireRejection() async throws {
+        let entry = makeEntry(id: "morning", enabled: true)
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule: return self.reply(entries: [entry])
+            case .setSchedule: return .error(code: 13, message: "nope")
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        let accepted = await vm.toggleEnabled(id: "morning")
+        #expect(accepted == true,
+                "a toggle that cleared all guards must return true even if the wire commit later fails")
+        #expect(vm.lastActionError != nil,
+                "the wire rejection still surfaces via lastActionError so the error haptic fires")
+    }
+
+    /// A toggle on a never-synced row returns ``true`` — the tap
+    /// was accepted as a local-only mutation and the user's main
+    /// Save button picks it up alongside other draft edits.
+    @Test
+    func toggleEnabledOnUnsyncedEntryReturnsTrue() async throws {
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule: return self.reply(entries: [])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        guard let newID = vm.addEntry() else {
+            Issue.record("expected addEntry to mint a fresh id")
+            return
+        }
+        let accepted = await vm.toggleEnabled(id: newID)
+        #expect(accepted == true,
+                "a local-only toggle on a never-synced row is acceptance, not a dropped tap")
+    }
+
+    /// A toggle against a non-existent id returns ``false`` — the
+    /// guard caught the mismatch before any mutation so the view's
+    /// haptic gate correctly skips the "done" tick.
+    @Test
+    func toggleEnabledOnMissingIDReturnsFalse() async throws {
+        let entry = makeEntry(id: "morning", enabled: true)
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getSchedule: return self.reply(entries: [entry])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        let accepted = await vm.toggleEnabled(id: "not-a-real-id")
+        #expect(accepted == false,
+                "a toggle against a missing id must report the drop so the haptic gate skips")
     }
 
     @Test

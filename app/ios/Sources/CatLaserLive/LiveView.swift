@@ -227,13 +227,23 @@ public struct LiveView: View {
 
     /// Subtitle shown on the disconnected pane. Normally reads the
     /// first-time "tap Watch live" copy; after a biometric-cancel
-    /// it reads the softened "couldn't confirm your identity" copy
-    /// so the user knows the cancelled prompt — not a dead button —
-    /// was what blocked the stream.
+    /// it reads the softened "couldn't confirm your identity" copy;
+    /// after a network-class drop (wifi roam, backgrounding) it
+    /// reads the "stream paused" copy so the user understands the
+    /// feed stopped on its own. Both transient flags are cleared at
+    /// the top of ``start()`` so a successful retry rewrites the
+    /// subtitle back to the default. The two flags are never true
+    /// simultaneously — ``start()`` clears them both before either
+    /// can be re-raised — so rendering priority between them is
+    /// incidental, not load-bearing.
     private var disconnectedSubtitle: String {
-        viewModel.didCancelAuthGate
-            ? LiveViewStrings.disconnectedAuthCancelledSubtitle
-            : LiveViewStrings.disconnectedSubtitle
+        if viewModel.didCancelAuthGate {
+            return LiveViewStrings.disconnectedAuthCancelledSubtitle
+        }
+        if viewModel.didDropFromNetwork {
+            return LiveViewStrings.disconnectedNetworkDropSubtitle
+        }
+        return LiveViewStrings.disconnectedSubtitle
     }
 
     private var loadingContent: some View {

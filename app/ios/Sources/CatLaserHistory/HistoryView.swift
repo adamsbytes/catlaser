@@ -91,6 +91,16 @@ public struct HistoryView: View {
         )) { prompt in
             NameNewCatSheet(
                 prompt: prompt,
+                // The head prompt is always queue position 1; the
+                // total is the current queue depth. Captured at sheet
+                // construction rather than observed live so a second
+                // prompt landing mid-naming doesn't bump the total
+                // under the user's finger — they get to finish naming
+                // the cat in front of them before the counter ticks.
+                // The SwiftUI ``.sheet(item:)`` API rebuilds the body
+                // whenever ``item`` identity changes, so the next
+                // prompt's sheet will read the updated depth at mount.
+                queueTotal: viewModel.pendingNewCats.count,
                 viewModel: viewModel,
             )
         }
@@ -649,6 +659,13 @@ private struct EditCatSheet: View {
 
 private struct NameNewCatSheet: View {
     let prompt: NewCatPrompt
+    /// Total pending-prompt queue depth observed when the sheet was
+    /// constructed. Drives the "1 of N" affordance on the title so a
+    /// user who was away while multiple new cats were detected
+    /// understands the sheet is going to re-present N-1 more times
+    /// rather than assuming it's stuck in a loop. Always ``>= 1`` —
+    /// the sheet wouldn't mount at all if the queue were empty.
+    let queueTotal: Int
     let viewModel: HistoryViewModel
 
     @State private var draft: String = ""
@@ -687,7 +704,7 @@ private struct NameNewCatSheet: View {
                 Spacer()
             }
             .padding()
-            .navigationTitle(HistoryStrings.namingSheetTitle)
+            .navigationTitle(sheetTitle)
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -740,6 +757,18 @@ private struct NameNewCatSheet: View {
     private var canSubmit: Bool {
         if case .success = HistoryViewModel.validateName(draft) { return true }
         return false
+    }
+
+    /// Sheet title — falls back to the plain "New cat seen" copy for
+    /// a single queued prompt; adds the "1 of N" progress affordance
+    /// when multiple cats are queued. The head prompt is always queue
+    /// position 1 because the FIFO pops on dismiss or save, so the
+    /// index is a constant rather than a computed property.
+    private var sheetTitle: String {
+        if queueTotal > 1 {
+            return HistoryStrings.namingSheetTitleWithQueue(index: 1, total: queueTotal)
+        }
+        return HistoryStrings.namingSheetTitle
     }
 
     private func submit() async {
