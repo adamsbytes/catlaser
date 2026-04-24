@@ -48,9 +48,16 @@ struct SignInStringsTests {
     }
 
     @Test
-    func fourHundredMapsToRejectedMessage() {
+    func fourHundredMapsToUserFacingRetryMessage() {
         let msg = SignInStrings.message(for: .serverError(status: 400, message: nil))
-        #expect(msg.lowercased().contains("rejected"))
+        // The rewrite deliberately drops the "rejected" framing (it
+        // reads like a legal turndown to non-technical users) in
+        // favour of a neutral retry nudge. Assert the shape — a user-
+        // facing sentence that doesn't leak the 4xx technical label
+        // and points the user at "try again".
+        let lower = msg.lowercased()
+        #expect(!lower.contains("rejected"))
+        #expect(lower.contains("try again"))
     }
 
     @Test

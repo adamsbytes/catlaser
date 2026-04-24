@@ -211,4 +211,106 @@ struct ScheduleStringsTests {
         #expect(ScheduleStrings.shortDayLabel(.unspecified).isEmpty)
         #expect(ScheduleStrings.fullDayLabel(.UNRECOGNIZED(99)).isEmpty)
     }
+
+    // MARK: - durationHumanLabel
+
+    @Test
+    func humanDurationSingularPlural() {
+        #expect(ScheduleStrings.durationHumanLabel(minutes: 1) == "1 minute")
+        #expect(ScheduleStrings.durationHumanLabel(minutes: 15) == "15 minutes")
+        #expect(ScheduleStrings.durationHumanLabel(minutes: 60) == "1 hour")
+        #expect(ScheduleStrings.durationHumanLabel(minutes: 120) == "2 hours")
+        #expect(ScheduleStrings.durationHumanLabel(minutes: 75) == "1 hour 15 minutes")
+        #expect(ScheduleStrings.durationHumanLabel(minutes: 61) == "1 hour 1 minute")
+    }
+
+    // MARK: - summarySentence
+
+    private func summary(
+        days: Set<Catlaser_App_V1_DayOfWeek>,
+        startMinute: Int,
+        durationMinutes: Int,
+    ) -> String {
+        let locale = Locale(identifier: "en_US_POSIX")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return ScheduleStrings.summarySentence(
+            days: days,
+            startMinute: startMinute,
+            durationMinutes: durationMinutes,
+            locale: locale,
+            calendar: calendar,
+        )
+    }
+
+    @Test
+    func summaryEveryDayHumanSentence() {
+        let text = summary(
+            days: [],
+            startMinute: 8 * 60,
+            durationMinutes: 15,
+        )
+        #expect(text.contains(ScheduleStrings.entrySheetEveryDay))
+        #expect(text.contains("15 minutes"))
+        // The locale-dependent time substring varies; just assert the
+        // hour digit is present so a refactor can't silently drop the
+        // time component.
+        #expect(text.contains("8"))
+    }
+
+    @Test
+    func summaryWeekdaysCollapsesWeekdayLabel() {
+        let text = summary(
+            days: [.monday, .tuesday, .wednesday, .thursday, .friday],
+            startMinute: 9 * 60,
+            durationMinutes: 30,
+        )
+        #expect(text.contains("Weekdays"))
+        #expect(text.contains("30 minutes"))
+    }
+
+    @Test
+    func summaryWeekendsCollapsesWeekendLabel() {
+        let text = summary(
+            days: [.saturday, .sunday],
+            startMinute: 10 * 60,
+            durationMinutes: 60,
+        )
+        #expect(text.contains("Weekends"))
+        #expect(text.contains("1 hour"))
+    }
+
+    @Test
+    func summaryArbitrarySubsetListsDays() {
+        let text = summary(
+            days: [.monday, .friday],
+            startMinute: 17 * 60,
+            durationMinutes: 45,
+        )
+        #expect(text.contains("Mon"))
+        #expect(text.contains("Fri"))
+        #expect(text.contains("45 minutes"))
+    }
+
+    @Test
+    func summarySevenDaysCollapsesToEveryDay() {
+        let text = summary(
+            days: [.monday, .tuesday, .wednesday, .thursday, .friday, .saturday, .sunday],
+            startMinute: 0,
+            durationMinutes: 30,
+        )
+        #expect(text.contains(ScheduleStrings.entrySheetEveryDay))
+    }
+
+    @Test
+    func summarySingularMinute() {
+        let text = summary(
+            days: [],
+            startMinute: 0,
+            durationMinutes: 1,
+        )
+        #expect(text.contains("1 minute"))
+        #expect(!text.contains("1 minutes"))
+    }
 }

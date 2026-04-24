@@ -39,6 +39,7 @@ final class AppShell: SessionLifecycleObserver {
     enum Phase {
         case resolvingInitial
         case needsConsent(PrivacyConsentViewModel)
+        case needsFaceIDIntroduction(FaceIDIntroViewModel)
         case signedOut(SignInViewModel)
         case signedIn(PairingViewModel)
     }
@@ -108,9 +109,35 @@ final class AppShell: SessionLifecycleObserver {
         // observability observer.
     }
 
+    /// Called from the view layer when the Face ID intro VM commits.
+    /// Falls through to the existing sign-in-resume path.
+    func advancePastFaceIDIntroduction() async {
+        await resumeSignInOrRoute()
+    }
+
     // MARK: - Internal
 
     private func advancePastConsent() async {
+        // After consent, gate on the Face ID / passcode intro card.
+        // The card is shown once per install (tracked in
+        // ``FaceIDIntroductionStore``); if already seen, fall straight
+        // through to the sign-in resume path.
+        if await composition.needsFaceIDIntroduction() {
+            let vm = composition.faceIDIntroViewModel { [weak self] in
+                Task { @MainActor in await self?.advancePastFaceIDIntroduction() }
+            }
+            phase = .needsFaceIDIntroduction(vm)
+            return
+        }
+        await resumeSignInOrRoute()
+    }
+
+    /// Build a sign-in VM, resume any persisted session, and route
+    /// to either ``.signedIn`` or ``.signedOut``. Shared between the
+    /// post-consent and post-Face-ID-intro transitions so the
+    /// resume semantics (biometric-cancelled fallback, etc.) stay
+    /// consistent.
+    private func resumeSignInOrRoute() async {
         let signInVM = SignInViewModel(coordinator: composition.authCoordinator)
         await signInVM.resume()
         if case .succeeded = signInVM.phase {

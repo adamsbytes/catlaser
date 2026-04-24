@@ -17,6 +17,7 @@ import {
   deriveTokenIdentifier,
   lookupMagicLinkAttestation,
 } from '~/lib/magic-link-attestation.ts';
+import { deleteMagicLinkCodeByTokenIdentifier } from '~/lib/magic-link-code.ts';
 import { storeSessionAttestation } from '~/lib/session-attestation.ts';
 
 /**
@@ -149,6 +150,24 @@ const PATH_SPECS: ReadonlyMap<string, PathSpec> = new Map<string, PathSpec>([
       requiresBodyNonceMatch: false,
       enforcesSkew: false,
       enforcesStoredDeviceMatch: true,
+    },
+  ],
+  [
+    '/magic-link/verify-by-code',
+    {
+      // Same wire binding as the URL path — iOS signs `ver:<code>` where
+      // the URL path signs `ver:<token>`. `parseOpaqueToken` accepts both
+      // shapes; the endpoint itself disambiguates by storage source. The
+      // stored-device byte-match for this path runs inside the endpoint
+      // handler (see `magic-link-code-plugin.ts`) rather than here,
+      // because it must be atomic with the `attempts_remaining`
+      // decrement so a racing second attempt cannot observe a stale
+      // counter. `enforcesStoredDeviceMatch: false` avoids a redundant
+      // lookup.
+      expectedTag: 'verify',
+      requiresBodyNonceMatch: false,
+      enforcesSkew: false,
+      enforcesStoredDeviceMatch: false,
     },
   ],
   [
@@ -427,6 +446,7 @@ const runAttestationGate = async (
  */
 const SESSION_CAPTURE_PATHS: ReadonlySet<string> = new Set([
   '/magic-link/verify',
+  '/magic-link/verify-by-code',
   '/sign-in/social',
 ]);
 
@@ -476,21 +496,23 @@ const reparseHeaderOrThrow = (path: string, headerValue: string): ParsedAttestat
 };
 
 /**
- * Delete the `magic_link_attestation` row that backed a just-completed
- * verify. The stored `(fph, pk)` has done its job: the session was
- * minted, `session_attestation` now holds the per-session SE pubkey,
- * and the verification row itself was consumed by the magic-link plugin
- * (`allowedAttempts: 1`). Dropping the per-token row as soon as the
- * sign-in completes prevents a future plugin regression from relying on
- * stored fph/pk as a fallback gate and bounds the row's lifetime to the
- * actually-useful window rather than the natural 5-minute TTL.
+ * Delete the `magic_link_attestation` row AND any sibling
+ * `magic_link_code` row that backed a just-completed URL-path verify.
+ * The stored `(fph, pk)` has done its job: the session was minted,
+ * `session_attestation` now holds the per-session SE pubkey, and the
+ * verification row itself was consumed by the magic-link plugin
+ * (`allowedAttempts: 1`). Dropping both sibling rows as soon as the
+ * sign-in completes prevents a future plugin regression from relying
+ * on stored fph/pk as a fallback gate and guarantees that a freshly-
+ * minted session cannot be re-minted by a racing code-path verify
+ * against the same underlying token identifier.
  *
- * Best-effort: a delete failure here does not undo the successful
- * verify — the row expires naturally within the token lifetime and the
- * plugin's `allowedAttempts: 1` already blocks replay — so storage
- * errors are swallowed. Propagating would surface as 500 to the client
- * even though the sign-in has already completed server-side, leaving
- * the user in a worse state than a stale row.
+ * Best-effort on both deletes: a failure here does not undo the
+ * successful verify — both rows expire naturally within the token
+ * lifetime and the plugin's `allowedAttempts: 1` already blocks
+ * replay — so storage errors are swallowed. Propagating would surface
+ * as 500 to the client even though the sign-in has already completed
+ * server-side, leaving the user in a worse state than a stale row.
  */
 const purgeConsumedMagicLinkAttestation = async (parsed: ParsedAttestation): Promise<void> => {
   if (parsed.binding.tag !== 'verify') {
@@ -498,8 +520,14 @@ const purgeConsumedMagicLinkAttestation = async (parsed: ParsedAttestation): Pro
     // stays narrow here.
     return;
   }
+  const tokenIdentifier = deriveTokenIdentifier(parsed.binding.token);
   try {
-    await deleteMagicLinkAttestation(deriveTokenIdentifier(parsed.binding.token));
+    await deleteMagicLinkAttestation(tokenIdentifier);
+  } catch {
+    // Swallow: see contract comment above.
+  }
+  try {
+    await deleteMagicLinkCodeByTokenIdentifier(tokenIdentifier);
   } catch {
     // Swallow: see contract comment above.
   }

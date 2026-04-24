@@ -182,6 +182,21 @@ public struct AppComposition: Sendable {
     /// reads it on every upload).
     public let consentStore: any ConsentStore
 
+    /// Face ID / passcode intro store. Read at launch (after the
+    /// consent screen commits) to decide whether to present
+    /// ``FaceIDIntroView``. One-shot: once the user dismisses the
+    /// card (via Got it, or Continue anyway when biometrics are
+    /// unavailable), the flag flips and the card is skipped on
+    /// subsequent launches.
+    public let faceIDIntroductionStore: any FaceIDIntroductionStore
+
+    /// Onboarding tour store. Holds two one-shot flags: the tabs
+    /// tour (shown on the first successful pair + connect) and the
+    /// schedule hint (shown on the first Schedule tab visit). The
+    /// ``PairedShell`` reads the first; ``ScheduleView`` reads the
+    /// second. Both flip on first dismissal and stay.
+    public let onboardingTourStore: any OnboardingTourStore
+
     /// Bearer-token store retained here so ``applicationDidEnterBackground``
     /// can drop the in-memory cache on scene backgrounding. The
     /// keychain row is deliberately untouched — the next protected
@@ -369,6 +384,27 @@ public struct AppComposition: Sendable {
         await consentStore.load().needsPrompt
     }
 
+    /// Whether the Face ID / passcode onboarding card must be
+    /// presented. One-shot: after the user commits once the flag
+    /// flips and stays. Read after the consent gate clears so the
+    /// two prompts don't stack.
+    public func needsFaceIDIntroduction() async -> Bool {
+        await faceIDIntroductionStore.load().needsPrompt
+    }
+
+    /// Build the Face ID intro VM. Called by the app shell when
+    /// ``needsFaceIDIntroduction()`` is `true`; the shell passes a
+    /// completion closure that drives the phase machine forward.
+    @MainActor
+    public func faceIDIntroViewModel(
+        onCompletion: @escaping @MainActor () -> Void,
+    ) -> FaceIDIntroViewModel {
+        FaceIDIntroViewModel(
+            store: faceIDIntroductionStore,
+            onCompletion: onCompletion,
+        )
+    }
+
     // MARK: - Lifecycle hooks
 
     /// Called by the app's scene-phase observer on every transition
@@ -496,6 +532,8 @@ public struct AppComposition: Sendable {
         endpointStore: any EndpointStore & SessionLifecycleObserver,
         observability: Observability,
         consentStore: any ConsentStore,
+        faceIDIntroductionStore: any FaceIDIntroductionStore,
+        onboardingTourStore: any OnboardingTourStore,
         deviceTransportFactory: @escaping DeviceTransportFactory,
         pathMonitorFactory: @escaping @Sendable () -> any NetworkPathMonitor,
         pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
@@ -636,6 +674,8 @@ public struct AppComposition: Sendable {
             pushRegistrar: pushRegistrar,
             observability: observability,
             consentStore: consentStore,
+            faceIDIntroductionStore: faceIDIntroductionStore,
+            onboardingTourStore: onboardingTourStore,
             bearerStore: bearerStore,
             pushPrompt: pushPrompt,
             pushReadAuthorization: pushReadAuthorization,
@@ -737,6 +777,8 @@ public struct AppComposition: Sendable {
         pushRegistrar: PushTokenRegistrar,
         observability: Observability,
         consentStore: any ConsentStore,
+        faceIDIntroductionStore: any FaceIDIntroductionStore,
+        onboardingTourStore: any OnboardingTourStore,
         bearerStore: any BearerTokenStore & SessionInvalidating,
         pushPrompt: @escaping PushViewModel.AuthorizationPrompt,
         pushReadAuthorization: @escaping PushViewModel.AuthorizationStatusReader,
@@ -757,6 +799,8 @@ public struct AppComposition: Sendable {
         self.pushRegistrar = pushRegistrar
         self.observability = observability
         self.consentStore = consentStore
+        self.faceIDIntroductionStore = faceIDIntroductionStore
+        self.onboardingTourStore = onboardingTourStore
         self.bearerStore = bearerStore
         self.pushPrompt = pushPrompt
         self.pushReadAuthorization = pushReadAuthorization
@@ -888,6 +932,8 @@ public extension AppComposition {
         // register does not block the rest of the composition from
         // returning (and therefore the app from launching).
         let consentStore = UserDefaultsConsentStore()
+        let faceIDIntroductionStore = UserDefaultsFaceIDIntroductionStore()
+        let onboardingTourStore = UserDefaultsOnboardingTourStore()
         let observabilityTransportClient = ObservabilityPinnedHTTPClient(
             pinned: pinnedTransport,
         )
@@ -943,6 +989,8 @@ public extension AppComposition {
             endpointStore: endpointStore,
             observability: observability,
             consentStore: consentStore,
+            faceIDIntroductionStore: faceIDIntroductionStore,
+            onboardingTourStore: onboardingTourStore,
             deviceTransportFactory: transportFactory,
             pathMonitorFactory: pathMonitorFactory,
             pushPrompt: pushPrompt,

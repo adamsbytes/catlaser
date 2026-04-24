@@ -11,9 +11,40 @@ import SwiftUI
 /// Every control binds to a ``ScheduleViewModel`` method or
 /// ``@Observable`` property; the view holds no logical state of its
 /// own beyond which sheet is open.
+/// Dismissible first-run hint banner controller. Host passes one in
+/// when the onboarding store says the schedule hint has not been
+/// dismissed yet; otherwise the view renders no banner. The
+/// ``onDismiss`` closure flips the persistent flag.
+///
+/// Modelled as a value type over two closures (rather than a binding)
+/// so the flag's truth lives in the composition-owned store rather
+/// than on a SwiftUI ``@State`` that would reset on view rebuild.
+public struct ScheduleFirstRunHint: Sendable {
+    /// `true` iff the banner should be rendered on this mount.
+    public let isVisible: Bool
+    /// Callback fired when the user taps the dismiss button or
+    /// successfully commits their first schedule via Save. The host
+    /// flips the store flag; subsequent mounts see ``isVisible ==
+    /// false`` and no banner renders.
+    public let onDismiss: @Sendable () -> Void
+
+    public init(isVisible: Bool, onDismiss: @escaping @Sendable () -> Void) {
+        self.isVisible = isVisible
+        self.onDismiss = onDismiss
+    }
+}
+
 public struct ScheduleView: View {
     @Bindable private var viewModel: ScheduleViewModel
     @State private var editingEntryID: String?
+    private let firstRunHint: ScheduleFirstRunHint?
+    /// Live copy of ``ScheduleFirstRunHint/isVisible``. Starts from
+    /// the controller value and drops to `false` on any dismissal
+    /// (tap X or first successful save) so the banner vanishes in-
+    /// session without waiting for a re-mount. The persistent flag
+    /// update happens via ``ScheduleFirstRunHint/onDismiss`` on the
+    /// same transition.
+    @State private var hintVisible: Bool
     /// Identifies the entry minted by the most recent ``addEntry`` tap
     /// while its sheet is still on-screen. Drives the entry-sheet title
     /// switch ("New window" vs "Edit window") so a user who just
@@ -21,6 +52,12 @@ public struct ScheduleView: View {
     /// sheet. Cleared when the sheet dismisses (Save, Delete, Cancel,
     /// or interactive swipe-down).
     @State private var recentlyAddedEntryID: String?
+    /// Identifies the draft currently pinned to the quick-add sheet —
+    /// the simplified mom-friendly add path shown on ``+ Add time``.
+    /// Distinct from ``editingEntryID`` so a "More options" tap on
+    /// quick-add can dismiss THIS sheet and open the full edit sheet
+    /// for the same draft in the same gesture.
+    @State private var quickAddID: String?
     /// Drives the destructive confirmation dialog presented when the
     /// user taps the toolbar Cancel button with pending edits in
     /// flight. The dialog itself owns the rollback — the button only
@@ -29,8 +66,13 @@ public struct ScheduleView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var errorFocus: Bool
 
-    public init(viewModel: ScheduleViewModel) {
+    public init(
+        viewModel: ScheduleViewModel,
+        firstRunHint: ScheduleFirstRunHint? = nil,
+    ) {
         self.viewModel = viewModel
+        self.firstRunHint = firstRunHint
+        self._hintVisible = State(initialValue: firstRunHint?.isVisible ?? false)
     }
 
     public var body: some View {
@@ -61,6 +103,12 @@ public struct ScheduleView: View {
             // user feels the server ack, not just their own tap.
             if oldValue == true, newValue == false, viewModel.lastActionError == nil {
                 Haptics.success.play()
+                // A successful save implies the user has "got it" —
+                // dismiss the first-run hint too so the banner doesn't
+                // persist into their second session. No-op if the
+                // controller was absent or if the user already
+                // dismissed via the X.
+                dismissFirstRunHint()
             }
         }
         .task {
@@ -79,6 +127,29 @@ public struct ScheduleView: View {
                     dismissSheet()
                 },
                 onCancel: { dismissSheet() },
+            )
+        }
+        .sheet(item: quickAddEntryBinding) { entry in
+            QuickAddSheet(
+                entry: entry,
+                onSave: { updated in
+                    viewModel.updateEntry(updated)
+                    dismissQuickAdd()
+                },
+                onCancel: {
+                    viewModel.deleteEntry(id: entry.id)
+                    dismissQuickAdd()
+                },
+                onMoreOptions: {
+                    // Swap quick-add for the full edit sheet on the same
+                    // draft. `quickAddID` clears, `editingEntryID` adopts
+                    // the same id; SwiftUI dismisses one sheet and mounts
+                    // the other on the next runloop.
+                    let id = entry.id
+                    quickAddID = nil
+                    editingEntryID = id
+                    recentlyAddedEntryID = id
+                },
             )
         }
         .confirmationDialog(
@@ -103,6 +174,14 @@ public struct ScheduleView: View {
     /// window" title.
     private func dismissSheet() {
         editingEntryID = nil
+        recentlyAddedEntryID = nil
+    }
+
+    /// Clear quick-add bookkeeping. Symmetric with ``dismissSheet`` so
+    /// Save / Cancel / interactive swipe-down all leave the view in
+    /// the same shape.
+    private func dismissQuickAdd() {
+        quickAddID = nil
         recentlyAddedEntryID = nil
     }
 
@@ -142,6 +221,12 @@ public struct ScheduleView: View {
         isSaving: Bool,
     ) -> some View {
         VStack(spacing: 0) {
+            if hintVisible {
+                firstRunHintBanner
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
             toolbar(draftSet: draftSet, isSaving: isSaving)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -150,6 +235,52 @@ public struct ScheduleView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
         }
+    }
+
+    /// First-run hint banner. Dismissible via a trailing X button and
+    /// auto-dismissed on a successful first save. The underlying
+    /// persistent flag is flipped via the controller's ``onDismiss``
+    /// closure — the local ``hintVisible`` state drops the banner
+    /// immediately for a responsive in-session feel.
+    @ViewBuilder
+    private var firstRunHintBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "calendar.badge.clock")
+                .font(.title3)
+                .foregroundStyle(SemanticColor.accent)
+                .accessibilityDecorativeIcon()
+            VStack(alignment: .leading, spacing: 4) {
+                Text(ScheduleStrings.firstRunHintTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textPrimary)
+                Text(ScheduleStrings.firstRunHintBody)
+                    .font(.footnote)
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button {
+                dismissFirstRunHint()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .padding(8)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityID(.onboardingScheduleHintDismiss)
+            .accessibilityLabel(Text(ScheduleStrings.firstRunHintDismiss))
+        }
+        .padding(12)
+        .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func dismissFirstRunHint() {
+        guard hintVisible, let firstRunHint else { return }
+        hintVisible = false
+        firstRunHint.onDismiss()
     }
 
     private func toolbar(
@@ -346,11 +477,12 @@ public struct ScheduleView: View {
     private func addBar(isSaving: Bool) -> some View {
         Button {
             if let newID = viewModel.addEntry() {
-                // Track the freshly-minted id so the entry sheet titles
-                // itself "New window" rather than "Edit window" until
-                // the user dismisses it.
+                // Track the freshly-minted id so the quick-add sheet
+                // titles itself "New window" rather than "Edit window"
+                // until the user dismisses it, and so a "More options"
+                // tap can transfer the same id to the full edit sheet.
                 recentlyAddedEntryID = newID
-                editingEntryID = newID
+                quickAddID = newID
             }
         } label: {
             HStack(spacing: 8) {
@@ -493,6 +625,39 @@ public struct ScheduleView: View {
             },
         )
     }
+
+    /// Mirror of ``editingEntryBinding`` for the quick-add sheet. The
+    /// quick-add sheet and the full edit sheet never present at the
+    /// same time — the "More options" hand-off clears
+    /// ``quickAddID`` before it sets ``editingEntryID``, so SwiftUI
+    /// dismisses one before mounting the other.
+    private var quickAddEntryBinding: Binding<ScheduleEntryDraft?> {
+        Binding(
+            get: {
+                guard let id = quickAddID,
+                      case let .loaded(draftSet, _, _) = viewModel.state
+                else {
+                    return nil
+                }
+                return draftSet.entries.first { $0.id == id }
+            },
+            set: { newValue in
+                if newValue == nil {
+                    // Interactive swipe-down. Treat as cancel: pop the
+                    // freshly-minted draft so the user doesn't silently
+                    // accumulate empty rows. `deleteEntry` is a no-op
+                    // if the id doesn't exist, so a racing delete from
+                    // another path is safe.
+                    if let id = quickAddID {
+                        viewModel.deleteEntry(id: id)
+                    }
+                    dismissQuickAdd()
+                } else {
+                    quickAddID = newValue?.id
+                }
+            },
+        )
+    }
 }
 
 // MARK: - Row
@@ -505,34 +670,22 @@ private struct ScheduleEntryRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(ScheduleStrings.timeOfDay(minute: entry.startMinute))
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(SemanticColor.textPrimary)
-                    .opacity(entry.enabled ? 1.0 : 0.5)
-                Text(ScheduleStrings.durationLabel(minutes: entry.durationMinutes))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(
-                        entry.enabled
-                            ? SemanticColor.textSecondary
-                            : SemanticColor.textTertiary,
-                    )
-                Text(ScheduleStrings.daysSummary(entry.days))
-                    .font(.caption)
-                    .foregroundStyle(
-                        entry.enabled
-                            ? SemanticColor.textSecondary
-                            : SemanticColor.textTertiary,
-                    )
-            }
-            // The text-stack reads as a single label; combining it into
-            // the row's leading element lets VoiceOver announce the
-            // entry's identity once before it reaches the toggle and
-            // edit button. The interactive controls below stay
-            // independent so screen-reader users can activate them
-            // directly via the rotor or a swipe.
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(Text(rowSummary))
+            // Single-sentence summary — collapses the former three-line
+            // stack so mom parses the row as one thought rather than
+            // three disconnected data points. Power users lose no
+            // information: every field is still rendered, just in a
+            // natural-language form. Tap-through to the full edit sheet
+            // remains the primary interaction.
+            Text(rowSummary)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(
+                    entry.enabled
+                        ? SemanticColor.textPrimary
+                        : SemanticColor.textTertiary,
+                )
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(Text(rowSummary))
             Spacer()
             // Disable the toggle while a save is in flight so a rapid
             // second tap cannot race the first commit. The VM's own
@@ -573,16 +726,18 @@ private struct ScheduleEntryRow: View {
         // any native list row.
     }
 
-    /// Summary string ("8:00 AM, every day, 15m") used as a contextual
-    /// suffix on the toggle and edit-button labels, and as the label
-    /// of the combined leading text element. Lets a VoiceOver user
-    /// know which row they are currently inspecting without having to
-    /// re-read the static control labels.
+    /// Single-sentence summary rendered both on the row body and as
+    /// the VoiceOver label. Example: "Every weekday at 8:00 AM for
+    /// 15 minutes". The row-body text and the VoiceOver label point
+    /// at the same source so what a sighted user reads matches what
+    /// a screen-reader user hears — no hidden trailing ", 15m" that
+    /// visually renders differently from the spoken form.
     private var rowSummary: String {
-        let time = ScheduleStrings.timeOfDay(minute: entry.startMinute)
-        let days = ScheduleStrings.daysSummary(entry.days)
-        let duration = ScheduleStrings.durationLabel(minutes: entry.durationMinutes)
-        return "\(time), \(days), \(duration)"
+        ScheduleStrings.summarySentence(
+            days: entry.days,
+            startMinute: entry.startMinute,
+            durationMinutes: entry.durationMinutes,
+        )
     }
 }
 
@@ -819,6 +974,131 @@ private struct ScheduleEntrySkeletonRow: View {
             SemanticColor.groupedBackground,
             in: RoundedRectangle(cornerRadius: 16),
         )
+    }
+}
+
+// MARK: - Quick-add sheet
+
+/// Simplified add-time sheet shown on the first tap of "+ Add time".
+///
+/// A single time picker plus a caption that names the defaults (15
+/// minutes, every day). "Save" commits the draft via the parent's
+/// ``onSave`` callback with those defaults baked in; "More options"
+/// hands off to the full ``ScheduleEntrySheet`` for the same draft so
+/// power users can customise without a detour. Mom sees one field.
+///
+/// This view intentionally does NOT mutate the underlying
+/// ``ScheduleViewModel`` — it speaks only to the parent via the three
+/// callbacks, mirroring how the full edit sheet stays storage-agnostic.
+private struct QuickAddSheet: View {
+    let entry: ScheduleEntryDraft
+    let onSave: (ScheduleEntryDraft) -> Void
+    let onCancel: () -> Void
+    let onMoreOptions: () -> Void
+
+    @State private var draft: ScheduleEntryDraft
+
+    init(
+        entry: ScheduleEntryDraft,
+        onSave: @escaping (ScheduleEntryDraft) -> Void,
+        onCancel: @escaping () -> Void,
+        onMoreOptions: @escaping () -> Void,
+    ) {
+        self.entry = entry
+        self.onSave = onSave
+        self.onCancel = onCancel
+        self.onMoreOptions = onMoreOptions
+        self._draft = State(initialValue: entry)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                timePicker
+                Text(ScheduleStrings.quickAddCaption(durationMinutes: draft.durationMinutes))
+                    .font(.footnote)
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+
+                Spacer()
+
+                Button {
+                    onMoreOptions()
+                } label: {
+                    Text(ScheduleStrings.quickAddMoreOptionsButton)
+                        .font(.callout.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(SemanticColor.accent)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .navigationTitle(ScheduleStrings.quickAddTitle)
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+            #endif
+                .toolbar {
+                    #if os(iOS)
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(ScheduleStrings.quickAddCancelButton, action: onCancel)
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(ScheduleStrings.quickAddSaveButton) {
+                            Haptics.commit.play()
+                            onSave(draft)
+                        }
+                    }
+                    #else
+                    ToolbarItem {
+                        Button(ScheduleStrings.quickAddCancelButton, action: onCancel)
+                    }
+                    ToolbarItem {
+                        Button(ScheduleStrings.quickAddSaveButton) {
+                            onSave(draft)
+                        }
+                    }
+                    #endif
+                }
+        }
+        // A time-only surface needs minimal chrome; `.medium` fits the
+        // picker + caption + More-options tap target on every shipping
+        // phone size without scrolling. Users who need the full
+        // 7-day / duration / enabled surface tap "More options".
+        #if os(iOS)
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        #endif
+    }
+
+    private var timePicker: some View {
+        let components = DateComponents(
+            hour: draft.startMinute / 60,
+            minute: draft.startMinute % 60,
+        )
+        let calendar = Calendar.current
+        let initial = calendar.date(from: components) ?? Date(timeIntervalSince1970: 0)
+        return DatePicker(
+            ScheduleStrings.entrySheetStartLabel,
+            selection: Binding(
+                get: { initial },
+                set: { newValue in
+                    let parts = calendar.dateComponents([.hour, .minute], from: newValue)
+                    let total = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+                    draft.startMinute = max(
+                        ScheduleValidation.minStartMinute,
+                        min(total, ScheduleValidation.maxStartMinute),
+                    )
+                },
+            ),
+            displayedComponents: .hourAndMinute,
+        )
+        #if os(iOS)
+        .datePickerStyle(.wheel)
+        #endif
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
     }
 }
 #endif

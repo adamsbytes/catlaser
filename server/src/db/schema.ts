@@ -123,6 +123,70 @@ export const magicLinkAttestation = pgTable(
 );
 
 /**
+ * Sibling of `magic_link_attestation` for the 6-digit backup-code path.
+ *
+ * Every `POST /sign-in/magic-link` mints BOTH a long opaque URL token
+ * (consumed by `GET /magic-link/verify`) and a 6-digit numeric backup
+ * code (consumed by `POST /magic-link/verify-by-code`). The code's
+ * sole purpose is to close the cross-device-email trap — a user who
+ * reads mail on a laptop but needs to sign in on the iPhone that
+ * requested the link can still complete, because both paths land on
+ * the same better-auth verification row and redeeming one kills both.
+ *
+ * Columns:
+ *
+ * - `code_identifier` — `HMAC-SHA256(normalize(code), BETTER_AUTH_SECRET)`
+ *   base64url-no-pad. Using HMAC rather than plain SHA-256 keeps a DB
+ *   leak from being linear-searchable — an attacker who knows the
+ *   entire 1M-wide code space cannot pre-image backwards without the
+ *   server secret. Matches the `email_rate_limit.email_hash` posture.
+ * - `plaintext_token` — the plaintext better-auth verification token
+ *   issued alongside the code. The verify-by-code endpoint hashes
+ *   this into the verification row's identifier to mint the session
+ *   via better-auth's internal adapter; storing it here (rather than
+ *   the identifier) is the minimum bridge needed because the plugin's
+ *   minting path only resolves by plaintext. The row's lifetime equals
+ *   the token's (5 minutes) and is deleted the moment either the code
+ *   or the URL path completes a verify, so the plaintext's wall-clock
+ *   exposure window is bounded.
+ * - `fingerprint_hash` / `public_key_spki` — captured at request time
+ *   from the same attestation header `magic_link_attestation` stores.
+ *   Byte-matched against the verify-time attestation (same semantics
+ *   as the URL path's `DEVICE_MISMATCH` gate).
+ * - `attempts_remaining` — decrements on every byte-match failure;
+ *   deletes the row at zero. Ten attempts plus 1,000,000 code space +
+ *   5-minute TTL makes brute force non-viable before the per-IP 429
+ *   floor engages.
+ * - `expires_at` — wall-clock, mirrors the magic-link token TTL.
+ *
+ * On a successful URL-path verify the sibling row is deleted via
+ * `token_identifier` lookup; on a successful code-path verify the row
+ * is deleted by `code_identifier` and the underlying verification row
+ * is consumed too. Either path makes the other inert.
+ *
+ * Values encoded as text for the same driver-portability reasons
+ * `magic_link_attestation` documents above.
+ */
+export const magicLinkCode = pgTable(
+  'magic_link_code',
+  {
+    id: text('id').primaryKey(),
+    codeIdentifier: text('code_identifier').notNull().unique(),
+    plaintextToken: text('plaintext_token').notNull(),
+    tokenIdentifier: text('token_identifier').notNull(),
+    fingerprintHash: text('fingerprint_hash').notNull(),
+    publicKeySpki: text('public_key_spki').notNull(),
+    attemptsRemaining: integer('attempts_remaining').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').notNull(),
+  },
+  (table) => [
+    index('magic_link_code_expires_at_idx').on(table.expiresAt),
+    index('magic_link_code_token_identifier_idx').on(table.tokenIdentifier),
+  ],
+);
+
+/**
  * Device-attestation binding captured at sign-in. Binds every authenticated
  * API call to the Secure Enclave key the session was minted under:
  *

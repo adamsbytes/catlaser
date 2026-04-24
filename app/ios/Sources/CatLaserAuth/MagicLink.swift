@@ -1,5 +1,49 @@
 import Foundation
 
+/// Parsed, validated 6-digit backup code — the sibling path of the magic-
+/// link URL for users whose email lives on a different device than the
+/// one that requested the sign-in. Whitespace and hyphens are stripped
+/// before validation so a user who types `"123 456"` or `"123-456"`
+/// lands on the same canonical form the server HMAC-hashes.
+///
+/// The server binds every code to the requesting device's Secure-Enclave
+/// key at request time and rejects any other device that attempts to
+/// redeem it. Validation here is purely structural — the crypto binding
+/// is enforced at the server.
+public struct BackupCode: Sendable, Equatable {
+    /// Expected digit count in the canonical form. Must match the
+    /// server-side `MAGIC_LINK_CODE_DIGITS` constant; a drift between
+    /// the two would surface as a body-validation rejection server-side
+    /// rather than a silent misbehaviour.
+    public static let digitCount = 6
+
+    /// Canonicalised 6-digit value ready for submission. Never contains
+    /// whitespace or hyphens regardless of what the user typed.
+    public let canonical: String
+
+    public init(_ raw: String) throws(AuthError) {
+        let stripped = raw.unicodeScalars.reduce(into: "") { acc, scalar in
+            if scalar == "-" { return }
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { return }
+            acc.unicodeScalars.append(scalar)
+        }
+        guard stripped.count == Self.digitCount else {
+            throw AuthError.invalidMagicLink("backup code must be \(Self.digitCount) digits")
+        }
+        for scalar in stripped.unicodeScalars {
+            // ASCII '0'..'9'. Reject every non-digit scalar so a
+            // fullwidth-digit paste (U+FF10..U+FF19) cannot sneak past a
+            // `Int` parse that would otherwise accept it — the server's
+            // HMAC is computed over the byte stream, not the parsed
+            // integer, so we must match the canonical byte shape here.
+            guard (0x30 ... 0x39).contains(scalar.value) else {
+                throw AuthError.invalidMagicLink("backup code must be \(Self.digitCount) digits")
+            }
+        }
+        self.canonical = stripped
+    }
+}
+
 /// Parsed, validated Universal Link payload — the result of the user tapping
 /// the magic-link button in their email. Host and path are checked against
 /// `AuthConfig`; an attacker-controlled `auth.example.com.evil.com` or

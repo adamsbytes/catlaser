@@ -1,3 +1,4 @@
+import CatLaserApp
 import CatLaserAuth
 import CatLaserDesign
 import CatLaserDevice
@@ -110,6 +111,20 @@ struct PairedShell: View {
     /// the streaming + form state the swap is specifically intended
     /// to preserve).
     @State private var sessionID: UUID = .init()
+    /// Whether the post-pair tabs tour should be visible on this
+    /// mount. Read from ``OnboardingTourStore`` on the first
+    /// ``MainTabView`` render; flipped to `false` inline the moment
+    /// the user completes (or dismisses) the tour, with the
+    /// persistent flag write deferred to a fire-and-forget Task.
+    @State private var showTabsTour: Bool = false
+    /// Whether the Schedule first-run hint banner should render on
+    /// this mount. Read from the same store as ``showTabsTour``;
+    /// threaded into ``ScheduleView`` via ``ScheduleFirstRunHint``.
+    @State private var showScheduleHint: Bool = false
+    /// True once we've read the onboarding-tour store at least once
+    /// on this paired-shell lifecycle. Stops the ``.task`` below
+    /// from re-firing on every view update.
+    @State private var tourStoreHydrated: Bool = false
 
     var body: some View {
         Group {
@@ -138,25 +153,70 @@ struct PairedShell: View {
         // dependencies to bind into ``MainTabView``.
         if let liveVM, let historyVM, let scheduleVM,
            currentClient != nil, let currentBroker {
-            MainTabView(
-                liveViewModel: liveVM,
-                historyViewModel: historyVM,
-                scheduleViewModel: scheduleVM,
-                pushViewModel: pushViewModel,
-                pairingViewModel: pairingViewModel,
-                deviceEventBroker: currentBroker,
-                authCoordinator: composition.authCoordinator,
-                appVersion: appVersion,
-                buildNumber: buildNumber,
-                legalURLs: legalURLs,
-            )
-            .id(sessionID)
+            ZStack {
+                MainTabView(
+                    liveViewModel: liveVM,
+                    historyViewModel: historyVM,
+                    scheduleViewModel: scheduleVM,
+                    pushViewModel: pushViewModel,
+                    pairingViewModel: pairingViewModel,
+                    deviceEventBroker: currentBroker,
+                    authCoordinator: composition.authCoordinator,
+                    scheduleFirstRunHint: scheduleFirstRunHint,
+                    appVersion: appVersion,
+                    buildNumber: buildNumber,
+                    legalURLs: legalURLs,
+                )
+                .id(sessionID)
+                if showTabsTour {
+                    TabsTourOverlay(onComplete: markTabsTourSeen)
+                        .transition(.opacity)
+                }
+            }
+            .task(id: sessionID) {
+                // Hydrate the onboarding flags the first time we mount
+                // a live tab view in this paired-shell lifecycle. The
+                // `.task(id:)` variant re-runs on a fresh-device build
+                // (sessionID ticks) but not on a same-device transport
+                // swap — correct, because we want the tour to appear
+                // once per pairing, not on every reconnect.
+                await hydrateOnboardingFlags()
+            }
         } else {
             ConnectingView(
                 connectionState: pairingViewModel.connectionState,
                 onUnpair: { Task { await pairingViewModel.unpair() } },
             )
         }
+    }
+
+    private var scheduleFirstRunHint: ScheduleFirstRunHint? {
+        guard showScheduleHint else { return nil }
+        let store = composition.onboardingTourStore
+        return ScheduleFirstRunHint(
+            isVisible: true,
+            onDismiss: { [store] in
+                Task { await store.markScheduleHintSeen() }
+            },
+        )
+    }
+
+    private func hydrateOnboardingFlags() async {
+        guard !tourStoreHydrated else { return }
+        tourStoreHydrated = true
+        let state = await composition.onboardingTourStore.load()
+        // SwiftUI reads these on next frame; no animation hop needed
+        // because the overlay's .transition modifier handles the
+        // visual appearance.
+        showTabsTour = !state.hasSeenTabsTour
+        showScheduleHint = !state.hasSeenScheduleHint
+    }
+
+    private func markTabsTourSeen() {
+        guard showTabsTour else { return }
+        showTabsTour = false
+        let store = composition.onboardingTourStore
+        Task { await store.markTabsTourSeen() }
     }
 
     /// Fold an incoming ``ConnectionState`` into the session VMs.

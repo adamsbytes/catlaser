@@ -121,6 +121,16 @@ public struct AuthConfig: Sendable, Equatable {
         baseURL.appendingPathComponent("api/v1/auth/magic-link/verify")
     }
 
+    /// Endpoint the app posts to when the user enters the 6-digit backup
+    /// code shown in the magic-link email. Distinct from
+    /// ``magicLinkVerifyURL`` (which takes a URL token via GET); this
+    /// one takes a JSON body `{code}` and verifies the same attestation
+    /// binding as the URL path, byte-matched against the code row stored
+    /// server-side at request time.
+    public var magicLinkVerifyByCodeURL: URL {
+        baseURL.appendingPathComponent("api/v1/auth/magic-link/verify-by-code")
+    }
+
     /// Absolute URL the server should embed in the magic-link email. This
     /// is the Universal Link entry point; the app extracts the token and
     /// then POSTs to `magicLinkVerifyURL` with the attestation header.

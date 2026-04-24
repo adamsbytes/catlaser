@@ -9,6 +9,7 @@ import { db } from '~/lib/db.ts';
 import { env } from '~/lib/env.ts';
 import type { MagicLinkDelivery } from '~/lib/magic-link.ts';
 import { buildMagicLinkPlugin, pinoMagicLinkDelivery } from '~/lib/magic-link.ts';
+import { buildMagicLinkCodePlugin } from '~/lib/magic-link-code-plugin.ts';
 import type { NowDateFn } from '~/lib/rate-limit.ts';
 import { buildEmailRateLimitPlugin } from '~/lib/rate-limit.ts';
 import type { SocialProviderOverrides } from '~/lib/social-providers.ts';
@@ -107,6 +108,13 @@ export const createAuth = (overrides: CreateAuthOverrides = {}): Auth => {
     plugins: [
       bearer({ requireSignature: true }),
       buildMagicLinkPlugin(env, delivery),
+      // Backup-code sibling of the magic-link plugin. Registers
+      // `POST /magic-link/verify-by-code` and lands on the same
+      // better-auth verification row as `GET /magic-link/verify` —
+      // redeeming either path makes the other inert. Wired AFTER
+      // `buildMagicLinkPlugin` so the plugin-registration order
+      // reads URL path, then code path, matching the paired flow.
+      buildMagicLinkCodePlugin(env),
       deviceAttestationPlugin(attestationOptions),
       // Per-email enumeration-resistant cooldown. Runs AFTER the
       // attestation plugin by virtue of plugin-registration order —
@@ -138,6 +146,13 @@ export const createAuth = (overrides: CreateAuthOverrides = {}): Auth => {
       customRules: {
         '/sign-in/magic-link': SIGN_IN_RATE_LIMIT,
         '/sign-in/social': SIGN_IN_RATE_LIMIT,
+        // Per-IP floor on the backup-code path. The per-code
+        // `attempts_remaining` counter is the primary brute-force
+        // defence; this floor exists to absorb a distributed search
+        // (one attempt per code across many victims) that would
+        // otherwise bypass the per-code counter. Matches the sibling
+        // sign-in endpoints' posture.
+        '/magic-link/verify-by-code': SIGN_IN_RATE_LIMIT,
       },
     },
     advanced: {

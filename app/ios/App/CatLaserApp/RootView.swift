@@ -23,6 +23,8 @@ struct RootView: View {
             LaunchPlaceholder()
         case let .needsConsent(vm):
             PrivacyConsentView(viewModel: vm)
+        case let .needsFaceIDIntroduction(vm):
+            FaceIDIntroView(viewModel: vm)
         case let .signedOut(vm):
             SignedOutScreen(signInViewModel: vm, shell: shell)
         case let .signedIn(vm):

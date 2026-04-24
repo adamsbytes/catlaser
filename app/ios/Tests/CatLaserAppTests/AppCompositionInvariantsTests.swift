@@ -134,6 +134,8 @@ struct AppCompositionInvariantsTests {
             consent: consentStore,
             transport: transport,
         )
+        let faceIDIntroStore = InMemoryFaceIDIntroductionStore(initial: .seen)
+        let onboardingTourStore = InMemoryOnboardingTourStore()
         let composition = await AppComposition.make(
             authConfig: try makeAuthConfig(),
             authHTTPClient: underlyingHTTP,
@@ -145,6 +147,8 @@ struct AppCompositionInvariantsTests {
             endpointStore: endpointStore,
             observability: observability,
             consentStore: consentStore,
+            faceIDIntroductionStore: faceIDIntroStore,
+            onboardingTourStore: onboardingTourStore,
             deviceTransportFactory: { _ in InMemoryDeviceTransport() },
             pathMonitorFactory: { FakeNetworkPathMonitor() },
             pushPrompt: { try await pushBridge.prompt() },

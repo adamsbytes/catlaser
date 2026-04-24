@@ -237,6 +237,34 @@ public actor AuthCoordinator {
         return session
     }
 
+    /// Complete a magic-link sign-in via the 6-digit backup code shown
+    /// beneath the tap link in the email. Used on the same phone that
+    /// requested the link when the user's mail landed on a different
+    /// device — they read the code, type it here, and the server
+    /// redeems it against the SE key the request-time attestation
+    /// bound to.
+    ///
+    /// The attestation uses the same `.verify(token:)` binding shape as
+    /// the URL path, with the 6-digit code playing the token role. The
+    /// server rejects any divergence between the attestation binding
+    /// and the body code, so a captured ``.verify(token:)`` attestation
+    /// from the URL path cannot be relayed here (the binding would
+    /// sign a different string).
+    public func completeMagicLink(code: BackupCode) async throws -> AuthSession {
+        guard let attestationProvider else {
+            throw AuthError.providerUnavailable("Magic link provider not configured")
+        }
+        let header = try await attestationProvider.currentAttestationHeader(
+            binding: .verify(token: code.canonical),
+        )
+        let session = try await client.completeMagicLinkByCode(
+            code: code.canonical,
+            attestationHeader: header,
+        )
+        try await store.save(session)
+        return session
+    }
+
     /// Revoke the session without ever prompting the user.
     ///
     /// Sign-out uses only the session already cached in memory. Reaching

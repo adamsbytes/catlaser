@@ -43,6 +43,7 @@ public struct SignInView: View {
 
             if let address = emailSentAddress {
                 EmailSentView(
+                    viewModel: viewModel,
                     address: address,
                     isResending: isResendingMagicLink,
                     onResend: {
@@ -444,15 +445,28 @@ private struct EmailEntrySheet: View {
 }
 
 private struct EmailSentView: View {
+    @Bindable var viewModel: SignInViewModel
     let address: String
     let isResending: Bool
     let onResend: () -> Void
     let onUseDifferentEmail: () -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: 20) {
+                header
+                backupCodeSection
+                resendFooter
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
+    private var header: some View {
+        VStack(spacing: 20) {
             Image(systemName: "envelope.badge")
                 .font(.system(size: 64, weight: .regular))
                 .foregroundStyle(SemanticColor.accent)
@@ -472,43 +486,103 @@ private struct EmailSentView: View {
                     .foregroundStyle(SemanticColor.textSecondary)
                     .multilineTextAlignment(.center)
             }
-
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button(action: onResend) {
-                    ZStack {
-                        Text(SignInStrings.resendButton)
-                            .font(.body.weight(.semibold))
-                            .opacity(isResending ? 0 : 1)
-                        if isResending {
-                            ProgressView()
-                                .accessibilityLabel(Text(SignInStrings.resendButton))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .disabled(isResending)
-                .accessibilityID(.signInEmailSentResend)
-                .accessibilityLabel(Text(SignInStrings.resendButton))
-
-                Button(action: onUseDifferentEmail) {
-                    Text(SignInStrings.useDifferentEmailButton)
-                        .font(.body)
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(SemanticColor.textSecondary)
-                .disabled(isResending)
-                .accessibilityID(.signInEmailSentUseDifferent)
-                .accessibilityLabel(Text(SignInStrings.useDifferentEmailButton))
-            }
-            .frame(maxWidth: 420)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var backupCodeSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(SignInStrings.backupCodePrompt)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(SemanticColor.textPrimary)
+            Text(SignInStrings.backupCodeHint)
+                .font(.footnote)
+                .foregroundStyle(SemanticColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField(SignInStrings.backupCodePlaceholder, text: $viewModel.backupCodeInput)
+                #if canImport(UIKit) && !os(watchOS)
+                .keyboardType(.numberPad)
+                .textContentType(.oneTimeCode)
+                .autocapitalization(.none)
+                .autocorrectionDisabled(true)
+                #endif
+                .font(.title3.monospacedDigit())
+                .submitLabel(.go)
+                .onSubmit {
+                    guard viewModel.canSubmitBackupCode else { return }
+                    Haptics.commit.play()
+                    Task { await viewModel.submitBackupCode() }
+                }
+                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(SemanticColor.groupedBackground),
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(SemanticColor.separator, lineWidth: 1),
+                )
+                .accessibilityID(.signInBackupCodeField)
+                .accessibilityLabel(Text(SignInStrings.backupCodeFieldLabel))
+
+            if !viewModel.backupCodeInput.isEmpty, !viewModel.isBackupCodeInputValid {
+                Text(SignInStrings.backupCodeInvalid)
+                    .font(.footnote)
+                    .foregroundStyle(SemanticColor.destructive)
+            }
+
+            Button {
+                Haptics.commit.play()
+                Task { await viewModel.submitBackupCode() }
+            } label: {
+                Text(SignInStrings.backupCodeSubmitButton)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(
+                        viewModel.canSubmitBackupCode
+                            ? SemanticColor.accent
+                            : SemanticColor.textTertiary,
+                    )
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canSubmitBackupCode)
+            .accessibilityID(.signInBackupCodeSubmit)
+            .accessibilityLabel(Text(SignInStrings.backupCodeSubmitButton))
+        }
+    }
+
+    private var resendFooter: some View {
+        VStack(spacing: 12) {
+            Button(action: onResend) {
+                ZStack {
+                    Text(SignInStrings.resendButton)
+                        .font(.body.weight(.semibold))
+                        .opacity(isResending ? 0 : 1)
+                    if isResending {
+                        ProgressView()
+                            .accessibilityLabel(Text(SignInStrings.resendButton))
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isResending)
+            .accessibilityID(.signInEmailSentResend)
+            .accessibilityLabel(Text(SignInStrings.resendButton))
+
+            Button(action: onUseDifferentEmail) {
+                Text(SignInStrings.useDifferentEmailButton)
+                    .font(.body)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(SemanticColor.textSecondary)
+            .disabled(isResending)
+            .accessibilityID(.signInEmailSentUseDifferent)
+            .accessibilityLabel(Text(SignInStrings.useDifferentEmailButton))
+        }
     }
 }
 

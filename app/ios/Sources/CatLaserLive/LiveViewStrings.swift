@@ -166,7 +166,7 @@ public enum LiveViewStrings {
         case .unexpectedPublisher:
             return NSLocalizedString(
                 "live.error.unexpected_publisher",
-                value: "Couldn't verify the video source. Stop the stream and re-pair your device if this keeps happening.",
+                value: "Your Catlaser sent the video from an unexpected place. Stop the stream and, if this keeps happening, unpair and pair again from Settings.",
                 comment: "Error shown when a non-device participant published into the room.",
             )
         case .streamDropped:
@@ -188,7 +188,7 @@ public enum LiveViewStrings {
 
     private static let deviceGenericMessage = NSLocalizedString(
         "live.error.generic",
-        value: "Something went wrong while contacting your device. Please try again.",
+        value: "Something went wrong talking to your Catlaser. Try again in a moment.",
         comment: "Generic error message on the live-view screen.",
     )
 }

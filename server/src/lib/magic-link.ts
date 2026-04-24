@@ -3,9 +3,15 @@ import type { Logger } from 'pino';
 import pino from 'pino';
 import { AttestationParseError } from '~/lib/attestation-binding.ts';
 import { AttestationHeaderParseError, decodeAttestationHeader } from '~/lib/attestation-header.ts';
+import type { ParsedAttestation } from '~/lib/attestation-header.ts';
 import { ATTESTATION_HEADER_NAME } from '~/lib/attestation-plugin.ts';
 import type { Env } from '~/lib/env.ts';
 import { deriveTokenIdentifier, storeMagicLinkAttestation } from '~/lib/magic-link-attestation.ts';
+import {
+  generateBackupCode,
+  MAGIC_LINK_CODE_EXPIRES_IN_SECONDS,
+  storeMagicLinkCode,
+} from '~/lib/magic-link-code.ts';
 
 /**
  * Magic-link plugin wiring for better-auth.
@@ -57,12 +63,15 @@ export const MAGIC_LINK_RATE_LIMIT_MAX = 5;
  * requests a magic link. `magicLink` is the fully-formed Universal Link
  * URL including the `?token=<token>` query — mail templates should render
  * it verbatim; composing a different URL from the raw `token` defeats the
- * phishing-relay defence.
+ * phishing-relay defence. `code` is the 6-digit backup code the user can
+ * enter on the original device when reading email on a different one —
+ * mail templates MUST render both or the cross-device sign-in path breaks.
  */
 export interface MagicLinkEmailPayload {
   readonly email: string;
   readonly token: string;
   readonly magicLink: string;
+  readonly code: string;
 }
 
 /**
@@ -98,12 +107,19 @@ export const pinoMagicLinkDelivery = (env: Env, parentLogger?: Logger): MagicLin
       const record = {
         email: payload.email,
         magicLink: payload.magicLink,
+        // The backup code is surfaced in dev logs so a developer testing
+        // the cross-device flow on the same laptop can redeem by code
+        // without running a mail stub. In production the code lands in
+        // the user's inbox alongside the URL; logging it would be a
+        // credential-leak channel, so prod logs redact it. Both paths
+        // redact the underlying token — it is never user-facing.
+        code: isDev ? payload.code : undefined,
         tokenRedacted: true,
       };
       if (isDev) {
         logger.info(
           record,
-          'magic-link delivery (dev stub) — copy the URL into a browser to sign in',
+          'magic-link delivery (dev stub) — copy the URL into a browser to sign in, or enter the code on the requesting device',
         );
       } else {
         logger.warn(
@@ -150,36 +166,25 @@ export const resolveAllowedCallbackUrl = (env: Env): string =>
   buildUniversalLinkURL(env).toString();
 
 /**
- * Extract the `x-device-attestation` header from a plugin-supplied context
- * and persist the `(fph, pk)` pair against the magic-link token's
- * identifier so `/magic-link/verify` can DEVICE_MISMATCH an attacker who
- * owns the emailed URL but not the original Secure Enclave key.
- *
- * The attestation plugin's `before` hook already validated this exact
- * header (structural parse, SPKI, binding tag, ECDSA) before the
- * magic-link plugin was allowed to run; re-parsing here is idempotent and
- * cheap. The re-parse is required because the plugin API does not pass
- * the `ParsedAttestation` object down from the hook to `sendMagicLink` —
- * the header is the shared artefact between the two layers.
+ * Re-parse the attestation header the attestation plugin's `before` hook
+ * already validated. Idempotent and cheap; the plugin API does not pass
+ * the parsed object down, so the header is the shared artefact between
+ * layers.
  *
  * A missing or malformed header at this stage would mean the plugin
  * ordering silently changed or the attestation plugin regressed. Throwing
  * here keeps that regression loud instead of allowing sign-in to proceed
  * with no stored binding.
  */
-const persistMagicLinkAttestation = async (
-  token: string,
-  headers: Headers | undefined,
-): Promise<void> => {
+const reparseRequestAttestation = (headers: Headers | undefined): ParsedAttestation => {
   const headerValue = headers?.get(ATTESTATION_HEADER_NAME) ?? undefined;
   if (headerValue === undefined) {
     throw new Error(
       `sendMagicLink reached without an '${ATTESTATION_HEADER_NAME}' header — the attestation plugin should have rejected this request`,
     );
   }
-  let parsed;
   try {
-    parsed = decodeAttestationHeader(headerValue);
+    return decodeAttestationHeader(headerValue);
   } catch (error) {
     if (error instanceof AttestationHeaderParseError || error instanceof AttestationParseError) {
       throw new Error(
@@ -189,12 +194,52 @@ const persistMagicLinkAttestation = async (
     }
     throw error;
   }
+};
+
+interface PersistedMagicLinkArtefacts {
+  readonly code: string;
+}
+
+/**
+ * Persist the `(fph, pk)` pair from the request-time attestation against
+ * BOTH the magic-link token's identifier (so `/magic-link/verify` can
+ * DEVICE_MISMATCH a URL interceptor) AND a freshly-minted 6-digit backup
+ * code (so `/magic-link/verify-by-code` can DEVICE_MISMATCH a code
+ * interceptor). Returns the generated plaintext code so `sendMagicLink`
+ * can hand it to the delivery adapter.
+ *
+ * Both writes must land before the email ships — a sent email with
+ * either row missing would strand the user on that path (URL path
+ * DEVICE_MISMATCHes against a missing attestation row; code path
+ * INVALID_CODEs against a missing code row). Failing the outer
+ * `sendMagicLink` on any write error is the right posture here.
+ */
+const persistMagicLinkArtefacts = async (
+  token: string,
+  headers: Headers | undefined,
+  secret: string,
+): Promise<PersistedMagicLinkArtefacts> => {
+  const parsed = reparseRequestAttestation(headers);
+  const tokenIdentifier = deriveTokenIdentifier(token);
+  const expiresAt = new Date(Date.now() + MAGIC_LINK_EXPIRES_IN_SECONDS * 1000);
+  const codeExpiresAt = new Date(Date.now() + MAGIC_LINK_CODE_EXPIRES_IN_SECONDS * 1000);
   await storeMagicLinkAttestation({
-    tokenIdentifier: deriveTokenIdentifier(token),
+    tokenIdentifier,
     fingerprintHash: parsed.fingerprintHash,
     publicKeySPKI: parsed.publicKeySPKI,
-    expiresAt: new Date(Date.now() + MAGIC_LINK_EXPIRES_IN_SECONDS * 1000),
+    expiresAt,
   });
+  const code = generateBackupCode();
+  await storeMagicLinkCode({
+    code,
+    secret,
+    plaintextToken: token,
+    tokenIdentifier,
+    fingerprintHash: parsed.fingerprintHash,
+    publicKeySPKI: parsed.publicKeySPKI,
+    expiresAt: codeExpiresAt,
+  });
+  return { code };
 };
 
 /**
@@ -234,8 +279,12 @@ export const buildMagicLinkPlugin = (
     // refuses the email — a sent email with no stored attestation would
     // always DEVICE_MISMATCH at verify, stranding the user.
     sendMagicLink: async ({ email, token }, ctx) => {
-      await persistMagicLinkAttestation(token, ctx?.request?.headers);
+      const { code } = await persistMagicLinkArtefacts(
+        token,
+        ctx?.request?.headers,
+        env.BETTER_AUTH_SECRET,
+      );
       const magicLinkURL = buildUniversalLinkURL(env, token).toString();
-      await delivery.send({ email, token, magicLink: magicLinkURL });
+      await delivery.send({ email, token, magicLink: magicLinkURL, code });
     },
   });

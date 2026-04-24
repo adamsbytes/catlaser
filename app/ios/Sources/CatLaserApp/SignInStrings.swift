@@ -57,6 +57,54 @@ public enum SignInStrings {
         "We sent a sign-in link to \(address)."
     }
 
+    // MARK: - Backup code
+
+    /// Prompt above the backup-code field on the "check your email"
+    /// screen. Frames the code as the cross-device escape hatch rather
+    /// than the primary path — the vast majority of users tap the link
+    /// on the phone that requested it.
+    public static let backupCodePrompt = NSLocalizedString(
+        "signin.backupCode.prompt",
+        value: "Reading email on a different device?",
+        comment: "Section header shown above the 6-digit backup-code field.",
+    )
+
+    public static let backupCodeHint = NSLocalizedString(
+        "signin.backupCode.hint",
+        value: "Enter the 6-digit code from the email to finish signing in on this phone.",
+        comment: "Body copy that tells the user to use the backup code when email is on another device.",
+    )
+
+    public static let backupCodeFieldLabel = NSLocalizedString(
+        "signin.backupCode.field",
+        value: "6-digit code",
+        comment: "Accessibility label for the backup-code text field.",
+    )
+
+    public static let backupCodePlaceholder = NSLocalizedString(
+        "signin.backupCode.placeholder",
+        value: "123 456",
+        comment: "Placeholder shown inside the empty backup-code text field.",
+    )
+
+    public static let backupCodeSubmitButton = NSLocalizedString(
+        "signin.backupCode.submit",
+        value: "Sign in with code",
+        comment: "Primary action beneath the backup-code field.",
+    )
+
+    public static let backupCodeSubmittingLabel = NSLocalizedString(
+        "signin.backupCode.submitting",
+        value: "Signing in…",
+        comment: "In-flight label shown while the backup-code round-trip is running.",
+    )
+
+    public static let backupCodeInvalid = NSLocalizedString(
+        "signin.backupCode.invalid",
+        value: "Enter the 6-digit code from the email.",
+        comment: "Validation message when the backup-code input is not 6 digits.",
+    )
+
     /// Map an `AuthError` to a user-presentable message. Does not include
     /// the underlying server / OS message: those values are developer
     /// artefacts that would leak implementation detail and potentially
@@ -66,35 +114,35 @@ public enum SignInStrings {
         case .cancelled:
             return "Sign-in was cancelled."
         case .credentialInvalid:
-            return "We could not verify that account. Please try again."
+            return "We couldn't sign you in with that account. Try again."
         case .missingIDToken, .missingBearerToken, .malformedResponse, .idTokenClaimMismatch:
-            return "The sign-in service returned an unexpected response. Please try again."
+            return "We got an unexpected response. Try again in a moment."
         case .network:
             return "You appear to be offline. Check your connection and try again."
         case let .serverError(status, _):
             return status >= 500
-                ? "Our service is having trouble right now. Please try again in a moment."
-                : "The sign-in service rejected that request."
+                ? "Our servers are having trouble. Try again in a minute or two."
+                : "We couldn't sign you in. Try again."
         case .keychain:
-            return "This device's secure storage is unavailable. Please try again."
+            return "Your phone couldn't save your sign-in. Try again in a moment."
         case .providerUnavailable:
-            return "That sign-in option isn't available on this device."
+            return "That sign-in option isn't available on this phone."
         case .providerInternal:
-            return "Something went wrong while signing in. Please try again."
+            return "Something went wrong while signing in. Try again."
         case .invalidEmail:
             return "Enter a valid email address."
         case .invalidMagicLink:
-            return "This sign-in link isn't valid. It may have expired or already been used."
+            return "This sign-in link or code isn't working. It may have expired or already been used — request a fresh one."
         case .attestationFailed:
-            return "This device can't sign in right now. Restart the app and try again."
+            return "Something on your phone is blocking sign-in. Restart your phone and try again."
         case .secureEnclaveUnavailable:
-            return "This device's secure hardware is unavailable. Sign-in requires it."
+            return "Your phone's security features are turned off. Set up Face ID or a passcode in Settings, then try again."
         case .invalidRedirectURL:
-            return "Sign-in is misconfigured on this install. Please reinstall the app."
+            return "Sign-in is misconfigured on this install. Reinstall Catlaser from the App Store."
         case .biometricFailed:
-            return "Biometric check failed. Please try again."
+            return "Face ID couldn't recognise you. Try again, or use your passcode."
         case .biometricUnavailable:
-            return "Biometric unlock isn't set up on this device."
+            return "Face ID or a passcode isn't set up on this phone. Add one in Settings to sign in."
         }
     }
 }

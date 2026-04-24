@@ -50,6 +50,13 @@ public final class SignInViewModel {
     public private(set) var phase: SignInPhase = .idle
     public var emailInput: String = ""
     public var emailSheetPresented: Bool = false
+    /// 6-digit backup-code buffer. The "check your email" screen binds
+    /// this buffer to a `TextField` beneath the resend controls so a
+    /// user whose mail landed on a different device can type the code
+    /// printed in the email. Validation happens inside
+    /// ``BackupCode``; a structurally-invalid entry surfaces as
+    /// ``AuthError.invalidMagicLink`` and lands the VM in `.failed`.
+    public var backupCodeInput: String = ""
 
     private let coordinator: AuthCoordinator
 
@@ -147,6 +154,60 @@ public final class SignInViewModel {
         do {
             let session = try await coordinator.completeMagicLink(url: url)
             emailSheetPresented = false
+            phase = .succeeded(session)
+        } catch AuthError.cancelled {
+            phase = .idle
+        } catch let error as AuthError {
+            phase = .failed(error)
+        } catch {
+            phase = .failed(.providerInternal(error.localizedDescription))
+        }
+    }
+
+    /// True iff the backup-code buffer currently holds a structurally
+    /// valid 6-digit code. Drives the enabled state of the Submit
+    /// button on the "check your email" screen.
+    public var isBackupCodeInputValid: Bool {
+        (try? BackupCode(backupCodeInput)) != nil
+    }
+
+    /// True iff the Submit button for the backup code should be
+    /// enabled: the VM is parked on the ``.emailSent`` phase, no
+    /// operation is in flight, and the buffer is structurally valid.
+    public var canSubmitBackupCode: Bool {
+        guard case .emailSent = phase else { return false }
+        return isBackupCodeInputValid
+    }
+
+    /// Redeem the 6-digit backup code currently in
+    /// ``backupCodeInput``. Transitions:
+    ///
+    /// * buffer fails structural validation → `.failed(.invalidMagicLink)`
+    ///   without a network call; the "check your email" screen stays
+    ///   up so the user can correct and retry.
+    /// * success → `.succeeded(session)` via the same sign-in pathway
+    ///   as the URL verify path.
+    /// * server / attestation failure → `.failed(error)`, sheet stays
+    ///   up. A `.invalidMagicLink` after one attempts_remaining
+    ///   decrement still leaves the row alive server-side; the user
+    ///   can retry with a corrected code without re-requesting.
+    ///
+    /// No-op outside ``.emailSent`` so a stray tap after sign-in or
+    /// during an in-flight verify doesn't fire.
+    public func submitBackupCode() async {
+        guard case .emailSent = phase else { return }
+        let code: BackupCode
+        do {
+            code = try BackupCode(backupCodeInput)
+        } catch {
+            phase = .failed(.invalidMagicLink("backup code must be 6 digits"))
+            return
+        }
+        phase = .verifyingMagicLink
+        do {
+            let session = try await coordinator.completeMagicLink(code: code)
+            emailSheetPresented = false
+            backupCodeInput = ""
             phase = .succeeded(session)
         } catch AuthError.cancelled {
             phase = .idle

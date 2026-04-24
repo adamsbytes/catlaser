@@ -142,6 +142,63 @@ public enum ScheduleStrings {
         comment: "Explanatory footnote shown below a populated schedule list.",
     )
 
+    // MARK: - Quick-add sheet
+
+    public static let quickAddTitle = NSLocalizedString(
+        "schedule.quick_add.title",
+        value: "Add a time",
+        comment: "Title for the simplified add-time sheet opened from the Schedule tab.",
+    )
+
+    public static let quickAddSaveButton = NSLocalizedString(
+        "schedule.quick_add.save",
+        value: "Save",
+        comment: "Primary button on the quick-add sheet.",
+    )
+
+    public static let quickAddCancelButton = NSLocalizedString(
+        "schedule.quick_add.cancel",
+        value: "Cancel",
+        comment: "Cancel button on the quick-add sheet.",
+    )
+
+    public static let quickAddMoreOptionsButton = NSLocalizedString(
+        "schedule.quick_add.more_options",
+        value: "More options",
+        comment: "Disclosure button that swaps the quick-add sheet for the full edit sheet.",
+    )
+
+    /// Caption shown beneath the time picker on the quick-add sheet so
+    /// the user knows what defaults they're committing to.
+    public static func quickAddCaption(durationMinutes: Int) -> String {
+        let format = NSLocalizedString(
+            "schedule.quick_add.caption",
+            value: "%@, every day. Tap More options to customise.",
+            comment: "Positional caption beneath the quick-add time picker. Arg 1 is the natural-language duration.",
+        )
+        return String(format: format, durationHumanLabel(minutes: durationMinutes))
+    }
+
+    // MARK: - First-run hint
+
+    public static let firstRunHintTitle = NSLocalizedString(
+        "schedule.hint.first_run.title",
+        value: "Set playtime for when you're out",
+        comment: "Title for the dismissible first-run hint banner on the Schedule tab.",
+    )
+
+    public static let firstRunHintBody = NSLocalizedString(
+        "schedule.hint.first_run.body",
+        value: "Add a time window and your Catlaser will run automatically inside it.",
+        comment: "Body copy for the dismissible first-run hint banner.",
+    )
+
+    public static let firstRunHintDismiss = NSLocalizedString(
+        "schedule.hint.first_run.dismiss",
+        value: "Got it",
+        comment: "Dismiss button for the first-run hint banner.",
+    )
+
     public static let alwaysOnHint = NSLocalizedString(
         "schedule.footnote.always_on",
         value: "No windows set. Your Catlaser will play whenever it detects your cat — add a window to limit it to specific times.",
@@ -254,6 +311,94 @@ public enum ScheduleStrings {
         formatter.timeZone = calendar.timeZone
         formatter.setLocalizedDateFormatFromTemplate("jm")
         return formatter.string(from: reference)
+    }
+
+    /// Single-sentence summary of an entry's time / duration / days —
+    /// the collapsed row reads "Every weekday at 8:00 AM for 15 minutes"
+    /// instead of the previous three-line stack. Same data; the eye
+    /// parses it as one thought, which is the mom-test win.
+    ///
+    /// Builds on the existing ``daysSummary`` / ``timeOfDay`` /
+    /// ``durationHumanLabel`` building blocks so locale-sensitive
+    /// formatting (12h vs 24h clocks, calendar-relative dates) stays
+    /// pinned to the same source of truth the toolbar uses.
+    public static func summarySentence(
+        days: Set<Catlaser_App_V1_DayOfWeek>,
+        startMinute: Int,
+        durationMinutes: Int,
+        locale: Locale = .current,
+        calendar: Calendar = .current,
+    ) -> String {
+        let daysText = daysSummary(days)
+        let timeText = timeOfDay(minute: startMinute, locale: locale, calendar: calendar)
+        let durationText = durationHumanLabel(minutes: durationMinutes)
+        let format = NSLocalizedString(
+            "schedule.summary.sentence",
+            value: "%1$@ at %2$@ for %3$@",
+            comment: "Positional format: days summary, start time, duration. Collapsed single-line row copy.",
+        )
+        return String(format: format, daysText, timeText, durationText)
+    }
+
+    /// Render a duration in minutes in a natural-language form
+    /// ("15 minutes", "1 hour", "2 hours 15 minutes") for the
+    /// single-sentence row summary. The compact "2h 15m" form
+    /// (``durationLabel``) stays in use on the edit sheet where screen
+    /// real estate is tighter.
+    public static func durationHumanLabel(minutes: Int) -> String {
+        let clamped = max(
+            ScheduleValidation.minDurationMinutes,
+            min(minutes, ScheduleValidation.maxDurationMinutes),
+        )
+        let hours = clamped / 60
+        let rem = clamped % 60
+        let hourPart: String? = switch hours {
+        case 0: nil
+        case 1:
+            NSLocalizedString(
+                "schedule.format.duration.hour.singular",
+                value: "1 hour",
+                comment: "Singular-hour component of the natural-language duration.",
+            )
+        default:
+            String(
+                format: NSLocalizedString(
+                    "schedule.format.duration.hour.plural",
+                    value: "%d hours",
+                    comment: "Plural-hour component of the natural-language duration.",
+                ),
+                hours,
+            )
+        }
+        let minutePart: String? = switch rem {
+        case 0: nil
+        case 1:
+            NSLocalizedString(
+                "schedule.format.duration.minute.singular",
+                value: "1 minute",
+                comment: "Singular-minute component of the natural-language duration.",
+            )
+        default:
+            String(
+                format: NSLocalizedString(
+                    "schedule.format.duration.minute.plural",
+                    value: "%d minutes",
+                    comment: "Plural-minute component of the natural-language duration.",
+                ),
+                rem,
+            )
+        }
+        switch (hourPart, minutePart) {
+        case let (.some(h), .some(m)):
+            return "\(h) \(m)"
+        case let (.some(h), .none):
+            return h
+        case let (.none, .some(m)):
+            return m
+        case (.none, .none):
+            // Unreachable because `clamped` >= 1; defensive fallback.
+            return "1 minute"
+        }
     }
 
     /// Render a duration in minutes as "2h 15m", "45m", "1m".

@@ -21,6 +21,22 @@ public enum AccessibilityID: String, Sendable, Hashable, CaseIterable {
     case signInErrorDismiss = "signIn.button.errorDismiss"
     case signInEmailSentResend = "signIn.button.resend"
     case signInEmailSentUseDifferent = "signIn.button.useDifferentEmail"
+    case signInBackupCodeField = "signIn.field.backupCode"
+    case signInBackupCodeSubmit = "signIn.button.backupCodeSubmit"
+
+    // First-launch Face ID / passcode intro
+    case faceIDIntroRoot = "faceIDIntro.root"
+    case faceIDIntroContinue = "faceIDIntro.button.continue"
+    case faceIDIntroOpenSettings = "faceIDIntro.button.openSettings"
+
+    // Onboarding tour
+    case onboardingTourRoot = "onboarding.tour.root"
+    case onboardingTourNext = "onboarding.tour.button.next"
+    case onboardingTourDismiss = "onboarding.tour.button.dismiss"
+    case onboardingScheduleHintDismiss = "onboarding.schedule.hintDismiss"
+
+    // Privacy consent details sheet (tap the info icon on the hero)
+    case consentPrivacyInfo = "consent.button.privacyInfo"
 
     // Pairing
     case pairingRoot = "pairing.root"

@@ -15,6 +15,7 @@ import SwiftUI
 public struct PrivacyConsentView: View {
     @Bindable private var viewModel: PrivacyConsentViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var detailsSheetPresented: Bool = false
 
     public init(viewModel: PrivacyConsentViewModel) {
         self.viewModel = viewModel
@@ -41,6 +42,9 @@ public struct PrivacyConsentView: View {
             CatLaserMotion.animation(.easeInOut(duration: 0.2), reduceMotion: reduceMotion),
             value: viewModel.isCommitting,
         )
+        .sheet(isPresented: $detailsSheetPresented) {
+            PrivacyDetailsSheet(onDismiss: { detailsSheetPresented = false })
+        }
     }
 
     private var header: some View {
@@ -110,11 +114,33 @@ public struct PrivacyConsentView: View {
     }
 
     private var privacyFootnote: some View {
-        Text(PrivacyConsentStrings.privacyNote)
-            .font(.caption)
-            .multilineTextAlignment(.center)
-            .foregroundStyle(SemanticColor.textSecondary)
-            .padding(.horizontal, 8)
+        // Hero sentence + info icon. The hero is deliberately plain-
+        // language (no "TLS-pinned, device-hashed, stripped of personal
+        // identifiers" jargon); the specifics live behind the info tap
+        // for users who want to audit the claim. The (ⓘ) tap target is
+        // inline with the text so a VoiceOver user lands on it while
+        // reading the sentence rather than having to hunt for a
+        // separate element.
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(PrivacyConsentStrings.privacyNote)
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(SemanticColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                detailsSheetPresented = true
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(SemanticColor.accent)
+                    .padding(4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityID(.consentPrivacyInfo)
+            .accessibilityLabel(Text(PrivacyConsentStrings.privacyInfoAccessibilityLabel))
+        }
+        .padding(.horizontal, 8)
     }
 
     private var continueButton: some View {
@@ -140,6 +166,85 @@ public struct PrivacyConsentView: View {
         .disabled(viewModel.isCommitting)
         .accessibilityID(.consentContinue)
         .accessibilityLabel(Text(PrivacyConsentStrings.continueButton))
+    }
+}
+
+/// Details sheet presented on a tap of the info icon next to the
+/// privacy hero. Keeps the hero copy mom-friendly while giving
+/// audit-minded users a drill-in with the concrete claims: TLS
+/// pinning, home-network-only video, no third-party trackers,
+/// minimal data collection.
+private struct PrivacyDetailsSheet: View {
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    Text(PrivacyConsentStrings.privacyDetailsBody)
+                        .font(.body)
+                        .foregroundStyle(SemanticColor.textPrimary)
+                    bullet(
+                        iconName: "lock.shield",
+                        title: PrivacyConsentStrings.privacyDetailsTlsTitle,
+                        body: PrivacyConsentStrings.privacyDetailsTlsBody,
+                    )
+                    bullet(
+                        iconName: "house",
+                        title: PrivacyConsentStrings.privacyDetailsLocalTitle,
+                        body: PrivacyConsentStrings.privacyDetailsLocalBody,
+                    )
+                    bullet(
+                        iconName: "nosign",
+                        title: PrivacyConsentStrings.privacyDetailsNoTrackersTitle,
+                        body: PrivacyConsentStrings.privacyDetailsNoTrackersBody,
+                    )
+                    bullet(
+                        iconName: "sparkles",
+                        title: PrivacyConsentStrings.privacyDetailsMinimalTitle,
+                        body: PrivacyConsentStrings.privacyDetailsMinimalBody,
+                    )
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 24)
+                .frame(maxWidth: 520, alignment: .leading)
+            }
+            .navigationTitle(PrivacyConsentStrings.privacyDetailsTitle)
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+            #endif
+                .toolbar {
+                    #if os(iOS)
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(PrivacyConsentStrings.privacyDetailsDone, action: onDismiss)
+                    }
+                    #else
+                    ToolbarItem {
+                        Button(PrivacyConsentStrings.privacyDetailsDone, action: onDismiss)
+                    }
+                    #endif
+                }
+        }
+    }
+
+    private func bullet(iconName: String, title: String, body: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: iconName)
+                .font(.title3)
+                .foregroundStyle(SemanticColor.accent)
+                .frame(width: 28)
+                .accessibilityDecorativeIcon()
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(SemanticColor.textPrimary)
+                Text(body)
+                    .font(.subheadline)
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 #endif

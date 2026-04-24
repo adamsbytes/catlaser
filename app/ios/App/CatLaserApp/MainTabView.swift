@@ -31,6 +31,12 @@ struct MainTabView: View {
     /// instance in scope always matches the live ``DeviceClient``.
     let deviceEventBroker: DeviceEventBroker
     let authCoordinator: AuthCoordinator
+    /// First-run hint controller threaded into ``ScheduleView``. The
+    /// parent ``PairedShell`` reads the persistent flag once per
+    /// paired-shell lifecycle and passes a non-nil controller only
+    /// when the banner should render; a `nil` value suppresses the
+    /// banner without any wire traffic or storage read here.
+    let scheduleFirstRunHint: ScheduleFirstRunHint?
     let appVersion: String
     let buildNumber: String
     let legalURLs: LegalURLs
@@ -58,7 +64,7 @@ struct MainTabView: View {
                 }
                 .tag(Tab.history)
 
-            ScheduleView(viewModel: scheduleViewModel)
+            ScheduleView(viewModel: scheduleViewModel, firstRunHint: scheduleFirstRunHint)
                 .tabItem {
                     Label("Schedule", systemImage: "calendar")
                 }

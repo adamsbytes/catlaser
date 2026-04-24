@@ -164,11 +164,11 @@ public enum PairingStrings {
             // must not imply the Catlaser has been un-paired.
             return "Your sign-in session ended. Sign in again to continue."
         case .codeAlreadyUsed:
-            return "This pairing code has already been used. Generate a new QR on the Catlaser and try again."
+            return "This pairing code has already been used. Generate a new QR on your Catlaser and try again."
         case .codeExpired:
-            return "This pairing code has expired. Generate a new QR on the Catlaser and try again."
+            return "This pairing code has expired. Generate a new QR on your Catlaser and try again."
         case .codeNotFound:
-            return "The server didn't recognise this pairing code. Generate a new QR on the Catlaser."
+            return "We don't recognise this pairing code. Generate a new QR on your Catlaser."
         case .rateLimited:
             return "Too many attempts. Wait a minute and try again."
         case let .serverError(status, _):
@@ -177,16 +177,16 @@ public enum PairingStrings {
             // rejected outright. Two stable buckets, no interpolated
             // server text.
             return status >= 500
-                ? "Our service is having trouble right now. Please try again in a moment."
-                : "The server rejected that request. Please try again."
+                ? "Our servers are having trouble. Try again in a minute or two."
+                : "We couldn't complete pairing. Try again."
         case .network:
             return "We couldn't reach the network. Check your connection and try again."
         case .invalidServerResponse:
-            return "The server returned an unexpected response. Please try again."
+            return "We got an unexpected response. Try again in a moment."
         case .storage:
-            return "Couldn't save the pairing on this device. Please try again."
+            return "Your phone couldn't save the pairing. Try again."
         case .attestation:
-            return "This device couldn't be verified. Restart the app and try again."
+            return "Something on your phone is blocking pairing. Restart your phone and try again."
         case .authRevoked:
             return "Your access to this Catlaser was revoked. Pair again to reconnect."
         }
@@ -203,11 +203,11 @@ public enum PairingStrings {
         case .missingQueryItems, .missingCode, .missingDeviceID:
             "That QR is missing some information. Generate a new one on your Catlaser."
         case .duplicateQueryItem, .unexpectedQueryItem:
-            "That QR looks tampered with. Generate a new one on your Catlaser."
+            "This QR doesn't match what we expected. Generate a new one on your Catlaser."
         case .codeTooShort, .codeTooLong, .codeIllegalCharacter:
-            "That pairing code is malformed."
+            "That pairing code isn't formatted correctly. Generate a new QR on your Catlaser."
         case .deviceIDTooLong, .deviceIDIllegalCharacter:
-            "That device identifier is malformed."
+            "That device identifier isn't formatted correctly. Generate a new QR on your Catlaser."
         }
     }
 }

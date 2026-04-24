@@ -173,3 +173,7 @@ struct MagicLinkRequestBody: Encodable, Equatable {
 struct MagicLinkVerifyResponse: Decodable, Equatable {
     let user: AuthUser
 }
+
+struct MagicLinkVerifyByCodeRequestBody: Encodable, Equatable {
+    let code: String
+}

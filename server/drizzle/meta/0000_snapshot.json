@@ -767,6 +767,110 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.magic_link_code": {
+      "name": "magic_link_code",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "code_identifier": {
+          "name": "code_identifier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plaintext_token": {
+          "name": "plaintext_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_identifier": {
+          "name": "token_identifier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fingerprint_hash": {
+          "name": "fingerprint_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "public_key_spki": {
+          "name": "public_key_spki",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attempts_remaining": {
+          "name": "attempts_remaining",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "magic_link_code_expires_at_idx": {
+          "name": "magic_link_code_expires_at_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "magic_link_code_token_identifier_idx": {
+          "name": "magic_link_code_token_identifier_idx",
+          "columns": [
+            {
+              "expression": "token_identifier",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "magic_link_code_code_identifier_unique": {
+          "name": "magic_link_code_code_identifier_unique",
+          "nullsNotDistinct": false,
+          "columns": ["code_identifier"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.rate_limit": {
       "name": "rate_limit",
       "schema": "",

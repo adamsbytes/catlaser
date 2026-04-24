@@ -200,6 +200,67 @@ public struct AuthClient: Sendable {
         }
     }
 
+    /// Complete a magic-link sign-in via the 6-digit backup code shown
+    /// beneath the tap link in the email. Same attestation binding as
+    /// ``completeMagicLink(token:attestationHeader:)`` — `ver:<code>`
+    /// where the URL path uses `ver:<token>` — and the server enforces
+    /// the stored `(fph, pk)` match against the row captured at request
+    /// time, so a captured code cannot be redeemed from a different
+    /// device. Redeeming either path makes the other inert.
+    public func completeMagicLinkByCode(
+        code: String,
+        attestationHeader: String,
+    ) async throws -> AuthSession {
+        let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCode.isEmpty else {
+            throw AuthError.invalidMagicLink("empty backup code")
+        }
+        guard !attestationHeader.isEmpty else {
+            throw AuthError.attestationFailed("empty attestation header")
+        }
+
+        let payload = MagicLinkVerifyByCodeRequestBody(code: trimmedCode)
+        let body: Data
+        do {
+            body = try encoder.encode(payload)
+        } catch {
+            throw AuthError.malformedResponse("request encode failure: \(error.localizedDescription)")
+        }
+
+        var request = URLRequest(url: config.magicLinkVerifyByCodeURL)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(attestationHeader, forHTTPHeaderField: DeviceAttestationEncoder.headerName)
+
+        let response = try await http.send(request)
+
+        switch response.statusCode {
+        case 200 ..< 300:
+            return try parseVerifySuccess(response)
+        case 400:
+            throw AuthError.invalidMagicLink(extractMessage(from: response))
+        case 401:
+            // Server maps INVALID_CODE / DEVICE_MISMATCH /
+            // ATTESTATION_BINDING_MISMATCH / ATTESTATION_REQUIRED all to
+            // 401 so no oracle distinguishes "wrong device" from "wrong
+            // code" from "exhausted". We surface the same
+            // `invalidMagicLink` shape the URL path uses on 401; the
+            // SignInStrings mapper renders the human copy.
+            throw AuthError.invalidMagicLink(extractMessage(from: response))
+        case 403:
+            throw AuthError.invalidMagicLink(extractMessage(from: response))
+        case 410:
+            throw AuthError.invalidMagicLink(extractMessage(from: response) ?? "backup code expired")
+        default:
+            throw AuthError.serverError(
+                status: response.statusCode,
+                message: extractMessage(from: response),
+            )
+        }
+    }
+
     private static let emailPattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#,

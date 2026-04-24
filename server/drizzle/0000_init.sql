@@ -90,6 +90,19 @@ CREATE TABLE "magic_link_attestation" (
 	CONSTRAINT "magic_link_attestation_token_identifier_unique" UNIQUE("token_identifier")
 );
 --> statement-breakpoint
+CREATE TABLE "magic_link_code" (
+	"id" text PRIMARY KEY NOT NULL,
+	"code_identifier" text NOT NULL,
+	"plaintext_token" text NOT NULL,
+	"token_identifier" text NOT NULL,
+	"fingerprint_hash" text NOT NULL,
+	"public_key_spki" text NOT NULL,
+	"attempts_remaining" integer NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"created_at" timestamp NOT NULL,
+	CONSTRAINT "magic_link_code_code_identifier_unique" UNIQUE("code_identifier")
+);
+--> statement-breakpoint
 CREATE TABLE "rate_limit" (
 	"id" text PRIMARY KEY NOT NULL,
 	"key" text NOT NULL,
@@ -157,6 +170,8 @@ CREATE INDEX "email_rate_limit_window_started_at_idx" ON "email_rate_limit" USIN
 CREATE INDEX "idempotency_record_session_id_idx" ON "idempotency_record" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "idempotency_record_expires_at_idx" ON "idempotency_record" USING btree ("expires_at");--> statement-breakpoint
 CREATE INDEX "magic_link_attestation_expires_at_idx" ON "magic_link_attestation" USING btree ("expires_at");--> statement-breakpoint
+CREATE INDEX "magic_link_code_expires_at_idx" ON "magic_link_code" USING btree ("expires_at");--> statement-breakpoint
+CREATE INDEX "magic_link_code_token_identifier_idx" ON "magic_link_code" USING btree ("token_identifier");--> statement-breakpoint
 CREATE INDEX "session_userId_idx" ON "session" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "session_attestation_session_id_idx" ON "session_attestation" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "verification_identifier_idx" ON "verification" USING btree ("identifier");
