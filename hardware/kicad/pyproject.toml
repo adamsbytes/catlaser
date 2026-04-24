@@ -1,0 +1,95 @@
+[project]
+name = "catlaser-pcb"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    # circuit-synth is unpinned here; `uv sync` will resolve and write
+    # uv.lock, which is the authoritative pin. Do not hand-edit a version
+    # range here without re-locking.
+    "circuit-synth",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # -- Formatter conflicts --
+    "COM812",
+    "ISC001",
+
+    # -- Docstring style conflicts --
+    "D203",
+    "D213",
+
+    # -- Handled better by pyright --
+    "ANN",
+
+    # -- Not applicable to a hardware-description package --
+    "TD",
+    "FIX",
+    "INP001",
+
+    # -- Overly pedantic --
+    "D105",
+    "D107",
+    "TRY301",
+    "TC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",     # asserts are how pytest works
+    "PLR2004",  # magic constants in tests are self-documenting
+    "SLF001",   # tests reach into internals to verify state
+    "D",        # tests describe themselves; docstrings add no signal
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["Path"]
+
+[tool.ruff.lint.pylint]
+max-args = 6
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+exclude = [".venv", "project"]
+venvPath = "."
+venv = ".venv"
+
+# pcbnew (KiCad's in-process SWIG bindings) ships at the system Python
+# site-packages path, not in the venv -- pyright needs the path explicitly.
+extraPaths = ["/usr/lib/python3/dist-packages"]
+
+# circuit-synth and pcbnew ship no PEP 561 type stubs and are the entire
+# third-party API surface of this package. Suppressing the cascade of
+# unknown-type reports they trigger; reportGeneralTypeIssues stays on so
+# bugs in our own code are still caught.
+reportMissingTypeStubs = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportCallIssue = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"

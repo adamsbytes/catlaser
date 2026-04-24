@@ -36,3 +36,15 @@ app/ios/**/xcuserstate
 app/ios/*.xcworkspace/
 app/ios/App/*.xcworkspace/
 !app/ios/App/*.xcodeproj/project.xcworkspace/
+
+# Hardware: uv venv, generated review/manufacturing artifacts, KiCad scratch
+hardware/kicad/.venv/
+hardware/kicad/.cache/
+hardware/kicad/project/output/
+hardware/kicad/project/*-backups/
+hardware/kicad/project/fp-info-cache
+hardware/kicad/project/*.kicad_prl
+hardware/kicad/project/*.bak
+hardware/kicad/project/*.kicad_sch-bak
+hardware/kicad/project/_autosave-*
+hardware/kicad/project/*.lck

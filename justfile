@@ -8,6 +8,7 @@ check:
     just ios-check
     just server-check
     just shellcheck
+    just kicad-check
 
 check-mcu:
     cargo clippy -p catlaser-mcu --target thumbv8m.main-none-eabi
@@ -131,3 +132,72 @@ server-docker-up:
 
 server-docker-down:
     cd server && bun run docker:down
+
+# ---------------------------------------------------------------------------
+# Hardware: circuit-synth schematic + pcbnew SWIG layout, all in-process.
+# PYTHONPATH points at the system site-packages where KiCad 10 ships
+# pcbnew.py + _pcbnew.so; uv venvs do not see them otherwise.
+# ---------------------------------------------------------------------------
+
+export PYTHONPATH := "/usr/lib/python3/dist-packages"
+
+kicad-check:
+    cd hardware/kicad && uv run ruff check .
+    cd hardware/kicad && uv run ruff format --check .
+    cd hardware/kicad && uv run pyright .
+    just kicad-test
+
+kicad-fmt:
+    cd hardware/kicad && uv run ruff check --fix .
+    cd hardware/kicad && uv run ruff format .
+
+kicad-test:
+    cd hardware/kicad && uv run pytest
+
+kicad-generate:
+    cd hardware/kicad && uv run python -m catlaser_pcb.top
+
+kicad-layout:
+    cd hardware/kicad && uv run python -m catlaser_pcb.pcb
+
+# Standalone DRC against the committed .kicad_pcb. `just kicad-layout`
+# already runs DRC at the end; this target is for re-checking after a
+# manual KiCad inspection or when validating a cherry-picked branch.
+kicad-drc:
+    kicad-cli pcb drc \
+        --output hardware/kicad/project/output/drc-report.txt \
+        --severity-error --severity-warning \
+        --exit-code-violations --refill-zones \
+        hardware/kicad/project/catlaser_aio.kicad_pcb
+
+# CI gate: regenerate schematic + layout from Python sources and assert
+# the committed project/ tree matches. Catches hand edits to the
+# .kicad_pcb and pipeline non-determinism. Requires a clean working
+# tree in hardware/kicad/project/ before running.
+kicad-determinism:
+    just kicad-generate
+    just kicad-layout
+    git diff --exit-code -- hardware/kicad/project/
+
+kicad-bom:
+    cd hardware/kicad && uv run python -m catlaser_pcb.fab.bom
+
+kicad-cpl:
+    cd hardware/kicad && uv run python -m catlaser_pcb.fab.cpl
+
+kicad-pdf:
+    cd hardware/kicad && uv run python -c "from catlaser_pcb.top import catlaser_aio; catlaser_aio().generate_pdf_schematic(project_name='catlaser_aio')"
+
+kicad-gerbers:
+    cd hardware/kicad && uv run python -c "from catlaser_pcb.top import catlaser_aio; catlaser_aio().generate_gerbers(project_name='catlaser_aio')"
+
+# Bootstrap the Freerouting jar to .cache/. Version is required (no
+# default) so the pin is explicit and reproducible. Resulting path
+# must be exported as FREEROUTING_JAR for layout.route to find it.
+kicad-setup-freerouting version:
+    mkdir -p hardware/kicad/.cache
+    gh release download v{{version}} \
+        --repo freerouting/freerouting \
+        --pattern 'freerouting-{{version}}.jar' \
+        --dir hardware/kicad/.cache --clobber
+    @echo "export FREEROUTING_JAR=$(realpath hardware/kicad/.cache/freerouting-{{version}}.jar)"
