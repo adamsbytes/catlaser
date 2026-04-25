@@ -104,6 +104,32 @@ public struct HistoryView: View {
                 viewModel: viewModel,
             )
         }
+        .sheet(isPresented: celebrationPresentationBinding) {
+            // `pendingSessionCelebration` is the source of truth; the
+            // body reads it back as a non-optional inside the closure
+            // (the Binding's getter guarantees non-nil whenever this
+            // closure fires). A nil-check defensively shields against
+            // a vanishingly-rare race in which the view rebuilds
+            // between binding-true and closure-execution; if the
+            // value is gone we render nothing rather than a placeholder
+            // sheet.
+            if let summary = viewModel.pendingSessionCelebration {
+                SessionCelebrationSheet(
+                    summary: summary,
+                    profiles: loadedProfiles,
+                    onDismiss: { viewModel.dismissSessionCelebration() },
+                )
+            }
+        }
+        .onChange(of: viewModel.pendingSessionCelebration) { _, newValue in
+            // Pair the sheet presentation with the success haptic the
+            // user already feels at session start. The celebration is
+            // the payoff moment; the haptic is what makes it feel
+            // earned rather than informational.
+            if newValue != nil {
+                Haptics.success.play()
+            }
+        }
         .confirmationDialog(
             HistoryStrings.catRowDeleteConfirmTitle,
             isPresented: Binding(
@@ -129,6 +155,39 @@ public struct HistoryView: View {
         .task {
             await viewModel.start()
         }
+    }
+
+    // MARK: - Celebration sheet plumbing
+
+    /// Boolean bridge for the celebration sheet's ``isPresented``.
+    /// The optional ``pendingSessionCelebration`` is the source of
+    /// truth; SwiftUI writes ``false`` on dismiss (interactive swipe
+    /// or programmatic close), and the setter routes that back through
+    /// the VM so the optional clears in one place. A ``true`` write
+    /// is structurally unreachable for a binding the view owns —
+    /// SwiftUI only writes ``true`` via the trailing closure's own
+    /// presentation, which is already gated by the optional.
+    private var celebrationPresentationBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.pendingSessionCelebration != nil },
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.dismissSessionCelebration()
+                }
+            },
+        )
+    }
+
+    /// The currently-loaded profile catalogue, surfaced from
+    /// ``catsState`` for use by the celebration sheet's name
+    /// resolution. Returns an empty array when the cat list has not
+    /// loaded yet — the sheet renders the "A cat just played"
+    /// fallback in that case rather than blocking on a refetch.
+    private var loadedProfiles: [Catlaser_App_V1_CatProfile] {
+        if case let .loaded(profiles, _) = viewModel.catsState {
+            return profiles
+        }
+        return []
     }
 
     // MARK: - Segment
@@ -497,18 +556,31 @@ private struct PlaySessionRow: View {
                 statBlock(
                     icon: "clock",
                     label: CatProfileFormatter.playTimeString(secondsTotal: session.durationSec),
+                    accessibility: nil,
                 )
                 statBlock(
                     icon: "bolt.fill",
-                    label: String(format: "%.0f%%", session.engagementScore * 100),
+                    // Replaces the previous bare "%.0f%%" render — a
+                    // raw percentage carried no scale for the owner.
+                    // The bucket label ("Very playful" / "Playful" /
+                    // "Mild interest") reads as a meaningful summary
+                    // on its own; VoiceOver still hears the percent
+                    // via the accessibility variant so the underlying
+                    // signal is not hidden from screen-reader users.
+                    label: CatProfileFormatter.engagementLabel(score: session.engagementScore),
+                    accessibility: CatProfileFormatter.engagementAccessibilityLabel(
+                        score: session.engagementScore,
+                    ),
                 )
                 statBlock(
                     icon: "circle.grid.cross",
                     label: "\(session.pounceCount)",
+                    accessibility: nil,
                 )
                 statBlock(
                     icon: "fork.knife",
                     label: "\(session.treatsDispensed)",
+                    accessibility: nil,
                 )
             }
             .font(.caption)
@@ -520,12 +592,23 @@ private struct PlaySessionRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func statBlock(icon: String, label: String) -> some View {
+    /// Stat-row icon + label pair. ``accessibility`` overrides the
+    /// label for the spoken pass when the visual rendering elides
+    /// information a VoiceOver user needs (the engagement bucket
+    /// drops the percentage; supplying it on the spoken path keeps
+    /// the underlying signal addressable).
+    private func statBlock(
+        icon: String,
+        label: String,
+        accessibility: String?,
+    ) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
                 .accessibilityHidden(true)
             Text(label)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(accessibility ?? label))
     }
 }
 
@@ -894,6 +977,176 @@ private struct ThumbnailImage: View {
         }
         #endif
         return nil
+    }
+}
+
+// MARK: - Session celebration sheet
+
+/// One-shot post-session celebration. Renders when the device emits an
+/// unsolicited ``SessionSummary`` (the moment a play session ends),
+/// surfacing the headline stats — engagement bucket, play time, pounce
+/// count, treats — alongside the cat's name.
+///
+/// This is the in-app counterpart to the FCM push that fires for the
+/// same event. Push delivers the news on the lock screen; tapping the
+/// push routes the user to the History tab where this sheet is the
+/// payoff. A user who already has the app open hears the haptic and
+/// sees the sheet without ever leaving the screen they were on.
+///
+/// The sheet is mounted by ``HistoryView`` against the VM's
+/// ``pendingSessionCelebration`` property; dismissing it (tap "Nice"
+/// or swipe down) routes through ``dismissSessionCelebration`` so the
+/// pending value clears in one place.
+private struct SessionCelebrationSheet: View {
+    let summary: Catlaser_App_V1_SessionSummary
+    let profiles: [Catlaser_App_V1_CatProfile]
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            // Drag indicator is supplied by ``presentationDragIndicator``
+            // on iOS; the fallback platform mirrors with a manual
+            // spacer so the layout reads consistently. The accent
+            // pawprint glyph is the "celebration is for your cat"
+            // visual cue and stays animation-free per accessibility
+            // policy.
+            Image(systemName: "pawprint.circle.fill")
+                .font(.system(size: 56, weight: .regular))
+                .foregroundStyle(SemanticColor.accent)
+                .padding(.top, 12)
+                .accessibilityHidden(true)
+            Text(HistoryStrings.celebrationTitle)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(SemanticColor.textPrimary)
+                .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
+            Text(bodyCopy)
+                .font(.body)
+                .foregroundStyle(SemanticColor.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            statGrid
+                .padding(.horizontal, 24)
+                .padding(.top, 4)
+            Spacer(minLength: 0)
+            Button {
+                Haptics.light.play()
+                onDismiss()
+            } label: {
+                Text(HistoryStrings.celebrationDismissButton)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(SemanticColor.accent, in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+            .accessibilityID(.historyCelebrationDismiss)
+            .accessibilityLabel(Text(HistoryStrings.celebrationDismissButton))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(SemanticColor.background)
+        #if os(iOS)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        #endif
+    }
+
+    /// Body copy resolved from the cat-id list. Three branches:
+    ///
+    /// * One named cat → "{name} just played." — the warm common case.
+    /// * Multiple named cats → "{names joined} just played." — uses the
+    ///   same join helper as the History row so the sheet's wording
+    ///   matches what the user sees in the list.
+    /// * No resolvable name (unknown cat, profile catalogue not yet
+    ///   loaded) → "A cat just played." — fallback that still
+    ///   celebrates without falsely naming.
+    private var bodyCopy: String {
+        let summary = CatProfileFormatter.sessionCatsSummary(
+            catIDs: summary.catIds,
+            profiles: profiles,
+        )
+        let knownNames = Set(profiles.map(\.catID))
+        let resolvedCount = self.summary.catIds.filter { knownNames.contains($0) }.count
+        if resolvedCount == 1 {
+            return HistoryStrings.celebrationBodySingleCat(name: summary)
+        }
+        if resolvedCount > 1 {
+            return HistoryStrings.celebrationBodyMultipleCats(joinedNames: summary)
+        }
+        return HistoryStrings.celebrationBodyUnknownCat
+    }
+
+    /// 2×2 grid of stat blocks. Big enough to read across a room —
+    /// the sheet is the celebration moment, not a dense data row, so
+    /// the values lead the typography. The engagement label uses the
+    /// human bucket ("Very playful") rather than the raw percent so
+    /// the stat reads on its own; VoiceOver hears the percentage via
+    /// the accessibility-only label, matching the row's behaviour.
+    private var statGrid: some View {
+        let columns = [
+            GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12),
+        ]
+        return LazyVGrid(columns: columns, spacing: 12) {
+            statTile(
+                icon: "clock",
+                value: CatProfileFormatter.playTimeString(secondsTotal: summary.durationSec),
+                label: HistoryStrings.celebrationDurationLabel,
+                accessibility: nil,
+            )
+            statTile(
+                icon: "bolt.fill",
+                value: CatProfileFormatter.engagementLabel(score: summary.engagementScore),
+                label: HistoryStrings.celebrationEngagementLabel,
+                accessibility: CatProfileFormatter.engagementAccessibilityLabel(
+                    score: summary.engagementScore,
+                ),
+            )
+            statTile(
+                icon: "circle.grid.cross",
+                value: "\(summary.pounceCount)",
+                label: HistoryStrings.celebrationPouncesLabel,
+                accessibility: nil,
+            )
+            statTile(
+                icon: "fork.knife",
+                value: "\(summary.treatsDispensed)",
+                label: HistoryStrings.celebrationTreatsLabel,
+                accessibility: nil,
+            )
+        }
+    }
+
+    private func statTile(
+        icon: String,
+        value: String,
+        label: String,
+        accessibility: String?,
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(SemanticColor.accent)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .textCase(.uppercase)
+            }
+            Text(value)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(SemanticColor.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("\(label), \(accessibility ?? value)"))
     }
 }
 #endif

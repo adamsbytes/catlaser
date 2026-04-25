@@ -313,4 +313,52 @@ struct ScheduleStringsTests {
         #expect(text.contains("1 minute"))
         #expect(!text.contains("1 minutes"))
     }
+
+    // MARK: - User-facing vocabulary
+    //
+    // The schedule screen used to say "window" everywhere — an
+    // engineer's word for what the user thinks of as "playtime."
+    // The rename is the actual user-visible fix and pinning it in a
+    // test prevents a future copy edit from undoing the work.
+
+    /// Every user-facing string referencing a schedule entry must
+    /// say "playtime" (or be vocabulary-neutral). No surface should
+    /// expose the implementation-flavoured "window" label that
+    /// previously leaked into the entry sheet, the deletion confirm
+    /// flow, and the empty-state copy.
+    @Test
+    func userFacingCopyNeverSaysWindow() {
+        let surfaces: [String] = [
+            ScheduleStrings.entrySheetAddTitle,
+            ScheduleStrings.entrySheetEditTitle,
+            ScheduleStrings.entrySheetDeleteButton,
+            ScheduleStrings.entrySheetDeleteConfirmTitle,
+            ScheduleStrings.entrySheetDeleteConfirmMessage,
+            ScheduleStrings.entrySheetDeleteConfirmAction,
+            ScheduleStrings.firstRunHintBody,
+            ScheduleStrings.emptySubtitle,
+            ScheduleStrings.alwaysOnHint,
+            ScheduleStrings.quietHoursFootnote,
+            ScheduleStrings.validationMessage(for: .tooManyEntries(100)),
+        ]
+        for surface in surfaces {
+            // Case-insensitive guard so a future "Window" capitalised
+            // variant also fails.
+            #expect(
+                surface.range(of: "window", options: .caseInsensitive) == nil,
+                "schedule copy must not say 'window': \(surface)",
+            )
+        }
+    }
+
+    /// Entry-sheet titles in particular are the user's "you are
+    /// editing X" label — they must say "playtime" so a user who
+    /// just tapped "+ Add time" reads the sheet as "I'm adding a
+    /// playtime," not as "I'm adding a window."
+    @Test
+    func entrySheetTitlesUsePlaytime() {
+        #expect(ScheduleStrings.entrySheetAddTitle.contains("playtime"))
+        #expect(ScheduleStrings.entrySheetEditTitle.contains("playtime"))
+        #expect(ScheduleStrings.entrySheetDeleteButton.contains("playtime"))
+    }
 }

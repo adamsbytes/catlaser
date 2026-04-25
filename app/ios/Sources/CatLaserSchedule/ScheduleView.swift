@@ -46,11 +46,11 @@ public struct ScheduleView: View {
     /// same transition.
     @State private var hintVisible: Bool
     /// Identifies the entry minted by the most recent ``addEntry`` tap
-    /// while its sheet is still on-screen. Drives the entry-sheet title
-    /// switch ("New window" vs "Edit window") so a user who just
-    /// pressed "+ Add time" reads the correct verb at the top of the
-    /// sheet. Cleared when the sheet dismisses (Save, Delete, Cancel,
-    /// or interactive swipe-down).
+    /// while its sheet is still on-screen. Drives the entry-sheet
+    /// title switch ("New playtime" vs "Edit playtime") so a user who
+    /// just pressed "+ Add time" reads the correct verb at the top of
+    /// the sheet. Cleared when the sheet dismisses (Save, Delete,
+    /// Cancel, or interactive swipe-down).
     @State private var recentlyAddedEntryID: String?
     /// Identifies the draft currently pinned to the quick-add sheet —
     /// the simplified mom-friendly add path shown on ``+ Add time``.
@@ -477,10 +477,11 @@ public struct ScheduleView: View {
     private func addBar(isSaving: Bool) -> some View {
         Button {
             if let newID = viewModel.addEntry() {
-                // Track the freshly-minted id so the quick-add sheet
-                // titles itself "New window" rather than "Edit window"
-                // until the user dismisses it, and so a "More options"
-                // tap can transfer the same id to the full edit sheet.
+                // Track the freshly-minted id so the entry sheet
+                // titles itself "New playtime" rather than "Edit
+                // playtime" until the user dismisses it, and so a
+                // "More options" tap can transfer the same id to the
+                // full edit sheet.
                 recentlyAddedEntryID = newID
                 quickAddID = newID
             }
@@ -745,12 +746,11 @@ private struct ScheduleEntryRow: View {
 
 private struct ScheduleEntrySheet: View {
     let entry: ScheduleEntryDraft
-    /// True iff the entry was minted by the most-recent
-    /// ``addEntry`` tap. Selects the sheet title between
-    /// ``entrySheetAddTitle`` ("New window") and
-    /// ``entrySheetEditTitle`` ("Edit window") — a user who just
-    /// pressed "+ Add time" must read the correct verb at the top of
-    /// the sheet.
+    /// True iff the entry was minted by the most-recent ``addEntry``
+    /// tap. Selects the sheet title between ``entrySheetAddTitle``
+    /// ("New playtime") and ``entrySheetEditTitle`` ("Edit playtime")
+    /// — a user who just pressed "+ Add time" must read the correct
+    /// verb at the top of the sheet.
     let isNewEntry: Bool
     let onSave: (ScheduleEntryDraft) -> Void
     let onDelete: () -> Void

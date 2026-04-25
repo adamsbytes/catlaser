@@ -9,7 +9,22 @@ public enum PairingStrings {
     public static let scanningHint = "Hold steady. We'll pair automatically."
     public static let manualEntryButton = "Enter code manually"
     public static let scanInsteadButton = "Scan with camera"
-    public static let manualEntryPlaceholder = "catlaser://pair?code=..."
+    /// Field label rendered above the manual-entry text field. Names
+    /// what the field expects in plain English; replaces the previous
+    /// raw-URL-scheme placeholder, which a non-technical owner could
+    /// not interpret as anything meaningful.
+    public static let manualEntryFieldLabel = "Pairing link"
+    /// Placeholder rendered inside the manual-entry text field when
+    /// it is empty. A short hint phrased as an action ("Paste") so the
+    /// user knows the field accepts a clipboard paste rather than
+    /// hand-typing 60 characters of base32.
+    public static let manualEntryPlaceholder = "Paste the pairing link"
+    /// Subtitle shown beneath the manual-entry title. Tells the user
+    /// what manual entry is for and where the link comes from. The
+    /// scanner is the primary path; manual entry is the fallback when
+    /// the camera is unavailable or denied.
+    public static let manualEntrySubtitle =
+        "If you can't scan the QR code, paste the pairing link from your Catlaser's setup page here."
     public static let manualSubmitButton = "Pair"
     public static let exchangingLabel = "Connecting to your Catlaser…"
     /// Busy-state copy for ``PairingPhase.checkingExisting``. The VM
@@ -128,6 +143,27 @@ public enum PairingStrings {
     public static let backingOffSubtitle =
         "Your device is reachable but the last attempt didn't land. Trying again…"
     public static let connectionFailedTitle = "Can't reach your Catlaser"
+
+    // MARK: - Connecting-screen troubleshooting block
+
+    /// Title rendered above the inline troubleshooting tips on the
+    /// ConnectingView once the connect attempt has been outstanding
+    /// long enough that a user is reasonably wondering what is wrong.
+    /// Kept as a question so it reads like an offered help, not a
+    /// confession of failure — the supervisor is still actively
+    /// retrying and the connection may land at any moment.
+    public static let connectingHelpTitle = "Trouble connecting?"
+
+    /// Bullet copy rendered under ``connectingHelpTitle``. Three
+    /// concrete checks the user can run without leaving the app, ordered
+    /// most-likely-cause first. Phrased in active voice so the user
+    /// knows what to do; no jargon, no mention of Tailscale, NAT,
+    /// attestation, or any other developer artefact.
+    public static let connectingHelpBullets: [String] = [
+        "Make sure your Catlaser is plugged in and the indicator light is on.",
+        "Check that your phone has internet — try opening a webpage to confirm.",
+        "If you just changed Wi-Fi networks, give it a moment to reconnect.",
+    ]
 
     public static func connectionStateLabel(_ state: ConnectionState) -> String {
         switch state {

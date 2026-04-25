@@ -169,7 +169,7 @@ enum TabsTourStrings {
 
     static let scheduleCardBody = NSLocalizedString(
         "onboarding.tour.schedule.body",
-        value: "Pick times when your cat gets the most play — your Catlaser will run on its own inside those windows, even when you're not home.",
+        value: "Pick times when your cat gets the most play — your Catlaser will run on its own during those playtimes, even when you're not home.",
         comment: "Body for the Schedule tab coach-mark card.",
     )
 

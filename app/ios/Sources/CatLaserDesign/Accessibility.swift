@@ -75,6 +75,7 @@ public enum AccessibilityID: String, Sendable, Hashable, CaseIterable {
     case historyNewCatDismiss = "history.button.newCatDismiss"
     case historyRetry = "history.button.retry"
     case historyDismissError = "history.button.dismissError"
+    case historyCelebrationDismiss = "history.button.celebrationDismiss"
 
     // Schedule
     case scheduleRoot = "schedule.root"

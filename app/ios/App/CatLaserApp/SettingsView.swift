@@ -10,6 +10,21 @@ import SwiftUI
 import UIKit
 #endif
 
+/// Programmatic-navigation routes the Settings tab can push.
+///
+/// Used by ``MainTabView`` to deep-link tapped notifications past the
+/// root Settings list and onto a specific destination — the
+/// hopper-empty push tap, for instance, lands the user directly on
+/// the refill instructions rather than dropping them at the top of
+/// Settings to hunt for the row. Hashable because SwiftUI's
+/// ``NavigationStack(path:)`` requires it.
+enum SettingsRoute: Hashable {
+    /// Refill-instructions destination. Reachable from a tap on the
+    /// hopper row, or pushed automatically when a hopper-empty
+    /// notification deep link arrives.
+    case hopperDetail
+}
+
 /// Settings tab.
 ///
 /// Holds the low-frequency controls that would be noise on the
@@ -36,6 +51,15 @@ struct SettingsView: View {
     let appVersion: String
     let buildNumber: String
     let legalURLs: LegalURLs
+
+    /// Two-way binding into the parent's ``NavigationStack`` path.
+    /// ``MainTabView`` owns the array so a deep-linked push tap (e.g.
+    /// hopper-empty) can append a ``SettingsRoute`` and have this
+    /// view auto-push to the destination on first appearance. The
+    /// view also writes through the binding when the user navigates
+    /// back, keeping the parent's path in sync with the actual stack
+    /// the user sees.
+    @Binding var navigationPath: [SettingsRoute]
 
     /// Mutually-exclusive modal state.
     ///
@@ -75,7 +99,7 @@ struct SettingsView: View {
     @State private var isDeletingAccount = false
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             Form {
                 pushSection
                 deviceSection
@@ -85,6 +109,12 @@ struct SettingsView: View {
             .navigationTitle(SettingsStrings.screenTitle)
             .scrollContentBackground(.hidden)
             .background(SemanticColor.background.ignoresSafeArea())
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .hopperDetail:
+                    HopperRefillView(level: deviceEventBroker.latestStatus?.hopperLevel)
+                }
+            }
             .confirmationDialog(
                 SettingsStrings.confirmUnpairTitle,
                 isPresented: dialogBinding(.confirmUnpair),
@@ -236,7 +266,9 @@ struct SettingsView: View {
                     label: SettingsStrings.deviceStatusLabel,
                     value: PairingStrings.connectionStateLabel(pairingViewModel.connectionState),
                 )
-                HopperRow(level: deviceEventBroker.latestStatus?.hopperLevel)
+                NavigationLink(value: SettingsRoute.hopperDetail) {
+                    HopperRow(level: deviceEventBroker.latestStatus?.hopperLevel)
+                }
                 Button(role: .destructive) {
                     dialog = .confirmUnpair
                 } label: {
@@ -499,5 +531,159 @@ private struct PushSummaryRow: View {
              .awaitingAPNsToken, .registering:
             SemanticColor.textSecondary
         }
+    }
+}
+
+/// Refill-instructions destination pushed from the Settings ▸ Treat
+/// hopper row, or auto-pushed from a hopper-empty notification deep
+/// link.
+///
+/// Three sections, top to bottom:
+///
+/// 1. A status hero — current level rendered as a tinted pill, plus
+///    a one-line headline that adapts to the level so a user with an
+///    empty hopper reads "Refill needed" while a user with a full
+///    hopper reads "All set." The hero is decorative — the numbered
+///    steps below are the actionable content.
+/// 2. Numbered "How to refill" steps. Each step is a single physical
+///    action so a user can complete one before scanning to the next.
+/// 3. A "What to use" callout with the supported treat shape. Avoids
+///    a real failure mode (oversized treats jamming the dispenser)
+///    that the support inbox would otherwise see repeatedly.
+///
+/// Footer reassures the user that the level updates automatically on
+/// the next play session — they do not have to "tell" the app
+/// anything.
+private struct HopperRefillView: View {
+    let level: Catlaser_App_V1_HopperLevel?
+
+    var body: some View {
+        Form {
+            Section {
+                HopperHeroRow(level: level)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 12, trailing: 0))
+                Text(SettingsStrings.hopperRefillIntro)
+                    .font(.callout)
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section(SettingsStrings.hopperRefillStepsTitle) {
+                ForEach(Array(SettingsStrings.hopperRefillSteps.enumerated()), id: \.offset) { index, step in
+                    HopperStepRow(number: index + 1, body: step)
+                }
+            }
+
+            Section(SettingsStrings.hopperRefillSafetyTitle) {
+                Text(SettingsStrings.hopperRefillSafetyBody)
+                    .font(.callout)
+                    .foregroundStyle(SemanticColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section {
+                Text(SettingsStrings.hopperRefillFooter)
+                    .font(.footnote)
+                    .foregroundStyle(SemanticColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .listRowBackground(Color.clear)
+        }
+        .scrollContentBackground(.hidden)
+        .background(SemanticColor.background.ignoresSafeArea())
+        .navigationTitle(SettingsStrings.hopperRefillScreenTitle)
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+        #endif
+    }
+}
+
+/// Hero status pill rendered at the top of ``HopperRefillView``.
+/// Matches the severity-tint pattern the row in Settings already
+/// uses — a healthy reading is muted, ``low`` is the warning tint,
+/// ``empty`` is destructive — so the user sees a continuous visual
+/// language when they navigate from row to detail.
+private struct HopperHeroRow: View {
+    let level: Catlaser_App_V1_HopperLevel?
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(0.15))
+                Image(systemName: iconName)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 56, height: 56)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(SettingsStrings.hopperLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .textCase(.uppercase)
+                Text(SettingsStrings.hopperLevelLabel(level))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(tint)
+            }
+            Spacer()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(
+            "\(SettingsStrings.hopperLabel), \(SettingsStrings.hopperLevelLabel(level))",
+        ))
+    }
+
+    private var tint: Color {
+        switch level {
+        case .empty: SemanticColor.destructive
+        case .low: SemanticColor.warning
+        case .ok: SemanticColor.success
+        case .unspecified, .UNRECOGNIZED, .none: SemanticColor.textSecondary
+        }
+    }
+
+    private var iconName: String {
+        switch level {
+        case .empty: "exclamationmark.octagon.fill"
+        case .low: "exclamationmark.triangle.fill"
+        case .ok: "checkmark.seal.fill"
+        case .unspecified, .UNRECOGNIZED, .none: "hourglass"
+        }
+    }
+}
+
+/// One numbered step row inside the refill instructions list.
+/// Numbers render in an accent-tinted disc on the leading edge so the
+/// list reads as a sequence, not a bullet pile. Body text wraps
+/// across lines via ``fixedSize`` so a longer step (or larger Dynamic
+/// Type setting) does not get truncated.
+private struct HopperStepRow: View {
+    let number: Int
+    let body: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(SemanticColor.accent)
+                Text("\(number)")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 26, height: 26)
+            .accessibilityHidden(true)
+            Text(self.body)
+                .font(.callout)
+                .foregroundStyle(SemanticColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Step \(number). \(self.body)"))
     }
 }

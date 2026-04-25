@@ -20,6 +20,28 @@ public enum LiveViewStrings {
         comment: "Subtitle shown on the live-view screen when no stream is active.",
     )
 
+    /// First-visit headline shown when the user has never started a
+    /// stream this app session. Replaces the cold "Live view is off"
+    /// copy on the first appearance — that title made sense post-
+    /// stream, but on the inaugural visit the screen is all
+    /// invitation. Past-tense framing of "off" implies something just
+    /// stopped working; the welcoming form invites the user in.
+    public static let disconnectedFirstVisitTitle = NSLocalizedString(
+        "live.disconnected.first_visit.title",
+        value: "See your cat live",
+        comment: "Welcoming headline on the live-view screen the first time the user visits and no stream has run yet.",
+    )
+
+    /// First-visit subtitle. Sets expectations — private stream from
+    /// the device, no servers in the middle — without using the words
+    /// "Tailscale," "WebRTC," or "P2P" which mean nothing to a cat
+    /// owner.
+    public static let disconnectedFirstVisitSubtitle = NSLocalizedString(
+        "live.disconnected.first_visit.subtitle",
+        value: "Tap Watch live to start a private video stream straight from your Catlaser.",
+        comment: "Welcoming subtitle paired with the first-visit headline on the live-view screen.",
+    )
+
     /// Variant subtitle shown on the disconnected screen right after
     /// the user cancelled the Face ID / passcode prompt. A common
     /// cause of cancel is a Face ID misfire (sunglasses, bad angle,

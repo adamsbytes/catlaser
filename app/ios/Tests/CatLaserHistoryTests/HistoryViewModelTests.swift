@@ -811,6 +811,146 @@ struct HistoryViewModelTests {
         #expect(vm.lastActionError != nil)
     }
 
+    // MARK: - SessionSummary celebration
+
+    /// The device emits a ``SessionSummary`` event when a play
+    /// session ends; the VM must surface it as ``pendingSessionCelebration``
+    /// so the screen can present the post-session celebration sheet.
+    /// This is the in-app counterpart to the FCM push that fires for
+    /// the same event — without this hook the device's "session just
+    /// ended" moment is silent on a foregrounded app.
+    @Test
+    func unsolicitedSessionSummaryAssignsCelebration() async throws {
+        let (vm, transport, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [self.makeProfile()])
+            case .getPlayHistory: return self.reply(sessions: [])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        #expect(vm.pendingSessionCelebration == nil)
+
+        try transport.deliver(event: makeSessionSummaryEvent(
+            catIDs: ["cat-a"],
+            durationSec: 720,
+            engagementScore: 0.87,
+            treatsDispensed: 3,
+            pounceCount: 23,
+        ))
+        await eventually { vm.pendingSessionCelebration != nil }
+
+        let celebration = vm.pendingSessionCelebration
+        #expect(celebration?.catIds == ["cat-a"])
+        #expect(celebration?.durationSec == 720)
+        #expect(celebration?.engagementScore == 0.87)
+        #expect(celebration?.treatsDispensed == 3)
+        #expect(celebration?.pounceCount == 23)
+    }
+
+    /// Most-recent-wins: a second summary arriving before the user
+    /// has dismissed the first replaces the pending value rather
+    /// than queuing. Sessions are several minutes long so back-to-
+    /// back overlap is rare; when it does happen, the user cares
+    /// about the latest celebration, not the older one.
+    @Test
+    func laterSessionSummaryReplacesPendingCelebration() async throws {
+        let (vm, transport, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [])
+            case .getPlayHistory: return self.reply(sessions: [])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        try transport.deliver(event: makeSessionSummaryEvent(
+            catIDs: ["cat-a"],
+            durationSec: 60,
+            engagementScore: 0.20,
+            treatsDispensed: 0,
+            pounceCount: 1,
+        ))
+        await eventually { vm.pendingSessionCelebration?.durationSec == 60 }
+
+        try transport.deliver(event: makeSessionSummaryEvent(
+            catIDs: ["cat-b"],
+            durationSec: 900,
+            engagementScore: 0.85,
+            treatsDispensed: 4,
+            pounceCount: 30,
+        ))
+        await eventually { vm.pendingSessionCelebration?.durationSec == 900 }
+        #expect(vm.pendingSessionCelebration?.catIds == ["cat-b"])
+        #expect(vm.pendingSessionCelebration?.engagementScore == 0.85)
+    }
+
+    /// ``dismissSessionCelebration`` must clear the pending value so
+    /// the sheet binding observes the optional flipping to nil and
+    /// dismisses. Without this the user's "Nice" tap would do
+    /// nothing user-visible.
+    @Test
+    func dismissSessionCelebrationClearsPending() async throws {
+        let (vm, transport, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [])
+            case .getPlayHistory: return self.reply(sessions: [])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        try transport.deliver(event: makeSessionSummaryEvent(
+            catIDs: ["cat-a"],
+            durationSec: 300,
+            engagementScore: 0.65,
+            treatsDispensed: 2,
+            pounceCount: 12,
+        ))
+        await eventually { vm.pendingSessionCelebration != nil }
+
+        vm.dismissSessionCelebration()
+        #expect(vm.pendingSessionCelebration == nil)
+    }
+
+    /// A solicited reply event whose oneof happens to be
+    /// ``sessionSummary`` (request_id != 0) must NOT be misclassified
+    /// as an unsolicited celebration. The check exercises the
+    /// ``requestID == 0`` gate alongside the new oneof handling.
+    @Test
+    func solicitedSessionSummaryDoesNotMintCelebration() async throws {
+        let (vm, transport, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [])
+            case .getPlayHistory: return self.reply(sessions: [])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        var event = makeSessionSummaryEvent(
+            catIDs: ["cat-a"],
+            durationSec: 100,
+            engagementScore: 0.9,
+            treatsDispensed: 1,
+            pounceCount: 5,
+        )
+        // Mark the event as a reply by giving it a non-zero
+        // request_id. The VM's unsolicited gate must drop it.
+        event.requestID = 9_001
+        try transport.deliver(event: event)
+        // Give the events stream a chance to drain — without a real
+        // pendingNewCats / state mutation to wait on, we just settle
+        // briefly and assert.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(vm.pendingSessionCelebration == nil)
+    }
+
     @Test
     func dismissNewCatPromptRemovesByTrackID() async throws {
         let (vm, transport, server, client) = try await makeHarness { request in
@@ -996,6 +1136,29 @@ struct HistoryViewModelTests {
         // Unsolicited push — request_id MUST be zero so the device
         // client routes it onto the events stream rather than to a
         // pending continuation.
+        event.requestID = 0
+        return event
+    }
+
+    nonisolated private func makeSessionSummaryEvent(
+        catIDs: [String],
+        durationSec: UInt32,
+        engagementScore: Float,
+        treatsDispensed: UInt32,
+        pounceCount: UInt32,
+        endedAt: UInt64 = 1_712_345_678,
+    ) -> Catlaser_App_V1_DeviceEvent {
+        var event = Catlaser_App_V1_DeviceEvent()
+        var summary = Catlaser_App_V1_SessionSummary()
+        summary.catIds = catIDs
+        summary.durationSec = durationSec
+        summary.engagementScore = engagementScore
+        summary.treatsDispensed = treatsDispensed
+        summary.pounceCount = pounceCount
+        summary.endedAt = endedAt
+        event.sessionSummary = summary
+        // Unsolicited — request_id zero so the device client routes
+        // it onto the events stream.
         event.requestID = 0
         return event
     }

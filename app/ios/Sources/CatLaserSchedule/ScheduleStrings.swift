@@ -132,13 +132,13 @@ public enum ScheduleStrings {
 
     public static let emptySubtitle = NSLocalizedString(
         "schedule.empty.subtitle",
-        value: "Add a time window and your cat laser will run automatically inside it.",
+        value: "Add a playtime and your Catlaser will run automatically inside it.",
         comment: "Empty-state body explaining what schedule entries do.",
     )
 
     public static let quietHoursFootnote = NSLocalizedString(
         "schedule.footnote.quiet_hours",
-        value: "Outside these windows the device stays quiet.",
+        value: "Outside these playtimes your Catlaser stays quiet.",
         comment: "Explanatory footnote shown below a populated schedule list.",
     )
 
@@ -189,7 +189,7 @@ public enum ScheduleStrings {
 
     public static let firstRunHintBody = NSLocalizedString(
         "schedule.hint.first_run.body",
-        value: "Add a time window and your Catlaser will run automatically inside it.",
+        value: "Add a playtime and your Catlaser will run automatically inside it.",
         comment: "Body copy for the dismissible first-run hint banner.",
     )
 
@@ -201,7 +201,7 @@ public enum ScheduleStrings {
 
     public static let alwaysOnHint = NSLocalizedString(
         "schedule.footnote.always_on",
-        value: "No windows set. Your Catlaser will play whenever it detects your cat — add a window to limit it to specific times.",
+        value: "No playtimes set. Your Catlaser will play whenever it detects your cat — add a playtime to limit it to specific times.",
         comment: "Explanatory footnote shown when no schedule entries exist.",
     )
 
@@ -209,13 +209,13 @@ public enum ScheduleStrings {
 
     public static let entrySheetAddTitle = NSLocalizedString(
         "schedule.sheet.add.title",
-        value: "New window",
+        value: "New playtime",
         comment: "Sheet title when creating a fresh schedule entry.",
     )
 
     public static let entrySheetEditTitle = NSLocalizedString(
         "schedule.sheet.edit.title",
-        value: "Edit window",
+        value: "Edit playtime",
         comment: "Sheet title when editing an existing schedule entry.",
     )
 
@@ -233,25 +233,25 @@ public enum ScheduleStrings {
 
     public static let entrySheetDeleteButton = NSLocalizedString(
         "schedule.sheet.delete",
-        value: "Delete window",
+        value: "Delete playtime",
         comment: "Destructive button on the entry sheet.",
     )
 
     public static let entrySheetDeleteConfirmTitle = NSLocalizedString(
         "schedule.sheet.delete.confirm.title",
-        value: "Delete this schedule window?",
+        value: "Delete this playtime?",
         comment: "Confirmation dialog title before deleting a schedule entry from the entry sheet.",
     )
 
     public static let entrySheetDeleteConfirmMessage = NSLocalizedString(
         "schedule.sheet.delete.confirm.message",
-        value: "The window will be removed from your draft. Hit Save to make the change permanent.",
+        value: "This playtime will be removed from your draft. Hit Save to make the change permanent.",
         comment: "Confirmation dialog message before deleting a schedule entry from the entry sheet.",
     )
 
     public static let entrySheetDeleteConfirmAction = NSLocalizedString(
         "schedule.sheet.delete.confirm.action",
-        value: "Delete window",
+        value: "Delete playtime",
         comment: "Destructive button that confirms deleting a schedule entry from the entry sheet.",
     )
 
@@ -589,7 +589,7 @@ public enum ScheduleStrings {
         case .tooManyEntries:
             return NSLocalizedString(
                 "schedule.validation.too_many",
-                value: "You have too many scheduled windows. Please remove a few before saving.",
+                value: "You have too many playtimes scheduled. Please remove a few before saving.",
                 comment: "Validation message when the draft set exceeds the entry cap.",
             )
         }

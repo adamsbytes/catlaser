@@ -183,6 +183,92 @@ public enum HistoryStrings {
         comment: "VoiceOver label for the thumbnail on the new-cat naming sheet.",
     )
 
+    // MARK: - Session celebration sheet
+
+    /// Headline rendered at the top of the post-session celebration
+    /// sheet. Past tense rather than present (the session has just
+    /// ended) and warm rather than clinical — this is the moment a
+    /// cat owner waits for, not a status update.
+    public static let celebrationTitle = NSLocalizedString(
+        "history.celebration.title",
+        value: "Great session!",
+        comment: "Headline shown on the post-session celebration sheet that appears when a play session ends.",
+    )
+
+    /// Body copy when one named cat participated in the session.
+    /// Positional arg 1 is the cat's display name; the verb is
+    /// constant ("just played"). Past tense, matches the headline's
+    /// just-ended framing.
+    public static func celebrationBodySingleCat(name: String) -> String {
+        let format = NSLocalizedString(
+            "history.celebration.body.single",
+            value: "%@ just played.",
+            comment: "Body copy on the post-session celebration sheet when one named cat participated. Arg 1 is the cat's name.",
+        )
+        return String(format: format, name)
+    }
+
+    /// Body copy when multiple named cats participated in the session.
+    /// Arg 1 is a pre-joined list of names ("Pancake and Waffle",
+    /// "Pancake, Waffle, and Mochi") produced by the same join helper
+    /// the session-row uses, so the wording matches what the user sees
+    /// in History.
+    public static func celebrationBodyMultipleCats(joinedNames: String) -> String {
+        let format = NSLocalizedString(
+            "history.celebration.body.multiple",
+            value: "%@ just played.",
+            comment: "Body copy on the post-session celebration sheet when multiple named cats participated. Arg 1 is the joined list of names.",
+        )
+        return String(format: format, joinedNames)
+    }
+
+    /// Fallback body copy when the session ended for an unknown cat
+    /// (the device emitted a summary before any profile existed for
+    /// the participating track). Keeps the celebration warm while
+    /// acknowledging the lookup miss in plain language.
+    public static let celebrationBodyUnknownCat = NSLocalizedString(
+        "history.celebration.body.unknown",
+        value: "A cat just played.",
+        comment: "Body copy on the post-session celebration sheet when no cat name could be resolved.",
+    )
+
+    /// Stat-row label for the engagement bucket on the celebration
+    /// sheet.
+    public static let celebrationEngagementLabel = NSLocalizedString(
+        "history.celebration.stat.engagement",
+        value: "Engagement",
+        comment: "Stat-row label for the engagement bucket on the post-session celebration sheet.",
+    )
+
+    /// Stat-row label for elapsed play time on the celebration sheet.
+    public static let celebrationDurationLabel = NSLocalizedString(
+        "history.celebration.stat.duration",
+        value: "Play time",
+        comment: "Stat-row label for elapsed play time on the post-session celebration sheet.",
+    )
+
+    /// Stat-row label for the pounce count on the celebration sheet.
+    public static let celebrationPouncesLabel = NSLocalizedString(
+        "history.celebration.stat.pounces",
+        value: "Pounces",
+        comment: "Stat-row label for the pounce count on the post-session celebration sheet.",
+    )
+
+    /// Stat-row label for the treats-dispensed count on the
+    /// celebration sheet.
+    public static let celebrationTreatsLabel = NSLocalizedString(
+        "history.celebration.stat.treats",
+        value: "Treats",
+        comment: "Stat-row label for the treats-dispensed count on the post-session celebration sheet.",
+    )
+
+    /// Primary dismiss button on the celebration sheet.
+    public static let celebrationDismissButton = NSLocalizedString(
+        "history.celebration.dismiss",
+        value: "Nice",
+        comment: "Primary dismiss button on the post-session celebration sheet.",
+    )
+
     // MARK: - History list
 
     public static let sessionsEmptyTitle = NSLocalizedString(

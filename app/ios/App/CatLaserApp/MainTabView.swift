@@ -49,6 +49,15 @@ struct MainTabView: View {
     }
 
     @State private var selected: Tab = .live
+    /// Programmatic-navigation path the Settings tab reads. Owned
+    /// here so a deep-linked hopper-empty push tap can append a
+    /// ``SettingsRoute/hopperDetail`` and have ``SettingsView``
+    /// auto-push to the refill instructions on first appearance — the
+    /// user lands on the help they need, not on the top of Settings.
+    /// Re-set rather than appended on a deep link so a duplicate tap
+    /// while already on the destination is a no-op rather than
+    /// stacking duplicates.
+    @State private var settingsPath: [SettingsRoute] = []
 
     var body: some View {
         TabView(selection: $selected) {
@@ -78,6 +87,7 @@ struct MainTabView: View {
                 appVersion: appVersion,
                 buildNumber: buildNumber,
                 legalURLs: legalURLs,
+                navigationPath: $settingsPath,
             )
             .tabItem {
                 Label("Settings", systemImage: "gearshape.fill")
@@ -124,11 +134,16 @@ struct MainTabView: View {
             case .history:
                 selected = .history
             case .hopperStatus:
-                // No dedicated hopper tab in v1 — route to Settings,
-                // where the device section surfaces connectivity
-                // status. A future Devices tab would own the detailed
-                // hopper view.
+                // Route to the Settings tab AND deep-link past the
+                // root list straight onto the refill-instructions
+                // destination. A user who tapped a hopper-empty
+                // notification expects guidance on what to do, not a
+                // hunt through the device section. Setting the path
+                // (instead of appending) collapses any prior depth
+                // so a second tap while already on the detail is a
+                // no-op rather than a stacked duplicate.
                 selected = .settings
+                settingsPath = [.hopperDetail]
             }
         }
     }

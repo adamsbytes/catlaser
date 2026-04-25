@@ -210,6 +210,79 @@ struct CatProfileFormatterTests {
         #expect(!summary.contains("uuid-2"))
     }
 
+    // MARK: - Engagement labels
+
+    /// The three buckets must be addressable end-to-end: every score
+    /// inside the bucket's bounds resolves to the bucket's label, the
+    /// bucket boundaries themselves are inclusive on the upper side
+    /// (so 0.80 reads as "Very playful," not "Playful"), and an
+    /// out-of-range score clamps to a sensible label rather than
+    /// crashing or returning empty. Without this exhaustive coverage
+    /// a refactor that nudged the threshold or flipped the inequality
+    /// could land in production with the cat-owner-facing label
+    /// silently wrong.
+    @Test
+    func engagementLabelMapsBucketsExhaustively() {
+        // Mild interest: anything below the playful threshold,
+        // including the negative-clamp boundary.
+        #expect(CatProfileFormatter.engagementLabel(score: -0.5) == "Mild interest")
+        #expect(CatProfileFormatter.engagementLabel(score: 0.0) == "Mild interest")
+        #expect(CatProfileFormatter.engagementLabel(score: 0.49) == "Mild interest")
+
+        // Playful: score in [0.50, 0.80).
+        #expect(CatProfileFormatter.engagementLabel(score: 0.50) == "Playful")
+        #expect(CatProfileFormatter.engagementLabel(score: 0.65) == "Playful")
+        #expect(CatProfileFormatter.engagementLabel(score: 0.7999) == "Playful")
+
+        // Very playful: score in [0.80, 1.0], clamped above 1.0.
+        #expect(CatProfileFormatter.engagementLabel(score: 0.80) == "Very playful")
+        #expect(CatProfileFormatter.engagementLabel(score: 0.95) == "Very playful")
+        #expect(CatProfileFormatter.engagementLabel(score: 1.0) == "Very playful")
+        #expect(CatProfileFormatter.engagementLabel(score: 5.0) == "Very playful")
+    }
+
+    /// Threshold constants are part of the formatter's contract — a
+    /// future ScreenshotTesting / ScreenshotPlayback rig pins them
+    /// directly. Pin the exact values so a tuning change is
+    /// deliberate and shows up here, not as a silent UI shift.
+    @Test
+    func engagementThresholdsMatchProductTuning() {
+        #expect(CatProfileFormatter.engagementVeryPlayfulThreshold == 0.80)
+        #expect(CatProfileFormatter.engagementPlayfulThreshold == 0.50)
+    }
+
+    /// Accessibility variant pairs the bucket label with a percent so
+    /// VoiceOver users get the underlying signal alongside the
+    /// human-readable bucket. Percentage rounds to nearest integer
+    /// (matching system numeric-formatter conventions) and clamps to
+    /// the visible 0–100 domain so a malformed device reading does
+    /// not produce "−12 percent" on the spoken pass.
+    @Test
+    func engagementAccessibilityLabelPairsBucketWithPercent() {
+        let veryPlayful = CatProfileFormatter.engagementAccessibilityLabel(score: 0.87)
+        #expect(veryPlayful.contains("Very playful"))
+        #expect(veryPlayful.contains("87"))
+        #expect(veryPlayful.contains("percent"))
+
+        let playful = CatProfileFormatter.engagementAccessibilityLabel(score: 0.50)
+        #expect(playful.contains("Playful"))
+        #expect(playful.contains("50"))
+
+        let mild = CatProfileFormatter.engagementAccessibilityLabel(score: 0.10)
+        #expect(mild.contains("Mild interest"))
+        #expect(mild.contains("10"))
+
+        // Negative input clamps to 0%, not a negative percentage.
+        let clamped = CatProfileFormatter.engagementAccessibilityLabel(score: -0.5)
+        #expect(clamped.contains("0"))
+        #expect(!clamped.contains("-"))
+
+        // Over-range input clamps to 100%, not 500%.
+        let saturated = CatProfileFormatter.engagementAccessibilityLabel(score: 5.0)
+        #expect(saturated.contains("100"))
+        #expect(!saturated.contains("500"))
+    }
+
     // MARK: - Helpers
 
     private func makeProfile(id: String, name: String) -> Catlaser_App_V1_CatProfile {

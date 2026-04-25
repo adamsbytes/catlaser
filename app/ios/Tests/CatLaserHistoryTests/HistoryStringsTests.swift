@@ -107,4 +107,52 @@ struct HistoryStringsTests {
         #expect(indexPosition < totalPosition,
                 "queue index must render before queue total")
     }
+
+    // MARK: - Session celebration
+
+    /// Single-cat body must interpolate the cat's name at the
+    /// position the user reads it. A localisation that drops the
+    /// ``%@`` placeholder would silently render "just played." with
+    /// no subject; pin the contract here.
+    @Test
+    func celebrationBodySingleCatInterpolatesName() {
+        let body = HistoryStrings.celebrationBodySingleCat(name: "Pancake")
+        #expect(body.contains("Pancake"))
+        #expect(body.contains("just played"))
+    }
+
+    /// Multi-cat body interpolates the joined-name list verbatim;
+    /// the join itself is owned by ``CatProfileFormatter`` so the
+    /// localisation surface here is just the surrounding sentence.
+    @Test
+    func celebrationBodyMultipleCatsInterpolatesJoinedNames() {
+        let body = HistoryStrings.celebrationBodyMultipleCats(joinedNames: "Pancake and Waffle")
+        #expect(body.contains("Pancake and Waffle"))
+        #expect(body.contains("just played"))
+    }
+
+    /// Unknown-cat fallback is the only branch that should never
+    /// surface a name. The body must read as a complete sentence on
+    /// its own — no orphaned ``%@`` placeholder, no leading article
+    /// missing.
+    @Test
+    func celebrationBodyUnknownCatStandsAlone() {
+        let body = HistoryStrings.celebrationBodyUnknownCat
+        #expect(!body.isEmpty)
+        #expect(!body.contains("%@"))
+        #expect(body.contains("just played"))
+    }
+
+    /// All four stat-row labels must resolve to non-empty user-facing
+    /// copy. A refactor that dropped a ``NSLocalizedString`` key
+    /// would otherwise ship an unlabelled stat tile.
+    @Test
+    func celebrationStatLabelsAllNonEmpty() {
+        #expect(!HistoryStrings.celebrationEngagementLabel.isEmpty)
+        #expect(!HistoryStrings.celebrationDurationLabel.isEmpty)
+        #expect(!HistoryStrings.celebrationPouncesLabel.isEmpty)
+        #expect(!HistoryStrings.celebrationTreatsLabel.isEmpty)
+        #expect(!HistoryStrings.celebrationDismissButton.isEmpty)
+        #expect(!HistoryStrings.celebrationTitle.isEmpty)
+    }
 }

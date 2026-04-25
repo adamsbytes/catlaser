@@ -265,33 +265,56 @@ public struct PairingView: View {
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(SemanticColor.textPrimary)
                 .accessibilityHeader()
-            TextField(
-                PairingStrings.manualEntryPlaceholder,
-                text: Binding(
-                    get: { draft },
-                    set: { viewModel.setManualDraft($0) },
-                ),
-            )
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled(true)
-            .submitLabel(.go)
-            .onSubmit {
-                // The keyboard's return key is the obvious commit
-                // gesture for a one-field form. Mirror the explicit
-                // "Pair" button's behaviour exactly so the user has
-                // two equivalent paths.
-                Haptics.commit.play()
-                Task { await viewModel.submitManualCode() }
+            // Subtitle tells the user what manual entry expects and
+            // where the link comes from. Without this the field reads
+            // as "type something here" with no guidance — and the
+            // previous raw-URL-scheme placeholder hinted at no
+            // human-friendly source for the value.
+            Text(PairingStrings.manualEntrySubtitle)
+                .font(.callout)
+                .foregroundStyle(SemanticColor.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
+            // Field label sits above the text field as a static row
+            // — matches the cat-edit and other Form-style screens in
+            // the app, and guarantees a sighted user always sees the
+            // field's purpose even when the placeholder is hidden by
+            // a non-empty draft. Wrapped in a leading-aligned VStack
+            // so the label and field share a left edge inside the
+            // otherwise-centred screen layout.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(PairingStrings.manualEntryFieldLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(SemanticColor.textSecondary)
+                    .textCase(.uppercase)
+                TextField(
+                    PairingStrings.manualEntryPlaceholder,
+                    text: Binding(
+                        get: { draft },
+                        set: { viewModel.setManualDraft($0) },
+                    ),
+                )
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .submitLabel(.go)
+                .onSubmit {
+                    // The keyboard's return key is the obvious commit
+                    // gesture for a one-field form. Mirror the explicit
+                    // "Pair" button's behaviour exactly so the user
+                    // has two equivalent paths.
+                    Haptics.commit.play()
+                    Task { await viewModel.submitManualCode() }
+                }
+                .padding()
+                .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(SemanticColor.separator, lineWidth: 1),
+                )
+                .foregroundStyle(SemanticColor.textPrimary)
+                .accessibilityID(.pairingManualField)
+                .accessibilityLabel(Text(PairingStrings.manualEntryFieldLabel))
             }
-            .padding()
-            .background(SemanticColor.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(SemanticColor.separator, lineWidth: 1),
-            )
-            .foregroundStyle(SemanticColor.textPrimary)
-            .accessibilityID(.pairingManualField)
-            .accessibilityLabel(Text(PairingStrings.manualEntryPlaceholder))
 
             HStack(spacing: 12) {
                 Button(PairingStrings.scanInsteadButton) {

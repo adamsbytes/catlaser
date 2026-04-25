@@ -158,11 +158,8 @@ public struct LiveView: View {
         ZStack {
             posterBackdrop
             VStack(spacing: 16) {
-                Image(systemName: "video.slash")
-                    .font(.system(size: 48, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityDecorativeIcon()
-                Text(LiveViewStrings.disconnectedTitle)
+                disconnectedHeroIcon
+                Text(disconnectedTitle)
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
                     .accessibilityHeader()
@@ -189,6 +186,52 @@ public struct LiveView: View {
             }
             .frame(maxWidth: 420)
             .padding()
+        }
+    }
+
+    /// True iff this is the user's first arrival on a disconnected
+    /// Live tab in the current app session. "First arrival" means no
+    /// previous stream has dismantled (so ``lastPoster`` is nil) AND
+    /// no transient flag is steering the copy toward an explanation
+    /// (auth-cancel, network drop). This is the only state in which
+    /// the cold "Live view is off" copy reads as a stop sign rather
+    /// than as accurate context — every other disconnected branch
+    /// arrives there for a reason that has its own subtitle.
+    private var isFirstVisit: Bool {
+        #if canImport(UIKit) && !os(watchOS)
+        guard lastPoster == nil else { return false }
+        #endif
+        return !viewModel.didCancelAuthGate && !viewModel.didDropFromNetwork
+    }
+
+    /// Title shown on the disconnected pane. First-visit gets the
+    /// welcoming "See your cat live" headline; every other branch
+    /// keeps the existing "Live view is off" copy because the
+    /// subtitle below it carries the explanation.
+    private var disconnectedTitle: String {
+        isFirstVisit
+            ? LiveViewStrings.disconnectedFirstVisitTitle
+            : LiveViewStrings.disconnectedTitle
+    }
+
+    /// Hero icon for the disconnected pane. On first visit the icon
+    /// reads as an invitation (a play-circle glyph paired with a
+    /// breathing pulse) rather than the post-error ``video.slash``
+    /// crossbar. The pulse is suppressed under
+    /// ``accessibilityReduceMotion`` so users who have asked the
+    /// system not to animate get the same visual without the
+    /// in-and-out scaling. The post-stream / post-error branches
+    /// keep ``video.slash`` because the user is now reading it as
+    /// "the stream stopped," which is what the glyph means.
+    @ViewBuilder
+    private var disconnectedHeroIcon: some View {
+        if isFirstVisit {
+            FirstVisitPulseIcon(reduceMotion: reduceMotion)
+        } else {
+            Image(systemName: "video.slash")
+                .font(.system(size: 48, weight: .regular))
+                .foregroundStyle(.white.opacity(0.7))
+                .accessibilityDecorativeIcon()
         }
     }
 
@@ -225,23 +268,38 @@ public struct LiveView: View {
         #endif
     }
 
-    /// Subtitle shown on the disconnected pane. Normally reads the
-    /// first-time "tap Watch live" copy; after a biometric-cancel
-    /// it reads the softened "couldn't confirm your identity" copy;
-    /// after a network-class drop (wifi roam, backgrounding) it
-    /// reads the "stream paused" copy so the user understands the
-    /// feed stopped on its own. Both transient flags are cleared at
-    /// the top of ``start()`` so a successful retry rewrites the
-    /// subtitle back to the default. The two flags are never true
-    /// simultaneously — ``start()`` clears them both before either
-    /// can be re-raised — so rendering priority between them is
-    /// incidental, not load-bearing.
+    /// Subtitle shown on the disconnected pane. Four branches, in
+    /// priority order:
+    ///
+    /// * Biometric cancel — softened "couldn't confirm your identity"
+    ///   copy. Highest priority because it explains the most recent
+    ///   user action and overrides everything else on the screen.
+    /// * Network-class drop (wifi roam, backgrounding) — "stream
+    ///   paused" so the user understands the feed stopped on its own.
+    /// * First visit (no poster, no transient flags) — the welcoming
+    ///   "Tap Watch live to start a private stream" copy. Pairs with
+    ///   the first-visit headline above; reframes the screen as an
+    ///   invitation rather than a stop sign on the inaugural visit.
+    /// * Post-stream return (poster exists, no flags) — the original
+    ///   "Tap Watch live to see what your cat is up to right now."
+    ///   copy. The user has been here before; the brief context is
+    ///   enough.
+    ///
+    /// Both transient flags are cleared at the top of ``start()`` so
+    /// a successful retry rewrites the subtitle back to one of the
+    /// non-flag branches. The auth-cancel and network-drop flags are
+    /// never true simultaneously — ``start()`` clears them both
+    /// before either can be re-raised — so rendering priority
+    /// between them is incidental, not load-bearing.
     private var disconnectedSubtitle: String {
         if viewModel.didCancelAuthGate {
             return LiveViewStrings.disconnectedAuthCancelledSubtitle
         }
         if viewModel.didDropFromNetwork {
             return LiveViewStrings.disconnectedNetworkDropSubtitle
+        }
+        if isFirstVisit {
+            return LiveViewStrings.disconnectedFirstVisitSubtitle
         }
         return LiveViewStrings.disconnectedSubtitle
     }
@@ -590,6 +648,59 @@ public struct LiveView: View {
             guard !Task.isCancelled else { return }
             controlsVisible = false
         }
+    }
+}
+
+/// Hero icon for the live-view first-visit state.
+///
+/// A play-circle glyph paired with a slow, two-second breathing scale.
+/// The pulse is the ambient cue that turns the disconnected pane from
+/// a stop sign into an invitation — no on-screen video yet, but
+/// something is alive about the surface. ``accessibilityReduceMotion``
+/// suppresses the scale animation while keeping the glyph's solid
+/// rendering, matching the system-wide motion-reduction policy used
+/// by the rest of the app.
+private struct FirstVisitPulseIcon: View {
+    let reduceMotion: Bool
+
+    /// Drives the breathing animation. Two-state ``@State`` rather
+    /// than a continuous ``TimelineView`` so the animation can run
+    /// off SwiftUI's interpolated ``.repeatForever(autoreverses: true)``
+    /// transition — that gives a smoother in/out curve than a
+    /// hand-rolled timeline at this duration.
+    @State private var pulsing = false
+
+    /// Period of the breathing cycle. Two seconds is slow enough to
+    /// read as ambient (not flashing for attention) and fast enough
+    /// that a glance at the screen catches the motion. Tuned by hand;
+    /// shorter values feel anxious, longer ones disappear into the
+    /// idle motion of the eye.
+    private static let pulsePeriod: Double = 2.0
+
+    var body: some View {
+        Image(systemName: "play.circle.fill")
+            .font(.system(size: 56, weight: .regular))
+            .foregroundStyle(.white.opacity(0.85))
+            .scaleEffect(pulsing && !reduceMotion ? 1.06 : 1.0)
+            .opacity(pulsing && !reduceMotion ? 1.0 : 0.85)
+            .shadow(color: .white.opacity(0.18), radius: pulsing && !reduceMotion ? 14 : 4)
+            .animation(
+                reduceMotion
+                    ? nil
+                    : .easeInOut(duration: Self.pulsePeriod).repeatForever(autoreverses: true),
+                value: pulsing,
+            )
+            .onAppear {
+                // Defer the flag flip to the next runloop so the
+                // ``.animation`` modifier captures the transition.
+                // Without this, the initial render lands on the
+                // post-flag values and the animation has nothing to
+                // interpolate against on first appearance.
+                Task { @MainActor in
+                    pulsing = true
+                }
+            }
+            .accessibilityDecorativeIcon()
     }
 }
 #endif

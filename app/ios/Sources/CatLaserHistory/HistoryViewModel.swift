@@ -58,6 +58,22 @@ public final class HistoryViewModel {
     /// ``dismissNewCatPrompt(_:)`` pop the matched entry.
     public private(set) var pendingNewCats: [NewCatPrompt] = []
 
+    /// Most recent unsolicited ``SessionSummary`` the device has
+    /// emitted while this VM was alive, awaiting the user's
+    /// acknowledgement. The UI surfaces this as a one-shot
+    /// celebration sheet that congratulates the owner on their cat's
+    /// just-finished session and surfaces the headline stats —
+    /// engagement bucket, pounces, treats, duration.
+    ///
+    /// Most-recent-wins rather than a queue: sessions are several
+    /// minutes long, so a back-to-back overlap is rare; when it does
+    /// happen, the user most likely cares about the latest one. The
+    /// queue tradeoff that matters for ``NewCatDetected`` (each cat
+    /// is a distinct identity that has to be named individually)
+    /// does not apply here. Cleared by
+    /// ``dismissSessionCelebration()`` when the user taps "Nice".
+    public private(set) var pendingSessionCelebration: Catlaser_App_V1_SessionSummary?
+
     /// Last error surfaced for an in-flight mutation (update name,
     /// delete, identify-new). Distinct from the per-pane ``failed``
     /// state because a transient failure on a delete should not blank
@@ -305,6 +321,15 @@ public final class HistoryViewModel {
         removePendingPrompt(trackIDHint: trackIDHint)
     }
 
+    /// Dismiss the post-session celebration sheet. The view's sheet
+    /// binding observes ``pendingSessionCelebration`` and dismisses
+    /// when this clears. A subsequent ``SessionSummary`` event mints
+    /// a fresh celebration; this method is a one-shot acknowledgement
+    /// of the current one only.
+    public func dismissSessionCelebration() {
+        pendingSessionCelebration = nil
+    }
+
     // MARK: - Play history
 
     /// Load the play-history list for the supplied range. Re-issues
@@ -490,11 +515,31 @@ public final class HistoryViewModel {
                     confidence: payload.confidence,
                 ),
             )
+        case let .sessionSummary(summary):
+            // Most-recent-wins celebration. A second summary landing
+            // before the user has acknowledged the first replaces the
+            // pending one — back-to-back sessions are rare in
+            // practice, and the user's expectation is "show me the
+            // latest play" rather than "queue them up." The view's
+            // sheet binding observes this property and presents
+            // automatically on assignment; ``dismissSessionCelebration``
+            // clears it after the user taps acknowledge.
+            //
+            // Side-effect refresh of the session list so the row that
+            // matches the celebration appears in History when the
+            // user dismisses the sheet. Fire-and-forget — the
+            // ``canRefresh`` gate coalesces with any concurrent
+            // refresh; failing transparently here is correct because
+            // the celebration itself does not depend on the list.
+            pendingSessionCelebration = summary
+            Task { [weak self] in
+                await self?.refreshHistory()
+            }
         default:
             // Other unsolicited events (status updates, hopper
-            // alerts, session summaries) are owned by other VMs and
-            // ignored here. Letting them flow past keeps the
-            // events stream a single-consumer surface.
+            // alerts, diagnostics) are owned by other VMs and ignored
+            // here. Letting them flow past keeps the events stream a
+            // single-consumer surface.
             return
         }
     }
