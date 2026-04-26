@@ -41,6 +41,8 @@ class MsgType(IntEnum):
     SESSION_ACK = 5
     IDENTITY_RESULT = 6
     SESSION_END = 7
+    STREAM_CONTROL = 8
+    STREAM_STATUS = 9
 
 
 # ---------------------------------------------------------------------------

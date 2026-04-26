@@ -10,7 +10,7 @@
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use str0m::format::Codec;
 use str0m::media::{MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
@@ -95,14 +95,17 @@ pub(crate) struct StreamConfig {
 ///
 /// Connects to `LiveKit`, negotiates WebRTC, and streams encoded frames
 /// from the channel until the channel is disconnected (signaling stop)
-/// or a fatal error occurs.
+/// or a fatal error occurs. Forwards every WebRTC keyframe request from
+/// the receiver to `keyframe_tx` so the encoder on the main pipeline
+/// thread can produce an IDR on the next encode.
 ///
 /// This function blocks until streaming ends. Designed to be called from
 /// a dedicated thread spawned by the pipeline.
 pub(crate) fn run_publisher(
     config: &StreamConfig,
     frame_rx: &Receiver<EncodedFrame>,
-    state_tx: &crossbeam_channel::Sender<PublisherState>,
+    state_tx: &Sender<PublisherState>,
+    keyframe_tx: &Sender<()>,
 ) -> Result<(), StreamError> {
     let _ = state_tx.send(PublisherState::Connecting);
 
@@ -117,7 +120,14 @@ pub(crate) fn run_publisher(
     tracing::info!(room = %config.room_name, "streaming started");
 
     let frame_count = stream_loop(
-        &mut rtc, &mut ws, mid, &socket, local_addr, frame_rx, state_tx,
+        &mut rtc,
+        &mut ws,
+        mid,
+        &socket,
+        local_addr,
+        frame_rx,
+        state_tx,
+        keyframe_tx,
     )?;
 
     let _ = state_tx.send(PublisherState::Idle);
@@ -316,6 +326,12 @@ fn relay_trickle_candidate(trickle: Option<signaling::TrickleRequest>, rtc: &mut
 /// Runs the main frame-sending and event-polling loop.
 ///
 /// Returns the total number of frames sent on success.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the publisher loop owns a synchronous state machine across str0m, the WebSocket, \
+              the UDP socket, and three channels; bundling them into a struct is a refactor for \
+              another day and would not improve clarity"
+)]
 fn stream_loop(
     rtc: &mut Rtc,
     ws: &mut WsConn,
@@ -323,7 +339,8 @@ fn stream_loop(
     socket: &UdpSocket,
     local_addr: std::net::SocketAddr,
     frame_rx: &Receiver<EncodedFrame>,
-    state_tx: &crossbeam_channel::Sender<PublisherState>,
+    state_tx: &Sender<PublisherState>,
+    keyframe_tx: &Sender<()>,
 ) -> Result<u64, StreamError> {
     let start = Instant::now();
     let mut buf = vec![0_u8; 2000];
@@ -354,7 +371,7 @@ fn stream_loop(
                 std::thread::sleep(sleep);
             }
             Ok(Output::Event(event)) => {
-                handle_event(&event, ws);
+                handle_event(&event, keyframe_tx);
             }
             Err(err) => {
                 tracing::error!(%err, "str0m error");
@@ -462,16 +479,21 @@ fn write_frame(rtc: &mut Rtc, mid: Mid, frame: &EncodedFrame, start: Instant) {
 // ---------------------------------------------------------------------------
 
 /// Handles str0m events (ICE candidates, keyframe requests, etc.).
-fn handle_event(
-    event: &Event,
-    _ws: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-) {
+///
+/// On every keyframe request from the WebRTC receiver, posts a
+/// non-blocking notification to `keyframe_tx`. The pipeline thread drains
+/// the channel each frame and forces an IDR via the encoder. A full
+/// channel (capacity 1) means a request is already pending — the next
+/// IDR will satisfy both, so dropping the notification is correct.
+fn handle_event(event: &Event, keyframe_tx: &Sender<()>) {
     match event {
         Event::IceConnectionStateChange(state) => {
             tracing::info!(?state, "ICE state changed");
         }
         Event::KeyframeRequest(req) => {
             tracing::debug!(?req, "keyframe requested by receiver");
+            // Non-blocking: capacity 1 with coalescing semantics.
+            let _ = keyframe_tx.try_send(());
         }
         _ => {}
     }

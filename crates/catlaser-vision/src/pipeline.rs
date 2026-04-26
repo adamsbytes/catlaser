@@ -536,6 +536,37 @@ pub(crate) fn compute_ambient_brightness(frame_data: &[u8], y_plane_size: usize)
     brightness
 }
 
+/// Converts a publisher bps bitrate to the encoder's kbps rate-control unit.
+///
+/// Rounds down — the `StreamControl` wire value is a target ceiling, and a
+/// fractional kbps below it is closer to the receiver's stated budget than
+/// rounding up would be. Saturates at u32 to keep the helper total.
+#[expect(
+    clippy::integer_division,
+    reason = "intentional: bps / 1000 with truncation toward zero is the correct conversion to \
+              the encoder's kbps unit; rounding up would overshoot the publisher target"
+)]
+pub(crate) const fn bitrate_bps_to_kbps(bps: u32) -> u32 {
+    bps / 1000_u32
+}
+
+/// Maps the publisher's internal lifecycle state to the proto `StreamState`
+/// enum forwarded to Python.
+pub(crate) const fn publisher_state_to_proto(
+    state: crate::streaming::PublisherState,
+) -> detection::StreamState {
+    match state {
+        crate::streaming::PublisherState::Idle => detection::StreamState::STREAM_STATE_STOPPED,
+        crate::streaming::PublisherState::Connecting => {
+            detection::StreamState::STREAM_STATE_CONNECTING
+        }
+        crate::streaming::PublisherState::Publishing => {
+            detection::StreamState::STREAM_STATE_PUBLISHING
+        }
+        crate::streaming::PublisherState::Error => detection::StreamState::STREAM_STATE_ERROR,
+    }
+}
+
 /// Maps the internal tracker state enum to the proto `TrackState` enum.
 pub(crate) fn map_track_state(state: TrackState) -> detection::TrackState {
     match state {
@@ -911,8 +942,19 @@ pub(crate) struct Pipeline {
     frame_count: u64,
     /// Active streaming publisher handle, if streaming is in progress.
     /// Owned by the pipeline — dropping it signals the publisher thread
-    /// to shut down.
+    /// to shut down. Lives in lock-step with `encoder`: both are present
+    /// while a stream is active and both are cleared on stop.
     stream_handle: Option<crate::streaming::StreamHandle>,
+    /// RKMPI hardware H.264 encoder, alive only while a stream is active.
+    /// On the encoder's `Drop`, the VENC channel is destroyed and
+    /// `RK_MPI_SYS_Exit` releases hardware resources. Created when
+    /// Python sends `StreamControl::Start` and dropped on
+    /// `StreamControl::Stop` or on a fatal encoder error.
+    encoder: Option<crate::encoder::Encoder>,
+    /// Pending `StreamStatus` to forward to Python on the next IPC
+    /// drain. Populated when the publisher state changes or the
+    /// encoder errors out; consumed by `stream_ipc`.
+    pending_stream_status: Option<crate::proto::detection::StreamStatus>,
 }
 
 impl Pipeline {
@@ -1007,6 +1049,8 @@ impl Pipeline {
             frames_drained: 0_u64,
             frame_count: 0_u64,
             stream_handle: None,
+            encoder: None,
+            pending_stream_status: None,
         })
     }
 
@@ -1044,10 +1088,12 @@ impl Pipeline {
                 let brightness = compute_ambient_brightness(frame.data(), self.y_plane_size);
                 self.model.set_input(frame.data())?;
 
-                // Retain frame data for embedding extraction. Only copy when
-                // the embed engine has pending requests to avoid ~100 us
-                // memcpy on frames that don't need cropping.
-                if self.embed_engine.has_pending() {
+                // Retain frame data when either the embed engine has pending
+                // crop requests OR a stream encoder is alive. Both consumers
+                // need the NV12 buffer to outlive the V4L2 frame; the copy
+                // here costs ~100 us on the Cortex-A7 and is skipped when
+                // neither subsystem is active.
+                if self.embed_engine.has_pending() || self.encoder.is_some() {
                     self.frame_data.clear();
                     self.frame_data.extend_from_slice(frame.data());
                 }
@@ -1150,6 +1196,18 @@ impl Pipeline {
                 &active_tracks,
             );
         }
+
+        // --- Stream encode + publish ---
+        // Active only when Python has sent a StreamControl::Start and the
+        // RKMPI encoder initialised successfully. The retained `frame_data`
+        // holds the same NV12 buffer the NPU just consumed; encoding from
+        // it (rather than from the V4L2 buffer directly) lets the camera
+        // queue advance while the hardware encoder runs.
+        self.encode_and_publish_frame();
+        // Drain any state transitions the publisher posted on its thread.
+        // A fresh state queues a `StreamStatus` for the next IPC drain so
+        // Python can surface "publishing" / "error" to the app UI.
+        self.poll_stream_state_change();
 
         // --- Targeting + Command ---
         // When a session is Active and Python has sent a BehaviorCommand,
@@ -1325,6 +1383,19 @@ impl Pipeline {
             }
         }
 
+        // --- StreamStatus (sporadic, on publisher state transitions) ---
+        // Drained before identity events so Python sees a stream
+        // transition (e.g. error) before any out-of-band IPC chatter.
+        if let Some(status) = self.pending_stream_status.take()
+            && let Err(err) = conn.send_stream_status(&status)
+        {
+            tracing::warn!(%err, "IPC client disconnected during stream status send");
+            self.ipc_connection = None;
+            self.session_state = SessionState::Idle;
+            self.last_behavior_cmd = None;
+            return (false, None);
+        }
+
         // --- IdentityRequest events (sporadic, when embedding averaging completes) ---
         let identity_events = build_identity_request_events(completed_embeddings);
         for event in &identity_events {
@@ -1388,39 +1459,161 @@ impl Pipeline {
 
     /// Handles a `StreamControl` message from Python.
     ///
-    /// Starts or stops the WebRTC video publisher based on the action.
-    /// On start, spawns a publisher thread with the credentials from the
-    /// message. On stop, drops the handle (which closes the frame channel,
-    /// signaling the publisher to exit).
+    /// Start: initialises the RKMPI hardware encoder and spawns the WebRTC
+    /// publisher thread. If the encoder fails to initialise (typically the
+    /// `librkmpi.so` library is unavailable on a non-RV1106 host) the
+    /// publisher is not started and a `StreamStatus::Error` is queued for
+    /// Python so the app surfaces a specific failure.
+    ///
+    /// Stop: drops the publisher handle (closing its frame channel signals
+    /// the publisher thread to exit) and the encoder (whose `Drop` releases
+    /// the VENC channel and calls `RK_MPI_SYS_Exit`).
     fn handle_stream_control(&mut self, ctrl: detection::StreamControl) {
         let action = ctrl.action.as_known();
         match action {
-            Some(detection::StreamAction::STREAM_ACTION_START) => {
-                if self.stream_handle.is_some() {
-                    tracing::warn!("received start stream but publisher already running");
-                    return;
-                }
-                let config = crate::streaming::StreamConfig {
-                    livekit_url: ctrl.livekit_url,
-                    publisher_token: ctrl.publisher_token,
-                    room_name: ctrl.room_name,
-                    target_bitrate_bps: ctrl.target_bitrate_bps,
-                    width: self.frame_width,
-                    height: self.frame_height,
-                };
-                tracing::info!(room = %config.room_name, "starting stream publisher");
-                self.stream_handle = Some(crate::streaming::StreamHandle::start(config));
-            }
-            Some(detection::StreamAction::STREAM_ACTION_STOP) => {
-                if let Some(handle) = self.stream_handle.take() {
-                    tracing::info!("stopping stream publisher");
-                    handle.stop();
-                }
-            }
+            Some(detection::StreamAction::STREAM_ACTION_START) => self.start_stream(ctrl),
+            Some(detection::StreamAction::STREAM_ACTION_STOP) => self.stop_stream(),
             _ => {
                 tracing::debug!(action = ?ctrl.action, "ignoring unknown stream action");
             }
         }
+    }
+
+    /// Initialises the encoder + publisher for a `StreamControl::Start`.
+    ///
+    /// Order matters: the encoder is constructed first so a failure surfaces
+    /// before any `LiveKit` room or signaling resources are allocated. On
+    /// success, the publisher thread is spawned and ownership is recorded
+    /// in `stream_handle` + `encoder` for the per-frame loop.
+    fn start_stream(&mut self, ctrl: detection::StreamControl) {
+        if self.stream_handle.is_some() || self.encoder.is_some() {
+            tracing::warn!("received start stream but publisher already running");
+            return;
+        }
+
+        let bitrate_kbps = bitrate_bps_to_kbps(ctrl.target_bitrate_bps);
+        let encoder_config = crate::encoder::EncoderConfig {
+            width: self.frame_width,
+            height: self.frame_height,
+            bitrate_kbps,
+            ..crate::encoder::EncoderConfig::default()
+        };
+        match crate::encoder::Encoder::init(encoder_config) {
+            Ok(encoder) => {
+                self.encoder = Some(encoder);
+            }
+            Err(err) => {
+                tracing::error!(%err, "encoder init failed, refusing to start stream");
+                self.queue_stream_error(format!("encoder init failed: {err}"));
+                return;
+            }
+        }
+
+        let config = crate::streaming::StreamConfig {
+            livekit_url: ctrl.livekit_url,
+            publisher_token: ctrl.publisher_token,
+            room_name: ctrl.room_name,
+            target_bitrate_bps: ctrl.target_bitrate_bps,
+            width: self.frame_width,
+            height: self.frame_height,
+        };
+        tracing::info!(room = %config.room_name, "starting stream publisher");
+        self.stream_handle = Some(crate::streaming::StreamHandle::start(config));
+    }
+
+    /// Tears down the encoder + publisher in the correct order.
+    ///
+    /// Stops the publisher first so the frame channel closes before any
+    /// further `encode` calls could attempt to send. Dropping the encoder
+    /// then releases the VENC channel via its `Drop` impl. Idempotent.
+    fn stop_stream(&mut self) {
+        if let Some(handle) = self.stream_handle.take() {
+            tracing::info!("stopping stream publisher");
+            handle.stop();
+        }
+        if self.encoder.is_some() {
+            self.encoder = None;
+            tracing::info!("encoder released");
+        }
+    }
+
+    /// Encodes the current `frame_data` and ships it to the publisher.
+    ///
+    /// No-op when no stream is active or `frame_data` is empty (the capture
+    /// loop only fills it when the embed engine OR encoder is alive). On
+    /// encoder error the stream is torn down and a `StreamStatus::Error` is
+    /// queued for Python so the app can surface a specific failure.
+    fn encode_and_publish_frame(&mut self) {
+        if self.frame_data.is_empty() {
+            return;
+        }
+        let (Some(encoder), Some(stream)) = (&mut self.encoder, &self.stream_handle) else {
+            return;
+        };
+
+        // Coalesce all pending PLI/FIRs from the publisher into one IDR.
+        if stream.take_keyframe_request()
+            && let Err(err) = encoder.request_idr()
+        {
+            // A failed IDR request is recoverable — the next GOP boundary
+            // produces a keyframe anyway. Log and continue.
+            tracing::warn!(%err, "encoder request_idr failed");
+        }
+
+        let encode_result = encoder.encode(
+            self.frame_data.as_ptr(),
+            self.frame_width,
+            self.frame_height,
+        );
+        match encode_result {
+            Ok(encoded_frame) => {
+                stream.send_frame(encoded_frame);
+            }
+            Err(err) => {
+                tracing::error!(%err, "encoder failed mid-stream, tearing down");
+                let detail = format!("encoder error: {err}");
+                self.stop_stream();
+                self.queue_stream_error(detail);
+            }
+        }
+    }
+
+    /// Polls the publisher for state transitions and queues a matching
+    /// `StreamStatus` for Python.
+    ///
+    /// State changes are sparse (Connecting → Publishing → Idle/Error)
+    /// so this runs every frame at low cost. The previous "queued" status
+    /// is overwritten — only the latest state matters to Python, and a
+    /// status that hasn't been drained yet is necessarily stale.
+    fn poll_stream_state_change(&mut self) {
+        let Some(stream) = &mut self.stream_handle else {
+            return;
+        };
+        let Some(state) = stream.poll_state_change() else {
+            return;
+        };
+        let proto_state = publisher_state_to_proto(state);
+        let status = crate::proto::detection::StreamStatus {
+            state: proto_state.into(),
+            error_message: String::new(),
+            ..Default::default()
+        };
+        tracing::info!(?state, "stream state changed");
+        self.pending_stream_status = Some(status);
+    }
+
+    /// Queues a `StreamStatus::Error` for Python with the given detail.
+    ///
+    /// Used from both pre-publish (encoder init) and mid-stream (encode
+    /// failure) paths so the app surfaces a concrete reason rather than a
+    /// generic "stream stopped."
+    fn queue_stream_error(&mut self, detail: String) {
+        let status = crate::proto::detection::StreamStatus {
+            state: crate::proto::detection::StreamState::STREAM_STATE_ERROR.into(),
+            error_message: detail,
+            ..Default::default()
+        };
+        self.pending_stream_status = Some(status);
     }
 
     /// Returns the total number of frames processed since initialization.
@@ -1528,6 +1721,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // bitrate_bps_to_kbps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bitrate_bps_to_kbps_round_kbps() {
+        assert_eq!(
+            bitrate_bps_to_kbps(500_000_u32),
+            500_u32,
+            "500_000 bps must convert to 500 kbps exactly"
+        );
+    }
+
+    #[test]
+    fn test_bitrate_bps_to_kbps_truncates_below_one_kbps() {
+        assert_eq!(
+            bitrate_bps_to_kbps(999_u32),
+            0_u32,
+            "<1000 bps must truncate to 0 kbps (rounding toward zero is intentional)"
+        );
+    }
+
+    #[test]
+    fn test_bitrate_bps_to_kbps_truncates_partial_kbps() {
+        assert_eq!(
+            bitrate_bps_to_kbps(1_999_u32),
+            1_u32,
+            "1999 bps must truncate to 1 kbps (rounding down is intentional)"
+        );
+    }
+
+    #[test]
+    fn test_bitrate_bps_to_kbps_zero() {
+        assert_eq!(
+            bitrate_bps_to_kbps(0_u32),
+            0_u32,
+            "0 bps must convert to 0 kbps"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn test_bitrate_bps_to_kbps_never_exceeds_input(bps in 0_u32..=u32::MAX) {
+            let kbps = bitrate_bps_to_kbps(bps);
+            // kbps * 1000 must not exceed bps (rounding-down invariant). Use
+            // checked_mul to avoid overflow when kbps is u32::MAX / 1000 etc.
+            let lower = kbps.checked_mul(1000_u32).unwrap_or(0_u32);
+            prop_assert!(
+                lower <= bps,
+                "kbps {} -> {} bps exceeds input {} bps", kbps, lower, bps,
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // publisher_state_to_proto
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_publisher_state_to_proto_idle_maps_to_stopped() {
+        assert_eq!(
+            publisher_state_to_proto(crate::streaming::PublisherState::Idle),
+            detection::StreamState::STREAM_STATE_STOPPED,
+            "Idle must surface as STOPPED to Python (the stream is no longer running)"
+        );
+    }
+
+    #[test]
+    fn test_publisher_state_to_proto_connecting_maps_to_connecting() {
+        assert_eq!(
+            publisher_state_to_proto(crate::streaming::PublisherState::Connecting),
+            detection::StreamState::STREAM_STATE_CONNECTING,
+            "Connecting must surface as CONNECTING"
+        );
+    }
+
+    #[test]
+    fn test_publisher_state_to_proto_publishing_maps_to_publishing() {
+        assert_eq!(
+            publisher_state_to_proto(crate::streaming::PublisherState::Publishing),
+            detection::StreamState::STREAM_STATE_PUBLISHING,
+            "Publishing must surface as PUBLISHING"
+        );
+    }
+
+    #[test]
+    fn test_publisher_state_to_proto_error_maps_to_error() {
+        assert_eq!(
+            publisher_state_to_proto(crate::streaming::PublisherState::Error),
+            detection::StreamState::STREAM_STATE_ERROR,
+            "Error must surface as ERROR"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -50,6 +50,7 @@ _INBOUND_DECODERS: Final[dict[MsgType, type[Message]]] = {
     MsgType.DETECTION_FRAME: pb.DetectionFrame,
     MsgType.TRACK_EVENT: pb.TrackEvent,
     MsgType.SESSION_REQUEST: pb.SessionRequest,
+    MsgType.STREAM_STATUS: pb.StreamStatus,
 }
 
 
@@ -151,6 +152,19 @@ class IpcClient:
     def send_session_end(self) -> None:
         """Signal that the current session has finished."""
         self._send(MsgType.SESSION_END, pb.SessionEnd())
+
+    def send_stream_control(self, ctrl: pb.StreamControl) -> None:
+        """Send a stream control (start/stop) command to the vision daemon.
+
+        Triggers the vision daemon to start its WebRTC publisher with the
+        included LiveKit credentials, or to stop the active publisher.
+        Used by the daemon's app handler integration: when the app
+        requests a live stream, the orchestrator mints LiveKit tokens via
+        :class:`StreamManager`, sends ``STREAM_ACTION_START`` here so the
+        Rust side spawns its publisher thread, and forwards the
+        subscriber credentials back to the app via ``StreamOffer``.
+        """
+        self._send(MsgType.STREAM_CONTROL, ctrl)
 
     def _send(self, msg_type: MsgType, msg: Message) -> None:
         """Encode and send a framed protobuf message.
