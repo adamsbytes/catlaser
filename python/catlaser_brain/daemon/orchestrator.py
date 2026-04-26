@@ -44,6 +44,7 @@ from catlaser_brain.auth.coord_client import CoordClient, CoordClientError
 from catlaser_brain.auth.identity import DeviceIdentityStore
 from catlaser_brain.daemon.hopper import HopperSensor
 from catlaser_brain.daemon.session_bridge import (
+    NewCatDetection,
     OutboundMessages,
     SessionBridge,
     SessionFinalized,
@@ -356,8 +357,21 @@ class Daemon:
                 stream_bridge=stream_bridge,
             )
 
-            if now >= next_heartbeat:
-                self._refresh_state(device_state, hopper, bridge)
+            self._broadcast_new_cats(bridge=bridge, app_server=app_server, push=push)
+
+            self._broadcast_hopper_transitions(
+                device_state=device_state,
+                hopper=hopper,
+                app_server=app_server,
+                push=push,
+            )
+
+            # Event-driven status: push immediately when the session
+            # phase or the active cat set changes so the app reflects
+            # user-initiated action without waiting up to one
+            # _HEARTBEAT_INTERVAL_SEC for the next periodic tick.
+            state_changed = self._refresh_state(device_state, bridge)
+            if state_changed or now >= next_heartbeat:
                 self._broadcast_status(app_server, device_state)
                 next_heartbeat = now + _HEARTBEAT_INTERVAL_SEC
 
@@ -466,15 +480,65 @@ class Daemon:
             stream_manager.stop()
             stream_bridge.on_stream_stop()
 
+    def _broadcast_new_cats(
+        self,
+        *,
+        bridge: SessionBridge,
+        app_server: AppServer,
+        push: PushNotifier | None,
+    ) -> None:
+        for detection in bridge.take_new_cat_detections():
+            _broadcast_new_cat_event(app_server, detection)
+            if push is not None:
+                _send_new_cat_push(push, detection)
+
+    def _broadcast_hopper_transitions(
+        self,
+        *,
+        device_state: DeviceState,
+        hopper: HopperSensor,
+        app_server: AppServer,
+        push: PushNotifier | None,
+    ) -> None:
+        """Detect OK→EMPTY transitions and emit one event per transition.
+
+        Read on every loop tick (cheap — sysfs read is microseconds)
+        rather than every heartbeat so the event fires within a single
+        loop iteration of the sensor flipping. Edge-triggered: a sticky
+        empty hopper produces exactly one push and one broadcast, not
+        a stream every ~5 seconds.
+        """
+        new_level = hopper.level()
+        prev_level = device_state.hopper_level
+        device_state.hopper_level = new_level
+        if new_level == app_pb.HOPPER_LEVEL_EMPTY and prev_level != app_pb.HOPPER_LEVEL_EMPTY:
+            _broadcast_hopper_empty(app_server)
+            if push is not None:
+                _send_hopper_empty_push(push)
+
     def _refresh_state(
         self,
         device_state: DeviceState,
-        hopper: HopperSensor,
         bridge: SessionBridge,
-    ) -> None:
-        device_state.hopper_level = hopper.level()
-        device_state.session_active = bridge.is_active
-        device_state.active_cat_ids = bridge.active_cat_ids
+    ) -> bool:
+        """Refresh session-related fields and report whether they changed.
+
+        Returns ``True`` when ``session_active`` or ``active_cat_ids``
+        changed since the previous refresh — the caller pushes a
+        ``StatusUpdate`` immediately so the app reflects session
+        starts, ends, and mid-session cat resolutions without waiting
+        for the next heartbeat. Hopper level is owned by
+        :meth:`_broadcast_hopper_transitions` and not touched here.
+        """
+        new_session_active = bridge.is_active
+        new_active_cat_ids = bridge.active_cat_ids
+        changed = (
+            new_session_active != device_state.session_active
+            or new_active_cat_ids != device_state.active_cat_ids
+        )
+        device_state.session_active = new_session_active
+        device_state.active_cat_ids = new_active_cat_ids
+        return changed
 
     def _broadcast_status(self, app_server: AppServer, state: DeviceState) -> None:
         update = app_pb.StatusUpdate(
@@ -569,6 +633,40 @@ def _send_session_summary_push(
         treats_dispensed=finalized.treats_dispensed,
         pounce_count=finalized.pounce_count,
     )
+
+
+def _broadcast_new_cat_event(
+    app_server: AppServer,
+    detection: NewCatDetection,
+) -> None:
+    event = app_pb.NewCatDetected(
+        track_id_hint=detection.track_id,
+        thumbnail=detection.thumbnail,
+        confidence=detection.confidence,
+    )
+    app_server.broadcast(app_pb.DeviceEvent(new_cat_detected=event))
+
+
+def _send_new_cat_push(
+    push: PushNotifier,
+    detection: NewCatDetection,
+) -> None:
+    # Thumbnail is intentionally omitted from the FCM payload: APNs
+    # caps notification payloads at 4 KB and a JPEG crop is comfortably
+    # over that. The app fetches the thumbnail via the data-channel
+    # NewCatDetected event after foregrounding.
+    push.notify_new_cat_detected(
+        track_id_hint=detection.track_id,
+        confidence=detection.confidence,
+    )
+
+
+def _broadcast_hopper_empty(app_server: AppServer) -> None:
+    app_server.broadcast(app_pb.DeviceEvent(hopper_empty=app_pb.HopperEmpty()))
+
+
+def _send_hopper_empty_push(push: PushNotifier) -> None:
+    push.notify_hopper_empty()
 
 
 # Reference `socket` so the module-level import is visible to the type

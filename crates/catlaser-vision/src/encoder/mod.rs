@@ -44,6 +44,12 @@ pub(crate) struct EncoderConfig {
     pub fps: u32,
     /// GOP (Group of Pictures) interval in frames. An IDR frame is emitted
     /// every `gop` frames, enabling mid-stream join.
+    ///
+    /// At 15 fps a GOP of 15 means a one-second IDR cadence. New
+    /// subscribers can begin decoding within at most one second of
+    /// joining instead of waiting for the next IDR; the small bitrate
+    /// uptick from doubling keyframe density is invisible at the
+    /// 500 kbps target.
     pub gop: u32,
 }
 
@@ -55,7 +61,7 @@ impl Default for EncoderConfig {
             height: 480,
             bitrate_kbps: 500,
             fps: 15,
-            gop: 30,
+            gop: 15,
         }
     }
 }
@@ -483,7 +489,7 @@ mod tests {
         assert_eq!(config.height, 480, "default height");
         assert_eq!(config.bitrate_kbps, 500, "default bitrate");
         assert_eq!(config.fps, 15, "default fps");
-        assert_eq!(config.gop, 30, "default gop");
+        assert_eq!(config.gop, 15, "default gop");
     }
 
     // --- SpsPpsCache ---

@@ -13,7 +13,7 @@ _sym_db = _symbol_database.Default()
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n%catlaser/detection/v1/detection.proto\x12\x15\x63\x61tlaser.detection.v1"\x99\x02\n\nTrackedCat\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x15\n\x06\x63\x61t_id\x18\x02 \x01(\tR\x05\x63\x61tId\x12\x19\n\x08\x63\x65nter_x\x18\x03 \x01(\x02R\x07\x63\x65nterX\x12\x19\n\x08\x63\x65nter_y\x18\x04 \x01(\x02R\x07\x63\x65nterY\x12\x14\n\x05width\x18\x05 \x01(\x02R\x05width\x12\x16\n\x06height\x18\x06 \x01(\x02R\x06height\x12\x1d\n\nvelocity_x\x18\x07 \x01(\x02R\tvelocityX\x12\x1d\n\nvelocity_y\x18\x08 \x01(\x02R\tvelocityY\x12\x37\n\x05state\x18\t \x01(\x0e\x32!.catlaser.detection.v1.TrackStateR\x05state"\x8e\x02\n\x0e\x44\x65tectionFrame\x12!\n\x0ctimestamp_us\x18\x01 \x01(\x04R\x0btimestampUs\x12!\n\x0c\x66rame_number\x18\x02 \x01(\x04R\x0b\x66rameNumber\x12\x35\n\x04\x63\x61ts\x18\x03 \x03(\x0b\x32!.catlaser.detection.v1.TrackedCatR\x04\x63\x61ts\x12(\n\x10safety_ceiling_y\x18\x04 \x01(\x02R\x0esafetyCeilingY\x12&\n\x0fperson_in_frame\x18\x05 \x01(\x08R\rpersonInFrame\x12-\n\x12\x61mbient_brightness\x18\x06 \x01(\x02R\x11\x61mbientBrightness"%\n\x08NewTrack\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId"G\n\tTrackLost\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x1f\n\x0b\x64uration_ms\x18\x02 \x01(\rR\ndurationMs"j\n\x0fIdentityRequest\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x1c\n\tembedding\x18\x02 \x01(\x0cR\tembedding\x12\x1e\n\nconfidence\x18\x03 \x01(\x02R\nconfidence"\xed\x01\n\nTrackEvent\x12>\n\tnew_track\x18\x01 \x01(\x0b\x32\x1f.catlaser.detection.v1.NewTrackH\x00R\x08newTrack\x12\x41\n\ntrack_lost\x18\x02 \x01(\x0b\x32 .catlaser.detection.v1.TrackLostH\x00R\ttrackLost\x12S\n\x10identity_request\x18\x03 \x01(\x0b\x32&.catlaser.detection.v1.IdentityRequestH\x00R\x0fidentityRequestB\x07\n\x05\x65vent"~\n\x0eSessionRequest\x12?\n\x07trigger\x18\x01 \x01(\x0e\x32%.catlaser.detection.v1.SessionTriggerR\x07trigger\x12\x1e\n\x08track_id\x18\x02 \x01(\rH\x00R\x07trackId\x88\x01\x01\x42\x0b\n\t_track_id"\xf6\x02\n\x0f\x42\x65haviorCommand\x12\x38\n\x04mode\x18\x01 \x01(\x0e\x32$.catlaser.detection.v1.TargetingModeR\x04mode\x12\x19\n\x08offset_x\x18\x02 \x01(\x02R\x07offsetX\x12\x19\n\x08offset_y\x18\x03 \x01(\x02R\x07offsetY\x12\x1c\n\tsmoothing\x18\x04 \x01(\x02R\tsmoothing\x12\x1b\n\tmax_speed\x18\x05 \x01(\x02R\x08maxSpeed\x12\x19\n\x08laser_on\x18\x06 \x01(\x08R\x07laserOn\x12&\n\x0ftarget_track_id\x18\x07 \x01(\rR\rtargetTrackId\x12"\n\rlead_target_x\x18\x08 \x01(\x02R\x0bleadTargetX\x12"\n\rlead_target_y\x18\t \x01(\x02R\x0bleadTargetY\x12-\n\x12\x64ispense_rotations\x18\n \x01(\rR\x11\x64ispenseRotations"h\n\nSessionAck\x12\x16\n\x06\x61\x63\x63\x65pt\x18\x01 \x01(\x08R\x06\x61\x63\x63\x65pt\x12\x42\n\x0bskip_reason\x18\x02 \x01(\x0e\x32!.catlaser.detection.v1.SkipReasonR\nskipReason"\x0c\n\nSessionEnd"b\n\x0eIdentityResult\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x15\n\x06\x63\x61t_id\x18\x02 \x01(\tR\x05\x63\x61tId\x12\x1e\n\nsimilarity\x18\x03 \x01(\x02R\nsimilarity"\xe1\x01\n\rStreamControl\x12;\n\x06\x61\x63tion\x18\x01 \x01(\x0e\x32#.catlaser.detection.v1.StreamActionR\x06\x61\x63tion\x12\x1f\n\x0blivekit_url\x18\x02 \x01(\tR\nlivekitUrl\x12\'\n\x0fpublisher_token\x18\x03 \x01(\tR\x0epublisherToken\x12\x1b\n\troom_name\x18\x04 \x01(\tR\x08roomName\x12,\n\x12target_bitrate_bps\x18\x05 \x01(\rR\x10targetBitrateBps"m\n\x0cStreamStatus\x12\x38\n\x05state\x18\x01 \x01(\x0e\x32".catlaser.detection.v1.StreamStateR\x05state\x12#\n\rerror_message\x18\x02 \x01(\tR\x0c\x65rrorMessage*\xa3\x02\n\x07MsgType\x12\x18\n\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n\x18MSG_TYPE_DETECTION_FRAME\x10\x01\x12\x18\n\x14MSG_TYPE_TRACK_EVENT\x10\x02\x12\x1c\n\x18MSG_TYPE_SESSION_REQUEST\x10\x03\x12\x1a\n\x16MSG_TYPE_STREAM_STATUS\x10\t\x12\x1d\n\x19MSG_TYPE_BEHAVIOR_COMMAND\x10\x04\x12\x18\n\x14MSG_TYPE_SESSION_ACK\x10\x05\x12\x1c\n\x18MSG_TYPE_IDENTITY_RESULT\x10\x06\x12\x18\n\x14MSG_TYPE_SESSION_END\x10\x07\x12\x1b\n\x17MSG_TYPE_STREAM_CONTROL\x10\x08*y\n\nTrackState\x12\x1b\n\x17TRACK_STATE_UNSPECIFIED\x10\x00\x12\x19\n\x15TRACK_STATE_TENTATIVE\x10\x01\x12\x19\n\x15TRACK_STATE_CONFIRMED\x10\x02\x12\x18\n\x14TRACK_STATE_COASTING\x10\x03*\xa1\x01\n\rTargetingMode\x12\x1e\n\x1aTARGETING_MODE_UNSPECIFIED\x10\x00\x12\x17\n\x13TARGETING_MODE_IDLE\x10\x01\x12\x18\n\x14TARGETING_MODE_TRACK\x10\x02\x12 \n\x1cTARGETING_MODE_LEAD_TO_POINT\x10\x03\x12\x1b\n\x17TARGETING_MODE_DISPENSE\x10\x04*~\n\nSkipReason\x12\x1b\n\x17SKIP_REASON_UNSPECIFIED\x10\x00\x12\x18\n\x14SKIP_REASON_COOLDOWN\x10\x01\x12\x1c\n\x18SKIP_REASON_HOPPER_EMPTY\x10\x02\x12\x1b\n\x17SKIP_REASON_QUIET_HOURS\x10\x03*r\n\x0eSessionTrigger\x12\x1f\n\x1bSESSION_TRIGGER_UNSPECIFIED\x10\x00\x12\x1d\n\x19SESSION_TRIGGER_SCHEDULED\x10\x01\x12 \n\x1cSESSION_TRIGGER_CAT_DETECTED\x10\x02*^\n\x0cStreamAction\x12\x1d\n\x19STREAM_ACTION_UNSPECIFIED\x10\x00\x12\x17\n\x13STREAM_ACTION_START\x10\x01\x12\x16\n\x12STREAM_ACTION_STOP\x10\x02*\x97\x01\n\x0bStreamState\x12\x1c\n\x18STREAM_STATE_UNSPECIFIED\x10\x00\x12\x18\n\x14STREAM_STATE_STOPPED\x10\x01\x12\x1b\n\x17STREAM_STATE_CONNECTING\x10\x02\x12\x1b\n\x17STREAM_STATE_PUBLISHING\x10\x03\x12\x16\n\x12STREAM_STATE_ERROR\x10\x04\x62\x06proto3'
+    b'\n%catlaser/detection/v1/detection.proto\x12\x15\x63\x61tlaser.detection.v1"\x99\x02\n\nTrackedCat\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x15\n\x06\x63\x61t_id\x18\x02 \x01(\tR\x05\x63\x61tId\x12\x19\n\x08\x63\x65nter_x\x18\x03 \x01(\x02R\x07\x63\x65nterX\x12\x19\n\x08\x63\x65nter_y\x18\x04 \x01(\x02R\x07\x63\x65nterY\x12\x14\n\x05width\x18\x05 \x01(\x02R\x05width\x12\x16\n\x06height\x18\x06 \x01(\x02R\x06height\x12\x1d\n\nvelocity_x\x18\x07 \x01(\x02R\tvelocityX\x12\x1d\n\nvelocity_y\x18\x08 \x01(\x02R\tvelocityY\x12\x37\n\x05state\x18\t \x01(\x0e\x32!.catlaser.detection.v1.TrackStateR\x05state"\x8e\x02\n\x0e\x44\x65tectionFrame\x12!\n\x0ctimestamp_us\x18\x01 \x01(\x04R\x0btimestampUs\x12!\n\x0c\x66rame_number\x18\x02 \x01(\x04R\x0b\x66rameNumber\x12\x35\n\x04\x63\x61ts\x18\x03 \x03(\x0b\x32!.catlaser.detection.v1.TrackedCatR\x04\x63\x61ts\x12(\n\x10safety_ceiling_y\x18\x04 \x01(\x02R\x0esafetyCeilingY\x12&\n\x0fperson_in_frame\x18\x05 \x01(\x08R\rpersonInFrame\x12-\n\x12\x61mbient_brightness\x18\x06 \x01(\x02R\x11\x61mbientBrightness"%\n\x08NewTrack\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId"G\n\tTrackLost\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x1f\n\x0b\x64uration_ms\x18\x02 \x01(\rR\ndurationMs"\x88\x01\n\x0fIdentityRequest\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x1c\n\tembedding\x18\x02 \x01(\x0cR\tembedding\x12\x1e\n\nconfidence\x18\x03 \x01(\x02R\nconfidence\x12\x1c\n\tthumbnail\x18\x04 \x01(\x0cR\tthumbnail"\xed\x01\n\nTrackEvent\x12>\n\tnew_track\x18\x01 \x01(\x0b\x32\x1f.catlaser.detection.v1.NewTrackH\x00R\x08newTrack\x12\x41\n\ntrack_lost\x18\x02 \x01(\x0b\x32 .catlaser.detection.v1.TrackLostH\x00R\ttrackLost\x12S\n\x10identity_request\x18\x03 \x01(\x0b\x32&.catlaser.detection.v1.IdentityRequestH\x00R\x0fidentityRequestB\x07\n\x05\x65vent"~\n\x0eSessionRequest\x12?\n\x07trigger\x18\x01 \x01(\x0e\x32%.catlaser.detection.v1.SessionTriggerR\x07trigger\x12\x1e\n\x08track_id\x18\x02 \x01(\rH\x00R\x07trackId\x88\x01\x01\x42\x0b\n\t_track_id"\xf6\x02\n\x0f\x42\x65haviorCommand\x12\x38\n\x04mode\x18\x01 \x01(\x0e\x32$.catlaser.detection.v1.TargetingModeR\x04mode\x12\x19\n\x08offset_x\x18\x02 \x01(\x02R\x07offsetX\x12\x19\n\x08offset_y\x18\x03 \x01(\x02R\x07offsetY\x12\x1c\n\tsmoothing\x18\x04 \x01(\x02R\tsmoothing\x12\x1b\n\tmax_speed\x18\x05 \x01(\x02R\x08maxSpeed\x12\x19\n\x08laser_on\x18\x06 \x01(\x08R\x07laserOn\x12&\n\x0ftarget_track_id\x18\x07 \x01(\rR\rtargetTrackId\x12"\n\rlead_target_x\x18\x08 \x01(\x02R\x0bleadTargetX\x12"\n\rlead_target_y\x18\t \x01(\x02R\x0bleadTargetY\x12-\n\x12\x64ispense_rotations\x18\n \x01(\rR\x11\x64ispenseRotations"h\n\nSessionAck\x12\x16\n\x06\x61\x63\x63\x65pt\x18\x01 \x01(\x08R\x06\x61\x63\x63\x65pt\x12\x42\n\x0bskip_reason\x18\x02 \x01(\x0e\x32!.catlaser.detection.v1.SkipReasonR\nskipReason"\x0c\n\nSessionEnd"b\n\x0eIdentityResult\x12\x19\n\x08track_id\x18\x01 \x01(\rR\x07trackId\x12\x15\n\x06\x63\x61t_id\x18\x02 \x01(\tR\x05\x63\x61tId\x12\x1e\n\nsimilarity\x18\x03 \x01(\x02R\nsimilarity"\xe1\x01\n\rStreamControl\x12;\n\x06\x61\x63tion\x18\x01 \x01(\x0e\x32#.catlaser.detection.v1.StreamActionR\x06\x61\x63tion\x12\x1f\n\x0blivekit_url\x18\x02 \x01(\tR\nlivekitUrl\x12\'\n\x0fpublisher_token\x18\x03 \x01(\tR\x0epublisherToken\x12\x1b\n\troom_name\x18\x04 \x01(\tR\x08roomName\x12,\n\x12target_bitrate_bps\x18\x05 \x01(\rR\x10targetBitrateBps"m\n\x0cStreamStatus\x12\x38\n\x05state\x18\x01 \x01(\x0e\x32".catlaser.detection.v1.StreamStateR\x05state\x12#\n\rerror_message\x18\x02 \x01(\tR\x0c\x65rrorMessage*\xa3\x02\n\x07MsgType\x12\x18\n\x14MSG_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n\x18MSG_TYPE_DETECTION_FRAME\x10\x01\x12\x18\n\x14MSG_TYPE_TRACK_EVENT\x10\x02\x12\x1c\n\x18MSG_TYPE_SESSION_REQUEST\x10\x03\x12\x1a\n\x16MSG_TYPE_STREAM_STATUS\x10\t\x12\x1d\n\x19MSG_TYPE_BEHAVIOR_COMMAND\x10\x04\x12\x18\n\x14MSG_TYPE_SESSION_ACK\x10\x05\x12\x1c\n\x18MSG_TYPE_IDENTITY_RESULT\x10\x06\x12\x18\n\x14MSG_TYPE_SESSION_END\x10\x07\x12\x1b\n\x17MSG_TYPE_STREAM_CONTROL\x10\x08*y\n\nTrackState\x12\x1b\n\x17TRACK_STATE_UNSPECIFIED\x10\x00\x12\x19\n\x15TRACK_STATE_TENTATIVE\x10\x01\x12\x19\n\x15TRACK_STATE_CONFIRMED\x10\x02\x12\x18\n\x14TRACK_STATE_COASTING\x10\x03*\xa1\x01\n\rTargetingMode\x12\x1e\n\x1aTARGETING_MODE_UNSPECIFIED\x10\x00\x12\x17\n\x13TARGETING_MODE_IDLE\x10\x01\x12\x18\n\x14TARGETING_MODE_TRACK\x10\x02\x12 \n\x1cTARGETING_MODE_LEAD_TO_POINT\x10\x03\x12\x1b\n\x17TARGETING_MODE_DISPENSE\x10\x04*~\n\nSkipReason\x12\x1b\n\x17SKIP_REASON_UNSPECIFIED\x10\x00\x12\x18\n\x14SKIP_REASON_COOLDOWN\x10\x01\x12\x1c\n\x18SKIP_REASON_HOPPER_EMPTY\x10\x02\x12\x1b\n\x17SKIP_REASON_QUIET_HOURS\x10\x03*r\n\x0eSessionTrigger\x12\x1f\n\x1bSESSION_TRIGGER_UNSPECIFIED\x10\x00\x12\x1d\n\x19SESSION_TRIGGER_SCHEDULED\x10\x01\x12 \n\x1cSESSION_TRIGGER_CAT_DETECTED\x10\x02*^\n\x0cStreamAction\x12\x1d\n\x19STREAM_ACTION_UNSPECIFIED\x10\x00\x12\x17\n\x13STREAM_ACTION_START\x10\x01\x12\x16\n\x12STREAM_ACTION_STOP\x10\x02*\x97\x01\n\x0bStreamState\x12\x1c\n\x18STREAM_STATE_UNSPECIFIED\x10\x00\x12\x18\n\x14STREAM_STATE_STOPPED\x10\x01\x12\x1b\n\x17STREAM_STATE_CONNECTING\x10\x02\x12\x1b\n\x17STREAM_STATE_PUBLISHING\x10\x03\x12\x16\n\x12STREAM_STATE_ERROR\x10\x04\x62\x06proto3'
 )
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
@@ -22,20 +22,20 @@ _builder.BuildTopDescriptorsAndMessages(
 )
 if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._options = None
-    _MSGTYPE._serialized_start = 2146
-    _MSGTYPE._serialized_end = 2437
-    _TRACKSTATE._serialized_start = 2439
-    _TRACKSTATE._serialized_end = 2560
-    _TARGETINGMODE._serialized_start = 2563
-    _TARGETINGMODE._serialized_end = 2724
-    _SKIPREASON._serialized_start = 2726
-    _SKIPREASON._serialized_end = 2852
-    _SESSIONTRIGGER._serialized_start = 2854
-    _SESSIONTRIGGER._serialized_end = 2968
-    _STREAMACTION._serialized_start = 2970
-    _STREAMACTION._serialized_end = 3064
-    _STREAMSTATE._serialized_start = 3067
-    _STREAMSTATE._serialized_end = 3218
+    _MSGTYPE._serialized_start = 2177
+    _MSGTYPE._serialized_end = 2468
+    _TRACKSTATE._serialized_start = 2470
+    _TRACKSTATE._serialized_end = 2591
+    _TARGETINGMODE._serialized_start = 2594
+    _TARGETINGMODE._serialized_end = 2755
+    _SKIPREASON._serialized_start = 2757
+    _SKIPREASON._serialized_end = 2883
+    _SESSIONTRIGGER._serialized_start = 2885
+    _SESSIONTRIGGER._serialized_end = 2999
+    _STREAMACTION._serialized_start = 3001
+    _STREAMACTION._serialized_end = 3095
+    _STREAMSTATE._serialized_start = 3098
+    _STREAMSTATE._serialized_end = 3249
     _TRACKEDCAT._serialized_start = 65
     _TRACKEDCAT._serialized_end = 346
     _DETECTIONFRAME._serialized_start = 349
@@ -44,22 +44,22 @@ if _descriptor._USE_C_DESCRIPTORS == False:
     _NEWTRACK._serialized_end = 658
     _TRACKLOST._serialized_start = 660
     _TRACKLOST._serialized_end = 731
-    _IDENTITYREQUEST._serialized_start = 733
-    _IDENTITYREQUEST._serialized_end = 839
-    _TRACKEVENT._serialized_start = 842
-    _TRACKEVENT._serialized_end = 1079
-    _SESSIONREQUEST._serialized_start = 1081
-    _SESSIONREQUEST._serialized_end = 1207
-    _BEHAVIORCOMMAND._serialized_start = 1210
-    _BEHAVIORCOMMAND._serialized_end = 1584
-    _SESSIONACK._serialized_start = 1586
-    _SESSIONACK._serialized_end = 1690
-    _SESSIONEND._serialized_start = 1692
-    _SESSIONEND._serialized_end = 1704
-    _IDENTITYRESULT._serialized_start = 1706
-    _IDENTITYRESULT._serialized_end = 1804
-    _STREAMCONTROL._serialized_start = 1807
-    _STREAMCONTROL._serialized_end = 2032
-    _STREAMSTATUS._serialized_start = 2034
-    _STREAMSTATUS._serialized_end = 2143
+    _IDENTITYREQUEST._serialized_start = 734
+    _IDENTITYREQUEST._serialized_end = 870
+    _TRACKEVENT._serialized_start = 873
+    _TRACKEVENT._serialized_end = 1110
+    _SESSIONREQUEST._serialized_start = 1112
+    _SESSIONREQUEST._serialized_end = 1238
+    _BEHAVIORCOMMAND._serialized_start = 1241
+    _BEHAVIORCOMMAND._serialized_end = 1615
+    _SESSIONACK._serialized_start = 1617
+    _SESSIONACK._serialized_end = 1721
+    _SESSIONEND._serialized_start = 1723
+    _SESSIONEND._serialized_end = 1735
+    _IDENTITYRESULT._serialized_start = 1737
+    _IDENTITYRESULT._serialized_end = 1835
+    _STREAMCONTROL._serialized_start = 1838
+    _STREAMCONTROL._serialized_end = 2063
+    _STREAMSTATUS._serialized_start = 2065
+    _STREAMSTATUS._serialized_end = 2174
 # @@protoc_insertion_point(module_scope)

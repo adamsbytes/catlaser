@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import random
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
@@ -44,10 +45,9 @@ from catlaser_brain.behavior.state_machine import (
 )
 from catlaser_brain.identity.catalog import CatCatalog, MatchResult
 from catlaser_brain.proto.catlaser.detection.v1 import detection_pb2 as det
-from catlaser_brain.storage.crud import create_session
+from catlaser_brain.storage.crud import create_session, store_pending_cat
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Callable
 
     from catlaser_brain.daemon.hopper import HopperSensor
@@ -133,6 +133,23 @@ class SessionFinalized:
     ended_at: int
 
 
+@dataclass(frozen=True, slots=True)
+class NewCatDetection:
+    """Notification that an unknown cat needs naming, ready for app broadcast.
+
+    Emitted once per unmatched :class:`IdentityRequest`. The orchestrator
+    relays it as a ``NewCatDetected`` data-channel event (for connected
+    apps) and an FCM push (for backgrounded apps). The thumbnail bytes
+    are forwarded verbatim — empty bytes when the upstream IPC frame
+    didn't carry one — and the iOS app falls back to a placeholder
+    image in that case.
+    """
+
+    track_id: int
+    confidence: float
+    thumbnail: bytes
+
+
 # ---------------------------------------------------------------------------
 # Bridge
 # ---------------------------------------------------------------------------
@@ -178,6 +195,7 @@ class SessionBridge:
         "_hopper",
         "_manual_arm_until",
         "_pending_finalized",
+        "_pending_new_cats",
         "_wall_clock",
     )
 
@@ -204,6 +222,7 @@ class SessionBridge:
         self._active: _ActiveSession | None = None
         self._manual_arm_until: float = 0.0
         self._pending_finalized: SessionFinalized | None = None
+        self._pending_new_cats: list[NewCatDetection] = []
 
     # -------------------------------------------------------------------
     # SessionControl protocol
@@ -352,6 +371,11 @@ class SessionBridge:
             )
             self._active = None
         self._manual_arm_until = 0.0
+        # Pending notifications belong to a previous IPC epoch; the
+        # track IDs they reference may not exist after reconnect, so
+        # drop them rather than emitting stale push pings.
+        self._pending_new_cats.clear()
+        self._pending_finalized = None
         # Re-create the engine to drop any stale state. Cheap — the
         # engine has no persistent buffers.
         self._engine = BehaviorEngine(
@@ -369,6 +393,20 @@ class SessionBridge:
         finalized = self._pending_finalized
         self._pending_finalized = None
         return finalized
+
+    def take_new_cat_detections(self) -> list[NewCatDetection]:
+        """Drain pending unknown-cat detections for app broadcast.
+
+        The orchestrator polls this each tick and, for each entry,
+        broadcasts a ``NewCatDetected`` data event to live apps and
+        sends an FCM push for backgrounded apps. Cleared once consumed
+        so a single unmatched embedding emits exactly one notification.
+        """
+        if not self._pending_new_cats:
+            return []
+        detections = self._pending_new_cats
+        self._pending_new_cats = []
+        return detections
 
     @property
     def is_active(self) -> bool:
@@ -434,6 +472,7 @@ class SessionBridge:
         self,
         req: det.IdentityRequest,
     ) -> OutboundMessages:
+        malformed = False
         try:
             match: MatchResult = self._catalog.match_embedding(
                 req.embedding,
@@ -446,9 +485,13 @@ class SessionBridge:
             )
             # Reply with empty cat_id so Rust does not wait forever.
             match = MatchResult(cat_id="", similarity=-1.0)
+            malformed = True
 
         if self._active is not None and self._active.track_id == req.track_id and match.cat_id:
             self._active.cat_id = match.cat_id
+
+        if not match.cat_id and not malformed:
+            self._record_unknown_cat(req)
 
         result = det.IdentityResult(
             track_id=req.track_id,
@@ -456,6 +499,41 @@ class SessionBridge:
             similarity=match.similarity,
         )
         return OutboundMessages(identity_results=(result,))
+
+    def _record_unknown_cat(self, req: det.IdentityRequest) -> None:
+        """Persist a pending-cat row when possible and queue a notification.
+
+        The iOS naming UX needs a ``pending_cats`` row keyed by
+        ``track_id`` so the user's :class:`IdentifyNewCatRequest`
+        succeeds. The schema requires a non-empty thumbnail, so the
+        row is written only when the IPC carried one. The
+        notification is queued in either case — the push and the
+        data-channel event are independently useful (a push that
+        doesn't lead to a successful naming flow still tells the
+        owner a cat appeared).
+        """
+        thumbnail: bytes = bytes(req.thumbnail)
+        if thumbnail:
+            try:
+                store_pending_cat(
+                    self._conn,
+                    req.track_id,
+                    thumbnail,
+                    req.confidence,
+                    embedding=bytes(req.embedding) or None,
+                )
+            except sqlite3.DatabaseError:
+                _logger.exception(
+                    "failed to persist pending cat for track %d; notification still queued",
+                    req.track_id,
+                )
+        self._pending_new_cats.append(
+            NewCatDetection(
+                track_id=req.track_id,
+                confidence=req.confidence,
+                thumbnail=thumbnail,
+            ),
+        )
 
     def _reject(self, reason: SkipReason) -> OutboundMessages:
         ack = det.SessionAck(
@@ -711,6 +789,7 @@ def _finalize_anonymous(
 # Public API surface: the orchestrator and tests import these names.
 __all__ = [
     "EngineOutput",
+    "NewCatDetection",
     "OutboundMessages",
     "SessionBridge",
     "SessionFinalized",

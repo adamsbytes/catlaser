@@ -125,18 +125,21 @@ class DetectionFrame(_message.Message):
     ) -> None: ...
 
 class IdentityRequest(_message.Message):
-    __slots__ = ["confidence", "embedding", "track_id"]
+    __slots__ = ["confidence", "embedding", "thumbnail", "track_id"]
     CONFIDENCE_FIELD_NUMBER: _ClassVar[int]
     EMBEDDING_FIELD_NUMBER: _ClassVar[int]
+    THUMBNAIL_FIELD_NUMBER: _ClassVar[int]
     TRACK_ID_FIELD_NUMBER: _ClassVar[int]
     confidence: float
     embedding: bytes
+    thumbnail: bytes
     track_id: int
     def __init__(
         self,
         track_id: _Optional[int] = ...,
         embedding: _Optional[bytes] = ...,
         confidence: _Optional[float] = ...,
+        thumbnail: _Optional[bytes] = ...,
     ) -> None: ...
 
 class IdentityResult(_message.Message):

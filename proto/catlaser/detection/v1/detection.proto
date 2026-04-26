@@ -119,6 +119,11 @@ message IdentityRequest {
   bytes embedding = 2;
   // Embedding model confidence for this crop.
   float confidence = 3;
+  // JPEG thumbnail crop of the cat at the moment of embedding completion.
+  // Empty when the vision daemon has no thumbnail encoder available; the
+  // Python side treats an empty thumbnail as "no in-app preview yet" and
+  // the iOS naming sheet falls back to a placeholder image.
+  bytes thumbnail = 4;
 }
 
 message TrackEvent {

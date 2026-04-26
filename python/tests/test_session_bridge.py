@@ -389,6 +389,166 @@ class TestIdentityRequest:
 
 
 # ---------------------------------------------------------------------------
+# New-cat detection emission
+# ---------------------------------------------------------------------------
+
+
+class TestNewCatDetection:
+    def test_unknown_cat_queues_detection_for_orchestrator(self, db: Database) -> None:
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        emb = serialize_embedding([1.0] + [0.0] * 127)
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=emb,
+                    confidence=0.83,
+                    thumbnail=b"\xff\xd8\xff\xe0jpeg-ish-bytes",
+                ),
+            ),
+        )
+        detections = bridge.take_new_cat_detections()
+        assert len(detections) == 1
+        assert detections[0].track_id == 42
+        # Protobuf serializes confidence as float32; accept tolerable
+        # round-trip drift on the way back through the bridge.
+        assert abs(detections[0].confidence - 0.83) < 1e-6
+        assert detections[0].thumbnail == b"\xff\xd8\xff\xe0jpeg-ish-bytes"
+
+    def test_drained_detections_do_not_repeat(self, db: Database) -> None:
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        emb = serialize_embedding([1.0] + [0.0] * 127)
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=emb,
+                    confidence=0.7,
+                    thumbnail=b"\xff\xd8thumb",
+                ),
+            ),
+        )
+        first = bridge.take_new_cat_detections()
+        assert len(first) == 1
+        # A second drain on the same untouched bridge yields nothing —
+        # the orchestrator must see a single notification per unmatched
+        # IdentityRequest, not a stream every loop tick.
+        assert bridge.take_new_cat_detections() == []
+
+    def test_known_cat_does_not_queue_detection(self, db: Database) -> None:
+        emb = serialize_embedding([1.0] + [0.0] * 127)
+        _seed_known_cat(db, "cat-known", emb)
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=emb,
+                    confidence=0.95,
+                    thumbnail=b"\xff\xd8thumb",
+                ),
+            ),
+        )
+        # A confident match is not "new" — no notification, even though
+        # the IdentityRequest carried a fresh thumbnail.
+        assert bridge.take_new_cat_detections() == []
+
+    def test_malformed_embedding_does_not_queue_detection(self, db: Database) -> None:
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=b"\x00\x01",  # malformed
+                    confidence=0.9,
+                    thumbnail=b"\xff\xd8thumb",
+                ),
+            ),
+        )
+        # Malformed embedding is a vision-side bug, not an unknown
+        # cat; queueing a "new cat" notification would surface a
+        # noisy push to the user for a transient pipeline failure.
+        assert bridge.take_new_cat_detections() == []
+
+    def test_thumbnail_persists_pending_cat_row(self, db: Database) -> None:
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        emb = serialize_embedding([1.0] + [0.0] * 127)
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=emb,
+                    confidence=0.83,
+                    thumbnail=b"\xff\xd8\xff\xe0jpeg-ish-bytes",
+                ),
+            ),
+        )
+        # Persisted so a subsequent IdentifyNewCatRequest from the app
+        # can resolve the pending track into a real cat profile.
+        row = db.conn.execute(
+            "SELECT thumbnail, embedding FROM pending_cats WHERE track_id_hint = ?",
+            (42,),
+        ).fetchone()
+        assert row is not None
+        assert row["thumbnail"] == b"\xff\xd8\xff\xe0jpeg-ish-bytes"
+        assert row["embedding"] == emb
+
+    def test_empty_thumbnail_skips_persistence_but_still_notifies(
+        self,
+        db: Database,
+    ) -> None:
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        emb = serialize_embedding([1.0] + [0.0] * 127)
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=emb,
+                    confidence=0.83,
+                    thumbnail=b"",  # vision daemon hasn't shipped a thumbnail
+                ),
+            ),
+        )
+        # The schema requires a non-empty thumbnail, so the pending
+        # row is skipped — but the push notification still fires so
+        # the owner knows a cat appeared even if naming requires a
+        # later embedding cycle once thumbnails are wired up.
+        row = db.conn.execute(
+            "SELECT track_id_hint FROM pending_cats WHERE track_id_hint = ?",
+            (42,),
+        ).fetchone()
+        assert row is None
+        assert len(bridge.take_new_cat_detections()) == 1
+
+    def test_disconnect_drops_pending_detections(self, db: Database) -> None:
+        bridge = _make_bridge(db)
+        bridge.handle_session_request(_session_request(track_id=42))
+        emb = serialize_embedding([1.0] + [0.0] * 127)
+        bridge.handle_track_event(
+            det.TrackEvent(
+                identity_request=det.IdentityRequest(
+                    track_id=42,
+                    embedding=emb,
+                    confidence=0.83,
+                    thumbnail=b"\xff\xd8thumb",
+                ),
+            ),
+        )
+        # An IPC disconnect crosses an epoch boundary — the track IDs
+        # in the pending queue may not exist in the next vision
+        # session, so the queue must be cleared rather than emitting
+        # stale notifications after reconnect.
+        bridge.handle_disconnect()
+        assert bridge.take_new_cat_detections() == []
+
+
+# ---------------------------------------------------------------------------
 # Session finalization
 # ---------------------------------------------------------------------------
 

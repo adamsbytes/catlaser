@@ -18,20 +18,32 @@ import socket
 from collections.abc import Iterator
 from pathlib import Path
 from random import Random
+from typing import TYPE_CHECKING
 
 import pytest
 
 from catlaser_brain.daemon.hopper import HopperSensor
 from catlaser_brain.daemon.orchestrator import (
     _bridge_dispatch,  # pyright: ignore[reportPrivateUsage]
+    _broadcast_hopper_empty,  # pyright: ignore[reportPrivateUsage]
+    _broadcast_new_cat_event,  # pyright: ignore[reportPrivateUsage]
+    _send_hopper_empty_push,  # pyright: ignore[reportPrivateUsage]
+    _send_new_cat_push,  # pyright: ignore[reportPrivateUsage]
     _send_outgoing,  # pyright: ignore[reportPrivateUsage]
 )
-from catlaser_brain.daemon.session_bridge import OutboundMessages, SessionBridge
+from catlaser_brain.daemon.session_bridge import (
+    NewCatDetection,
+    OutboundMessages,
+    SessionBridge,
+)
 from catlaser_brain.identity.catalog import CatCatalog
 from catlaser_brain.ipc.client import IncomingMessage, IpcClient
 from catlaser_brain.ipc.wire import HEADER_SIZE, MsgType
 from catlaser_brain.proto.catlaser.detection.v1 import detection_pb2 as det
 from catlaser_brain.storage.db import Database
+
+if TYPE_CHECKING:
+    from catlaser_brain.proto.catlaser.app.v1 import app_pb2 as app_pb
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -252,3 +264,85 @@ class TestSendOutgoing:
         # _send_outgoing returns False so the caller can mark the
         # connection broken and reconnect — it must NOT raise.
         assert _send_outgoing(client, OutboundMessages(behavior_commands=(cmd,))) is False
+
+
+# ---------------------------------------------------------------------------
+# Broadcast helpers
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAppServer:
+    """In-memory stand-in for :class:`AppServer` used by helper tests.
+
+    Captures every event passed to :meth:`broadcast` so a test can assert
+    both the oneof case selected and the field values inside it. The
+    real server's authentication/eviction logic is unrelated to the
+    helper functions under test.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[app_pb.DeviceEvent] = []
+
+    def broadcast(self, event: app_pb.DeviceEvent) -> None:
+        self.events.append(event)
+
+
+class _RecordingPush:
+    """In-memory stand-in for :class:`PushNotifier` for helper tests."""
+
+    def __init__(self) -> None:
+        self.hopper_empty_calls: int = 0
+        self.new_cat_calls: list[tuple[int, float]] = []
+
+    def notify_hopper_empty(self) -> None:
+        self.hopper_empty_calls += 1
+
+    def notify_new_cat_detected(
+        self,
+        track_id_hint: int,
+        confidence: float,
+    ) -> None:
+        self.new_cat_calls.append((track_id_hint, confidence))
+
+
+class TestBroadcastHelpers:
+    def test_broadcast_hopper_empty_emits_correct_event(self) -> None:
+        server = _RecordingAppServer()
+        _broadcast_hopper_empty(server)  # type: ignore[arg-type]
+        assert len(server.events) == 1
+        assert server.events[0].WhichOneof("event") == "hopper_empty"
+
+    def test_send_hopper_empty_push_invokes_notifier(self) -> None:
+        push = _RecordingPush()
+        _send_hopper_empty_push(push)  # type: ignore[arg-type]
+        assert push.hopper_empty_calls == 1
+
+    def test_broadcast_new_cat_event_carries_thumbnail_and_confidence(self) -> None:
+        server = _RecordingAppServer()
+        detection = NewCatDetection(
+            track_id=42,
+            confidence=0.83,
+            thumbnail=b"\xff\xd8thumb",
+        )
+        _broadcast_new_cat_event(server, detection)  # type: ignore[arg-type]
+        assert len(server.events) == 1
+        event = server.events[0]
+        assert event.WhichOneof("event") == "new_cat_detected"
+        assert event.new_cat_detected.track_id_hint == 42
+        # Approximate equality: protobuf stores float, not double, by
+        # default — round-trip introduces ~1e-7 noise.
+        assert abs(event.new_cat_detected.confidence - 0.83) < 1e-6
+        assert event.new_cat_detected.thumbnail == b"\xff\xd8thumb"
+
+    def test_send_new_cat_push_omits_thumbnail(self) -> None:
+        # Thumbnail bytes are intentionally NOT in the push payload —
+        # FCM/APNs cap notifications below the size of a JPEG crop, so
+        # the app fetches the thumbnail via the data-channel event.
+        push = _RecordingPush()
+        detection = NewCatDetection(
+            track_id=7,
+            confidence=0.91,
+            thumbnail=b"\xff\xd8thumb",
+        )
+        _send_new_cat_push(push, detection)  # type: ignore[arg-type]
+        assert push.new_cat_calls == [(7, 0.91)]
