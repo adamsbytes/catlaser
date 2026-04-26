@@ -228,6 +228,14 @@ public final class HistoryViewModel {
     /// behaviour parameters do not get clobbered by an update that
     /// only meant to rename). Callers therefore pass the existing
     /// profile object verbatim.
+    ///
+    /// The list is updated **optimistically** the moment validation
+    /// passes: the renamed profile is patched into ``catsState``
+    /// before the device round-trip begins so the user sees the new
+    /// name immediately. The eventual device echo replaces the local
+    /// snapshot once it lands; on error the local snapshot is rolled
+    /// back to the pre-mutation list so the UI converges on the
+    /// device's truth instead of stranding a stale rename.
     @discardableResult
     public func updateCatName(
         _ profile: Catlaser_App_V1_CatProfile,
@@ -249,7 +257,12 @@ public final class HistoryViewModel {
         update.profile = mutated
         request.updateCatProfile = update
 
-        return await sendCatMutation(request: request, blamedCatID: profile.catID)
+        let rollback = applyOptimisticCatUpdate(catID: profile.catID, mutated: mutated)
+        return await sendCatMutation(
+            request: request,
+            blamedCatID: profile.catID,
+            rollback: rollback,
+        )
     }
 
     /// Remove a cat profile from the device. The device handler is
@@ -257,13 +270,24 @@ public final class HistoryViewModel {
     /// after a transient failure is safe. On success the device
     /// echoes the freshly-truncated cat list, which is plumbed into
     /// ``catsState``.
+    ///
+    /// The list is updated **optimistically** before the round-trip:
+    /// the row is removed from ``catsState`` immediately so the user
+    /// sees the deletion land. On error the local snapshot is rolled
+    /// back to the pre-mutation list, converging on the device's
+    /// truth without leaving a stale "deleted" row hanging in the UI.
     @discardableResult
     public func deleteCat(catID: String) async -> Result<Void, HistoryError> {
         var request = Catlaser_App_V1_AppRequest()
         var delete = Catlaser_App_V1_DeleteCatProfileRequest()
         delete.catID = catID
         request.deleteCatProfile = delete
-        return await sendCatMutation(request: request, blamedCatID: catID)
+        let rollback = applyOptimisticCatRemoval(catID: catID)
+        return await sendCatMutation(
+            request: request,
+            blamedCatID: catID,
+            rollback: rollback,
+        )
     }
 
     // MARK: - Naming UX
@@ -422,9 +446,64 @@ public final class HistoryViewModel {
 
     // MARK: - Private: cat-mutation common path
 
+    /// Apply the optimistic rename in-place and return a rollback
+    /// closure that restores the pre-mutation snapshot.
+    ///
+    /// Returns ``nil`` when the pane is not in a ``loaded`` state or
+    /// the cat is not present — in that case the optimistic patch is
+    /// a no-op (the device echo will reconcile on success and the
+    /// error banner is the only feedback on failure).
+    private func applyOptimisticCatUpdate(
+        catID: String,
+        mutated: Catlaser_App_V1_CatProfile,
+    ) -> (@MainActor () -> Void)? {
+        guard case let .loaded(profiles, isRefreshing) = catsState else { return nil }
+        guard let index = profiles.firstIndex(where: { $0.catID == catID }) else { return nil }
+        let snapshot = profiles
+        var updated = profiles
+        updated[index] = mutated
+        catsState = .loaded(profiles: updated, isRefreshing: isRefreshing)
+        return { [weak self] in
+            guard let self else { return }
+            // Roll back only if the user hasn't been served a fresh
+            // device echo in the meantime — otherwise we'd undo the
+            // device's truth and immediately diverge.
+            if case let .loaded(currentProfiles, currentRefreshing) = self.catsState,
+               currentProfiles == updated
+            {
+                self.catsState = .loaded(profiles: snapshot, isRefreshing: currentRefreshing)
+            }
+        }
+    }
+
+    /// Apply the optimistic delete and return a rollback closure that
+    /// restores the removed row at its prior position.
+    ///
+    /// Returns ``nil`` when the pane is not in a ``loaded`` state or
+    /// the row is already absent — in that case the wire request is
+    /// still issued (delete is idempotent) but no local mutation
+    /// needs reverting.
+    private func applyOptimisticCatRemoval(catID: String) -> (@MainActor () -> Void)? {
+        guard case let .loaded(profiles, isRefreshing) = catsState else { return nil }
+        guard let index = profiles.firstIndex(where: { $0.catID == catID }) else { return nil }
+        let snapshot = profiles
+        var updated = profiles
+        updated.remove(at: index)
+        catsState = .loaded(profiles: updated, isRefreshing: isRefreshing)
+        return { [weak self] in
+            guard let self else { return }
+            if case let .loaded(currentProfiles, currentRefreshing) = self.catsState,
+               currentProfiles == updated
+            {
+                self.catsState = .loaded(profiles: snapshot, isRefreshing: currentRefreshing)
+            }
+        }
+    }
+
     private func sendCatMutation(
         request: Catlaser_App_V1_AppRequest,
         blamedCatID: String,
+        rollback: (@MainActor () -> Void)? = nil,
     ) async -> Result<Void, HistoryError> {
         do {
             let event = try await deviceClient.request(request)
@@ -433,10 +512,13 @@ public final class HistoryViewModel {
             lastActionError = nil
             return .success(())
         } catch let error as HistoryError {
+            rollback?()
             return surfaceCatMutationError(error, blamedCatID: blamedCatID)
         } catch let error as DeviceClientError {
+            rollback?()
             return surfaceCatMutationError(HistoryError.from(error), blamedCatID: blamedCatID)
         } catch {
+            rollback?()
             let mapped = HistoryError.internalFailure(error.localizedDescription)
             lastActionError = mapped
             return .failure(mapped)

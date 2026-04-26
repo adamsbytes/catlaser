@@ -1405,6 +1405,203 @@ struct LiveViewModelTests {
         #expect(!LiveViewState.disconnected.canStop)
         #expect(!LiveViewState.disconnecting.canStop)
     }
+
+    // MARK: - Credential cache
+
+    /// Build a harness with a request counter and a fresh-session
+    /// factory so cache tests can drive multiple Watch live cycles
+    /// without manually plumbing collectors through every test. The
+    /// optional ``clock`` lets tests advance wall-clock time without
+    /// touching the real ``Date``.
+    private func makeCachingHarness(
+        clock: LockedClock? = nil,
+        credentialCacheTTL: TimeInterval = LiveViewModel.credentialCacheTTL,
+    ) async throws -> (LiveViewModel, SessionCollector, ScriptedDeviceServer, DeviceClient, LockedCounter) {
+        let startStreamCalls = LockedCounter()
+        let transport = InMemoryDeviceTransport()
+        let client = DeviceClient(transport: transport, requestTimeout: 2.0)
+        let server = ScriptedDeviceServer(transport: transport) { request in
+            switch request.request {
+            case .startStream:
+                startStreamCalls.increment()
+                return self.validOfferResponse()
+            case .stopStream:
+                var event = Catlaser_App_V1_DeviceEvent()
+                event.statusUpdate = Catlaser_App_V1_StatusUpdate()
+                return .reply(event)
+            default:
+                return .error(code: 2, message: "unknown")
+            }
+        }
+        try await client.connect()
+        await server.run()
+        let collector = SessionCollector()
+        let clockClosure: @Sendable () -> Date = { clock?.now ?? Date() }
+        let vm = LiveViewModel(
+            deviceClient: client,
+            authGate: Self.allowingGate,
+            liveKitAllowlist: Self.testAllowlist(),
+            sessionFactory: {
+                let session = MockLiveStreamSession()
+                collector.add(session)
+                return session
+            },
+            credentialCacheTTL: credentialCacheTTL,
+            clock: clockClosure,
+        )
+        return (vm, collector, server, client, startStreamCalls)
+    }
+
+    @Test
+    func successfulStartPopulatesCredentialCache() async throws {
+        let (vm, collector, server, client, calls) = try await makeCachingHarness()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        await vm.start()
+        let session = collector.latest()
+        session.emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+
+        #expect(calls.value == 1, "first start fetches a fresh offer")
+        #expect(vm.hasCachedCredentials, "successful offer fetch populates cache")
+    }
+
+    @Test
+    func cachedCredentialsSkipDeviceRoundTripOnRestart() async throws {
+        // Watch live → stop → Watch live again within the cache TTL.
+        // The second start must NOT re-issue StartStreamRequest — the
+        // cached offer carries us straight to ``.connecting``.
+        let (vm, collector, server, client, calls) = try await makeCachingHarness()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-first")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-first")) }
+        #expect(calls.value == 1)
+
+        await vm.stop()
+        #expect(vm.state == .disconnected)
+        #expect(vm.hasCachedCredentials, "stop preserves cache for fast restart")
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-second")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-second")) }
+
+        #expect(calls.value == 1, "second start used the cache and skipped the round-trip")
+    }
+
+    @Test
+    func expiredCacheRefetches() async throws {
+        // After the TTL elapses, the cached offer is stale and a
+        // fresh round-trip must fire so the dial uses a current
+        // subscriber token.
+        let clock = LockedClock(Date(timeIntervalSince1970: 1_712_000_000))
+        let (vm, collector, server, client, calls) = try await makeCachingHarness(
+            clock: clock,
+            credentialCacheTTL: 60,
+        )
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-first")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-first")) }
+        await vm.stop()
+        #expect(calls.value == 1)
+
+        // Past the TTL — the cache is dropped on the next consume.
+        clock.advance(by: 120)
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-second")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-second")) }
+
+        #expect(calls.value == 2, "expired cache forces a fresh offer round-trip")
+        #expect(vm.hasCachedCredentials, "fresh offer repopulates the cache")
+    }
+
+    @Test
+    func networkFailureInvalidatesCache() async throws {
+        // A network-class drop while streaming invalidates the cache:
+        // the path may have changed and the LiveKit room may have
+        // expired the cached ICE candidates. The next start fetches
+        // a fresh offer.
+        let (vm, collector, server, client, calls) = try await makeCachingHarness()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+        #expect(vm.hasCachedCredentials)
+
+        collector.latest().emit(disconnectReason: .networkFailure(nil))
+        await eventually { vm.state == .disconnected }
+
+        #expect(!vm.hasCachedCredentials, "network drop must invalidate the cache")
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-2")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-2")) }
+        #expect(calls.value == 2, "post-network-drop start refetched")
+    }
+
+    @Test
+    func serverClosedInvalidatesCache() async throws {
+        // The server tore the room down — cached credentials point
+        // at a non-existent room and would just dial into a void.
+        // Drop the cache so the next start mints a fresh room.
+        let (vm, collector, server, client, calls) = try await makeCachingHarness()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+        #expect(vm.hasCachedCredentials)
+
+        collector.latest().emit(disconnectReason: .serverClosed("room evicted" as String?))
+        await eventually {
+            if case .failed = vm.state { return true }
+            return false
+        }
+
+        #expect(!vm.hasCachedCredentials, "server-side close must invalidate the cache")
+        // Recover the VM out of the failed state and check the next
+        // start refetches.
+        vm.dismissError()
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-2")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-2")) }
+        #expect(calls.value == 2)
+    }
+
+    @Test
+    func swapDeviceClientInvalidatesCache() async throws {
+        // A device-client swap may be transparent or substantive;
+        // the VM cannot tell. Invalidate the cache so the next
+        // start round-trips against the new client and the new
+        // attestation binding.
+        let (vm, collector, server, client, _) = try await makeCachingHarness()
+        defer { Task { await server.stop(); await client.disconnect() } }
+
+        await vm.start()
+        collector.latest().emitStreaming(trackID: "t-1")
+        await eventually { vm.state == .streaming(MockTrack(id: "t-1")) }
+        #expect(vm.hasCachedCredentials)
+
+        let newTransport = InMemoryDeviceTransport()
+        let newClient = DeviceClient(transport: newTransport, requestTimeout: 2.0)
+        try await newClient.connect()
+        let newBroker = DeviceEventBroker(client: newClient)
+        newBroker.start()
+        defer {
+            Task {
+                newBroker.stop()
+                await newClient.disconnect()
+                await newTransport.close()
+            }
+        }
+        vm.swapDeviceClient(newClient, eventBroker: newBroker)
+
+        #expect(!vm.hasCachedCredentials, "device-client swap must invalidate the cache")
+    }
 }
 
 /// Deterministic ordered outcomes for the pre-stream auth gate.
@@ -1497,6 +1694,23 @@ final class LockedBool: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value
+    }
+}
+
+/// Tiny locked-counter helper used to assert request fan-out. Mirrors
+/// the helper in the History test file — the two test targets do not
+/// share a fixture module, so each owns its own copy.
+final class LockedCounter: @unchecked Sendable {
+    private var current: Int = 0
+    private let lock = NSLock()
+    func increment() {
+        lock.lock(); defer { lock.unlock() }
+        current += 1
+    }
+
+    var value: Int {
+        lock.lock(); defer { lock.unlock() }
+        return current
     }
 }
 

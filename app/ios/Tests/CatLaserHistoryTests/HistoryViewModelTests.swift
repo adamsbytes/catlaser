@@ -311,6 +311,173 @@ struct HistoryViewModelTests {
         }
     }
 
+    // MARK: - Optimistic mutations
+
+    @Test
+    func updateCatNamePatchesListBeforeDeviceResponds() async throws {
+        // The optimistic patch lets the user see the new name the
+        // moment they tap Save — the server round-trip is on the order
+        // of hundreds of milliseconds over Tailscale, so without this
+        // the rename feels laggy. The harness blocks the response on
+        // a continuation so the test can observe the intermediate
+        // optimistic state before the device echo lands.
+        let original = makeProfile(name: "Pancake")
+        let releaseHandler = AsyncReleaseGate()
+        var renamedDraft = original
+        renamedDraft.name = "Pancake Jr."
+        let renamed = renamedDraft
+
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [original])
+            case .getPlayHistory: return self.reply(sessions: [])
+            case .updateCatProfile:
+                releaseHandler.block()
+                return self.reply(profiles: [renamed])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+
+        let mutationTask = Task {
+            await vm.updateCatName(original, newName: "Pancake Jr.")
+        }
+
+        // Wait for the optimistic patch to land. The device response
+        // is gated, so this can only become true via the optimistic
+        // path inside ``updateCatName``.
+        await eventually {
+            if case let .loaded(profiles, _) = vm.catsState {
+                return profiles.first?.name == "Pancake Jr."
+            }
+            return false
+        }
+        if case let .loaded(profiles, _) = vm.catsState {
+            #expect(profiles.first?.name == "Pancake Jr.")
+        } else {
+            Issue.record("expected optimistic patch in .loaded, got \(vm.catsState)")
+        }
+
+        releaseHandler.release()
+        _ = await mutationTask.value
+
+        if case let .loaded(profiles, isRefreshing) = vm.catsState {
+            #expect(profiles == [renamed])
+            #expect(!isRefreshing)
+        } else {
+            Issue.record("expected device echo in .loaded, got \(vm.catsState)")
+        }
+        #expect(vm.lastActionError == nil)
+    }
+
+    @Test
+    func updateCatNameRollsBackOnDeviceFailure() async throws {
+        // A failed mutation must restore the prior name so the user
+        // doesn't see a phantom rename that the device never accepted.
+        let original = makeProfile(name: "Pancake")
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [original])
+            case .getPlayHistory: return self.reply(sessions: [])
+            case .updateCatProfile:
+                return .error(code: 99, message: "internal device error")
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        let outcome = await vm.updateCatName(original, newName: "Pancake Jr.")
+        guard case .failure = outcome else {
+            Issue.record("expected .failure on device error, got \(outcome)")
+            return
+        }
+        // Local state must show the ORIGINAL name — the rollback ran.
+        if case let .loaded(profiles, _) = vm.catsState {
+            #expect(profiles == [original])
+            #expect(profiles.first?.name == "Pancake")
+        } else {
+            Issue.record("expected rolled-back .loaded, got \(vm.catsState)")
+        }
+        #expect(vm.lastActionError != nil)
+    }
+
+    @Test
+    func deleteCatRemovesRowBeforeDeviceResponds() async throws {
+        let pancake = makeProfile(id: "cat-a", name: "Pancake")
+        let waffle = makeProfile(id: "cat-b", name: "Waffle")
+        let releaseHandler = AsyncReleaseGate()
+
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [pancake, waffle])
+            case .getPlayHistory: return self.reply(sessions: [])
+            case .deleteCatProfile:
+                releaseHandler.block()
+                return self.reply(profiles: [waffle])
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+
+        let mutationTask = Task { await vm.deleteCat(catID: "cat-a") }
+
+        // Wait for the optimistic removal — the device handler is
+        // still gated, so the only way the row disappears is the
+        // optimistic patch inside ``deleteCat``.
+        await eventually {
+            if case let .loaded(profiles, _) = vm.catsState {
+                return profiles == [waffle]
+            }
+            return false
+        }
+        if case let .loaded(profiles, _) = vm.catsState {
+            #expect(profiles == [waffle])
+        } else {
+            Issue.record("expected optimistic removal, got \(vm.catsState)")
+        }
+
+        releaseHandler.release()
+        _ = await mutationTask.value
+    }
+
+    @Test
+    func deleteCatRollsBackOnUnexpectedError() async throws {
+        // A non-NOT_FOUND failure (e.g. transient device error) means
+        // the row really should still be there — rollback restores
+        // the row at its prior position rather than leaving a stale
+        // delete that the next refresh has to reconcile.
+        let pancake = makeProfile(id: "cat-a", name: "Pancake")
+        let waffle = makeProfile(id: "cat-b", name: "Waffle")
+        let (vm, _, server, client) = try await makeHarness { request in
+            switch request.request {
+            case .getCatProfiles: return self.reply(profiles: [pancake, waffle])
+            case .getPlayHistory: return self.reply(sessions: [])
+            case .deleteCatProfile:
+                return .error(code: 99, message: "internal device error")
+            default: return .error(code: 2, message: "unexpected")
+            }
+        }
+        defer { teardown(server: server, client: client) }
+
+        await vm.start()
+        let outcome = await vm.deleteCat(catID: "cat-a")
+        guard case .failure = outcome else {
+            Issue.record("expected .failure on device error, got \(outcome)")
+            return
+        }
+        if case let .loaded(profiles, _) = vm.catsState {
+            #expect(profiles == [pancake, waffle])
+        } else {
+            Issue.record("expected restored list, got \(vm.catsState)")
+        }
+        #expect(vm.lastActionError != nil)
+    }
+
     @Test
     func deleteCatNotFoundDropsErrorAndTriggersBackgroundRefresh() async throws {
         // The device returns NOT_FOUND if the row is already gone.
@@ -1177,6 +1344,37 @@ final class LockedString: @unchecked Sendable {
     func get() -> String {
         lock.lock(); defer { lock.unlock() }
         return value
+    }
+}
+
+/// Synchronisation primitive for tests that need to observe an
+/// optimistic patch BEFORE the device round-trip completes.
+///
+/// Test code passes a gate to a scripted server handler that
+/// services a mutation; ``block()`` is called on the handler thread
+/// and parks until the test calls ``release()``. While the gate is
+/// blocked, the view model has dispatched the wire request but has
+/// not yet seen a response, so any state-mutation that occurs in
+/// that window is observably from the optimistic-patch path.
+///
+/// Internally a counted dispatch semaphore so it's safe to invoke
+/// across the synchronous handler thread and the asynchronous test
+/// thread.
+final class AsyncReleaseGate: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    /// Park the calling thread until ``release()`` is invoked.
+    /// Synchronous on purpose — the scripted-server handler is a
+    /// non-async closure and using ``await`` would defeat the gate.
+    func block() {
+        semaphore.wait()
+    }
+
+    /// Release exactly one waiter. Subsequent ``release()`` calls
+    /// are no-ops via the semaphore counter, which is the right
+    /// behaviour for tests that may overshoot the wait condition.
+    func release() {
+        semaphore.signal()
     }
 }
 

@@ -469,6 +469,12 @@ public struct Catlaser_Detection_V1_IdentityRequest: Sendable {
   /// Embedding model confidence for this crop.
   public var confidence: Float = 0
 
+  /// JPEG thumbnail crop of the cat at the moment of embedding completion.
+  /// Empty when the vision daemon has no thumbnail encoder available; the
+  /// Python side treats an empty thumbnail as "no in-app preview yet" and
+  /// the iOS naming sheet falls back to a placeholder image.
+  public var thumbnail: Data = Data()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -900,7 +906,7 @@ extension Catlaser_Detection_V1_TrackLost: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Catlaser_Detection_V1_IdentityRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".IdentityRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}track_id\0\u{1}embedding\0\u{1}confidence\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}track_id\0\u{1}embedding\0\u{1}confidence\0\u{1}thumbnail\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -911,6 +917,7 @@ extension Catlaser_Detection_V1_IdentityRequest: SwiftProtobuf.Message, SwiftPro
       case 1: try { try decoder.decodeSingularUInt32Field(value: &self.trackID) }()
       case 2: try { try decoder.decodeSingularBytesField(value: &self.embedding) }()
       case 3: try { try decoder.decodeSingularFloatField(value: &self.confidence) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.thumbnail) }()
       default: break
       }
     }
@@ -926,6 +933,9 @@ extension Catlaser_Detection_V1_IdentityRequest: SwiftProtobuf.Message, SwiftPro
     if self.confidence.bitPattern != 0 {
       try visitor.visitSingularFloatField(value: self.confidence, fieldNumber: 3)
     }
+    if !self.thumbnail.isEmpty {
+      try visitor.visitSingularBytesField(value: self.thumbnail, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -933,6 +943,7 @@ extension Catlaser_Detection_V1_IdentityRequest: SwiftProtobuf.Message, SwiftPro
     if lhs.trackID != rhs.trackID {return false}
     if lhs.embedding != rhs.embedding {return false}
     if lhs.confidence != rhs.confidence {return false}
+    if lhs.thumbnail != rhs.thumbnail {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

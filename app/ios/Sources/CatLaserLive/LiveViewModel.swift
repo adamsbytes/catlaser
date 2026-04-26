@@ -125,6 +125,22 @@ public final class LiveViewModel {
     /// instead of a spinner that never resolves.
     public static let stopTimeout: TimeInterval = 5
 
+    /// How long a successful ``StreamOffer`` round-trip stays cached
+    /// for re-use by a subsequent ``start()``. The LiveKit subscriber
+    /// JWT in the offer is short-lived but well within ten minutes;
+    /// bounding the cache here keeps Watch live → Stop → Watch live
+    /// cycles within the cache window instant (no round-trip, no
+    /// LiveKit room recreation) without risking a stale credential
+    /// being used after the device has rotated the room.
+    ///
+    /// The cache is a soft hint, not a contract. Any stream-side
+    /// failure (drop, server-side close, dial error) invalidates the
+    /// cache so the next ``start()`` falls back to a fresh offer
+    /// fetch. A device-client swap (sign-out, re-pair, supervisor
+    /// reconnect) also invalidates because the freshly-bound device
+    /// owns its own room mint.
+    public static let credentialCacheTTL: TimeInterval = 600
+
     /// The device control channel. ``var`` rather than ``let`` so a
     /// supervisor reconnect on the SAME paired device can swap in a
     /// fresh client without tearing down the user-visible streaming
@@ -135,11 +151,26 @@ public final class LiveViewModel {
     private let liveKitAllowlist: LiveKitHostAllowlist
     private let connectTimeout: TimeInterval
     private let stopTimeoutInterval: TimeInterval
+    private let credentialCacheTTL: TimeInterval
     private let clock: @Sendable () -> Date
     private var currentSession: (any LiveStreamSession)?
     private var eventsTask: Task<Void, Never>?
     private var connectTimeoutTask: Task<Void, Never>?
     private var statusObservationTask: Task<Void, Never>?
+    private var cachedCredentials: CachedCredentials?
+
+    /// Cached subscriber credentials and their wall-clock expiry.
+    ///
+    /// Recorded after a successful ``fetchStreamOffer`` round-trip
+    /// and consumed by the next ``start()`` if it fires inside
+    /// ``credentialCacheTTL``. Cleared eagerly on any path that
+    /// suggests the cached value can no longer dial: server-side
+    /// teardown, network-class drop, dial failure, device-client
+    /// swap, or a stop that explicitly invalidates.
+    private struct CachedCredentials {
+        let credentials: LiveStreamCredentials
+        let expiresAt: Date
+    }
 
     public init(
         deviceClient: DeviceClient,
@@ -149,6 +180,7 @@ public final class LiveViewModel {
         eventBroker: DeviceEventBroker? = nil,
         connectTimeout: TimeInterval = LiveViewModel.connectTimeout,
         stopTimeout: TimeInterval = LiveViewModel.stopTimeout,
+        credentialCacheTTL: TimeInterval = LiveViewModel.credentialCacheTTL,
         clock: @escaping @Sendable () -> Date = { Date() },
     ) {
         self.deviceClient = deviceClient
@@ -157,6 +189,7 @@ public final class LiveViewModel {
         self.sessionFactory = sessionFactory
         self.connectTimeout = connectTimeout
         self.stopTimeoutInterval = stopTimeout
+        self.credentialCacheTTL = credentialCacheTTL
         self.clock = clock
         if let eventBroker {
             startStatusObservation(broker: eventBroker)
@@ -211,32 +244,48 @@ public final class LiveViewModel {
             return
         }
 
-        state = .requestingOffer
-
-        let offer: Catlaser_App_V1_StreamOffer
-        do {
-            offer = try await fetchStreamOffer()
-        } catch let error as LiveViewError {
-            state = .failed(error)
-            return
-        } catch let error as DeviceClientError {
-            state = .failed(.from(error))
-            return
-        } catch {
-            state = .failed(.internalFailure(error.localizedDescription))
-            return
-        }
-
+        // Cached credentials short-circuit the device round-trip and
+        // the LiveKit room mint. The fast path is the dominant case
+        // for the "stop, then watch again seconds later" pattern,
+        // turning a 500 ms-1 s spinner into an immediate ``.connecting``.
         let credentials: LiveStreamCredentials
-        do {
-            credentials = try LiveStreamCredentials(offer: offer, allowlist: liveKitAllowlist)
-        } catch {
-            state = .failed(.streamOfferInvalid(error))
-            await rollbackDeviceStream()
-            return
-        }
+        if let cached = consumeFreshCachedCredentials() {
+            credentials = cached
+            state = .connecting(credentials)
+        } else {
+            state = .requestingOffer
 
-        state = .connecting(credentials)
+            let offer: Catlaser_App_V1_StreamOffer
+            do {
+                offer = try await fetchStreamOffer()
+            } catch let error as LiveViewError {
+                state = .failed(error)
+                return
+            } catch let error as DeviceClientError {
+                state = .failed(.from(error))
+                return
+            } catch {
+                state = .failed(.internalFailure(error.localizedDescription))
+                return
+            }
+
+            do {
+                credentials = try LiveStreamCredentials(offer: offer, allowlist: liveKitAllowlist)
+            } catch {
+                state = .failed(.streamOfferInvalid(error))
+                await rollbackDeviceStream()
+                return
+            }
+
+            // Cache the fresh credentials for a follow-up Watch live
+            // tap. Population happens here (not after the LiveKit
+            // dial) because the offer round-trip is the expensive
+            // part the cache is meant to skip; the dial itself runs
+            // every time so a re-use of the same room is what the
+            // device handler sees on the second tap.
+            recordCredentialsInCache(credentials)
+            state = .connecting(credentials)
+        }
 
         let session = sessionFactory()
         currentSession = session
@@ -247,6 +296,10 @@ public final class LiveViewModel {
             try await session.connect(using: credentials)
         } catch {
             cancelConnectTimeout()
+            // The dial failed against these specific credentials —
+            // re-using them on a retry would just hit the same wall.
+            // Drop them so the user's next tap fetches a fresh offer.
+            invalidateCredentialCache()
             state = .failed(.streamConnectFailed(error.localizedDescription))
             await tearDownSession()
             await rollbackDeviceStream()
@@ -381,6 +434,13 @@ public final class LiveViewModel {
         eventBroker newBroker: DeviceEventBroker,
     ) {
         deviceClient = newClient
+        // Cached credentials were minted by the previous transport's
+        // device handler. A swap may be transparent (same paired
+        // device, fresh socket) or substantive (sign-out, re-pair to
+        // a different device); we cannot tell from here. Drop the
+        // cache so the next ``start()`` round-trips against the new
+        // client and gets a token bound to its identity.
+        invalidateCredentialCache()
         statusObservationTask?.cancel()
         statusObservationTask = nil
         startStatusObservation(broker: newBroker)
@@ -399,6 +459,40 @@ public final class LiveViewModel {
     /// constructed without a broker stays silent and a VM constructed
     /// with one does observe.
     public var isObservingStatus: Bool { statusObservationTask != nil }
+
+    /// Test-only: whether the credential cache currently holds a
+    /// non-expired entry. Tests assert this to verify population on
+    /// successful start, eviction on failure paths, and expiry.
+    public var hasCachedCredentials: Bool {
+        guard let cached = cachedCredentials else { return false }
+        return cached.expiresAt > clock()
+    }
+
+    // MARK: - Credential cache
+
+    /// Return the cached credentials if present and unexpired; ``nil``
+    /// otherwise. Lazy expiry check: a stale entry is dropped at the
+    /// moment a caller asks for it so the cache never serves a value
+    /// past its TTL.
+    private func consumeFreshCachedCredentials() -> LiveStreamCredentials? {
+        guard let cached = cachedCredentials else { return nil }
+        if cached.expiresAt > clock() {
+            return cached.credentials
+        }
+        cachedCredentials = nil
+        return nil
+    }
+
+    private func recordCredentialsInCache(_ credentials: LiveStreamCredentials) {
+        cachedCredentials = CachedCredentials(
+            credentials: credentials,
+            expiresAt: clock().addingTimeInterval(credentialCacheTTL),
+        )
+    }
+
+    private func invalidateCredentialCache() {
+        cachedCredentials = nil
+    }
 
     // MARK: - Session status observation
 
@@ -596,7 +690,10 @@ public final class LiveViewModel {
             // sees `.failed(.unexpectedPublisher)` and may surface a
             // "report this device" affordance; at minimum the user
             // is NOT left staring at a spinner that will never
-            // resolve.
+            // resolve. Drop the cache so a retry against this device
+            // mints a fresh offer rather than re-using a token that
+            // points at a compromised room.
+            invalidateCredentialCache()
             state = .failed(.unexpectedPublisher(identity: identity))
             await tearDownSession()
             await rollbackDeviceStream()
@@ -608,6 +705,10 @@ public final class LiveViewModel {
                 // VM will finalise in `stop()`.
                 return
             case let .serverClosed(message):
+                // The server tore the room down. Cached creds point
+                // at a non-existent room; the next ``start()`` must
+                // request a fresh offer.
+                invalidateCredentialCache()
                 state = .failed(.streamDropped(message))
                 await tearDownSession()
                 await rollbackDeviceStream()
@@ -627,6 +728,14 @@ public final class LiveViewModel {
                 // moment the VM leaves ``.streaming``) communicates any
                 // underlying transport issue — the LiveView itself does
                 // not need to re-surface it here.
+                //
+                // Network-class drops invalidate the cache: the
+                // underlying path likely changed (Wi-Fi → cellular,
+                // VPN re-key) and the LiveKit room may have GC'd
+                // the ICE candidate the cached token authorized.
+                // Forcing a fresh offer on resume guarantees the
+                // dial uses paths the server still recognises.
+                invalidateCredentialCache()
                 didDropFromNetwork = true
                 state = .disconnected
                 await tearDownSession()
