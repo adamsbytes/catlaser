@@ -8,6 +8,15 @@ allow = [
     "Unlicense",
     "Zlib",
     "Unicode-3.0",
+    # `jpeg-encoder` is dual-licensed `(MIT OR Apache-2.0) AND IJG` — the
+    # IJG portion covers the JPEG default quantization tables derived from
+    # the Independent JPEG Group reference implementation. The IJG license
+    # is permissive (free for any use, requires acknowledgement in product
+    # documentation) and is the standard licensing path for any Rust JPEG
+    # encoder; the alternatives are AGPL (zenjpeg), C-bindings (mozjpeg-rs),
+    # or hand-rolling an encoder. Acknowledgement lives in the product's
+    # legal notices alongside other open-source attributions.
+    "IJG",
 ]
 confidence-threshold = 0.8
 

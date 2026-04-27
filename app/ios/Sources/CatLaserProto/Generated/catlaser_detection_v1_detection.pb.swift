@@ -469,10 +469,11 @@ public struct Catlaser_Detection_V1_IdentityRequest: Sendable {
   /// Embedding model confidence for this crop.
   public var confidence: Float = 0
 
-  /// JPEG thumbnail crop of the cat at the moment of embedding completion.
-  /// Empty when the vision daemon has no thumbnail encoder available; the
-  /// Python side treats an empty thumbnail as "no in-app preview yet" and
-  /// the iOS naming sheet falls back to a placeholder image.
+  /// JPEG thumbnail crop of the cat at the moment of embedding completion
+  /// (the same NHWC RGB tensor the model averaged into the vector, encoded
+  /// at quality 80, ~3-5 KB). Empty only on a transient encoder failure;
+  /// Python treats an empty thumbnail as a defensive fallback (skips the
+  /// pending_cats row, still ships the push and data-channel event).
   public var thumbnail: Data = Data()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()

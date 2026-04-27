@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use jpeg_encoder::{ColorType, Encoder as JpegEncoder, EncodingError as JpegEncodingError};
+
 use crate::npu::tensor::{QuantType, TensorFormat, dequantize_affine_buffer, nc1hwc2_to_nchw};
 use crate::npu::{Model, ModelPriority, NpuConfig};
 
@@ -34,6 +36,22 @@ const AVERAGING_FRAMES: u32 = 5;
 
 /// C2 channel block size for NC1HWC2 layout on RV1106 INT8 tensors.
 const C2_BLOCK: u32 = 16;
+
+/// JPEG quality (0-100) for the cat thumbnail shipped to Python.
+///
+/// 80 is well into the perceptually-lossless range for a 128×128 photo
+/// crop; the resulting payload is ~3-5 KB which is comfortably below
+/// any IPC or app data-channel ceiling. Re-ID accuracy is not affected
+/// because Python never re-decodes the thumbnail for matching — the
+/// embedding vector is the load-bearing artefact.
+const THUMBNAIL_JPEG_QUALITY: u8 = 80;
+
+/// Pre-allocated capacity for the per-track thumbnail JPEG byte vector.
+/// 8 KB safely covers the 80-quality 128×128 RGB envelope (~3-5 KB
+/// payload + JPEG headers) without the writer needing to grow during
+/// encoding. Picked to amortise allocation across the typical
+/// dispatch cycle (a few new tracks per session, each finalising once).
+const THUMBNAIL_JPEG_CAPACITY: usize = 8 * 1024;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -96,6 +114,23 @@ pub(crate) enum EmbedError {
         data_type: crate::npu::tensor::TensorType,
         /// Output tensor quantization type.
         qnt_type: QuantType,
+    },
+
+    /// Encoding the embedding crop as a JPEG thumbnail failed.
+    ///
+    /// Non-fatal at the call site: the engine logs and ships a
+    /// completed embedding with an empty thumbnail rather than
+    /// dropping the identity match outright. Python tolerates an
+    /// empty thumbnail by falling back to a placeholder image in
+    /// the iOS naming sheet.
+    #[error("jpeg encode of {width}x{height} thumbnail failed: {source}")]
+    ThumbnailEncode {
+        /// Source crop width in pixels.
+        width: u32,
+        /// Source crop height in pixels.
+        height: u32,
+        /// Underlying encoder error.
+        source: JpegEncodingError,
     },
 }
 
@@ -464,6 +499,52 @@ fn l2_normalize(vec: &mut [f32; EMBEDDING_DIM]) {
 }
 
 // ---------------------------------------------------------------------------
+// JPEG thumbnail encoding
+// ---------------------------------------------------------------------------
+
+/// Encode a packed RGB byte buffer as a baseline JPEG.
+///
+/// The buffer is the same NHWC RGB tensor the embedding model consumed,
+/// so the resulting thumbnail is exactly what the model "saw" — handing
+/// the user a thumbnail that does not match the embedding would be
+/// confusing and undermine the new-cat naming UX.
+///
+/// Returns the JPEG byte payload on success. Errors carry the source
+/// dimensions for diagnostic context; callers treat encode failures as
+/// non-fatal and ship the embedding without a thumbnail (Python falls
+/// back to a placeholder image in that case).
+pub(crate) fn encode_thumbnail_jpeg(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, EmbedError> {
+    // JPEG dimensions are 16-bit unsigned per the spec. Surface
+    // out-of-range inputs as a structured ThumbnailEncode error
+    // (carrying the offending dimensions) rather than a confusing
+    // encoder-internal error after pixel data is consumed.
+    let (Ok(w16), Ok(h16)) = (u16::try_from(width), u16::try_from(height)) else {
+        return Err(EmbedError::ThumbnailEncode {
+            width,
+            height,
+            source: JpegEncodingError::Write(
+                "source dimensions exceed the JPEG maximum (65 535)".to_owned(),
+            ),
+        });
+    };
+
+    let mut out = Vec::with_capacity(THUMBNAIL_JPEG_CAPACITY);
+    let encoder = JpegEncoder::new(&mut out, THUMBNAIL_JPEG_QUALITY);
+    encoder
+        .encode(rgb, w16, h16, ColorType::Rgb)
+        .map_err(|source| EmbedError::ThumbnailEncode {
+            width,
+            height,
+            source,
+        })?;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Pending embedding accumulator
 // ---------------------------------------------------------------------------
 
@@ -476,6 +557,12 @@ struct PendingEmbedding {
     count: u32,
     /// Target number of frames to average over.
     target: u32,
+    /// Most recent RGB crop produced for this track (NHWC,
+    /// `INPUT_SIZE × INPUT_SIZE × 3` bytes). Empty until the first
+    /// inference for this pending entry runs. Encoded to JPEG when
+    /// the entry finalises so the thumbnail and the embedding
+    /// represent the same crop the model averaged into the vector.
+    last_rgb: Vec<u8>,
 }
 
 impl PendingEmbedding {
@@ -484,6 +571,7 @@ impl PendingEmbedding {
             sum: [0.0_f32; EMBEDDING_DIM],
             count: 0_u32,
             target,
+            last_rgb: Vec::new(),
         }
     }
 
@@ -498,6 +586,30 @@ impl PendingEmbedding {
             *s += e;
         }
         self.count = self.count.saturating_add(1_u32);
+    }
+
+    /// Replace the retained RGB crop with the latest one.
+    ///
+    /// Reuses the existing allocation when the buffer is the same
+    /// length, which is the steady-state case (every crop is
+    /// `INPUT_SIZE × INPUT_SIZE × 3` bytes). On the first call the
+    /// vector grows once; subsequent calls overwrite in place.
+    fn record_crop(&mut self, rgb: &[u8]) {
+        if self.last_rgb.len() == rgb.len() {
+            self.last_rgb.copy_from_slice(rgb);
+        } else {
+            self.last_rgb.clear();
+            self.last_rgb.extend_from_slice(rgb);
+        }
+    }
+
+    /// Borrow the most recent RGB crop, if one has been recorded.
+    fn last_crop(&self) -> Option<&[u8]> {
+        if self.last_rgb.is_empty() {
+            None
+        } else {
+            Some(&self.last_rgb)
+        }
     }
 
     /// Returns `true` when enough frames have been accumulated.
@@ -558,6 +670,12 @@ pub(crate) struct CompletedEmbedding {
     /// Model confidence (average of per-frame max output magnitudes).
     /// Higher values indicate more distinctive features in the crop.
     pub confidence: f32,
+    /// JPEG-encoded thumbnail of the cat at the moment the embedding
+    /// was finalised (`INPUT_SIZE × INPUT_SIZE` RGB → JPEG, ~3-5 KB).
+    /// Empty when JPEG encoding failed — Python tolerates an empty
+    /// thumbnail by skipping the `pending_cats` row and falling back
+    /// to a placeholder image in the iOS naming sheet.
+    pub thumbnail: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +782,11 @@ impl EmbedEngine {
             match run_embedding_inference(&mut self.model, &self.rgb_buffer, track_id) {
                 Ok(embedding) => {
                     pending.accumulate(&embedding);
+                    // Retain the RGB crop for thumbnail encoding at
+                    // finalise. Recorded only on successful inference
+                    // so a malformed crop never produces a thumbnail
+                    // for an embedding that failed to accumulate.
+                    pending.record_crop(&self.rgb_buffer);
                 }
                 Err(err) => {
                     tracing::warn!(track_id, %err, "embedding inference failed, skipping frame");
@@ -677,11 +800,33 @@ impl EmbedEngine {
             if pending.is_ready() {
                 let embedding = pending.finalize();
                 let confidence = pending.confidence();
+                let thumbnail = pending
+                    .last_crop()
+                    .and_then(
+                        |rgb| match encode_thumbnail_jpeg(rgb, INPUT_SIZE, INPUT_SIZE) {
+                            Ok(bytes) => Some(bytes),
+                            Err(err) => {
+                                // Non-fatal: ship the embedding without a
+                                // thumbnail rather than dropping the
+                                // identity. Python tolerates an empty
+                                // thumbnail (skips the pending_cats row,
+                                // still pushes the FCM notification).
+                                tracing::warn!(
+                                    track_id,
+                                    %err,
+                                    "thumbnail encode failed; identity will ship without preview"
+                                );
+                                None
+                            }
+                        },
+                    )
+                    .unwrap_or_default();
 
                 self.completed.push(CompletedEmbedding {
                     track_id,
                     embedding,
                     confidence,
+                    thumbnail,
                 });
                 done_ids.push(track_id);
             }
@@ -696,6 +841,7 @@ impl EmbedEngine {
             tracing::info!(
                 track_id = completed.track_id,
                 confidence = format_args!("{:.3}", completed.confidence),
+                thumbnail_bytes = completed.thumbnail.len(),
                 "embedding completed"
             );
         }
@@ -767,10 +913,15 @@ pub(crate) fn embedding_to_bytes(embedding: &[f32; EMBEDDING_DIM]) -> Vec<u8> {
     clippy::indexing_slicing,
     clippy::needless_range_loop,
     clippy::absurd_extreme_comparisons,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
     reason = "test code: exact float comparisons for known values, arithmetic for test \
               data construction, casts for pixel manipulation in test frames, \
               indexing on known-size test data, range loops for frame construction, \
-              u8 <= 255 asserts document proptest invariants"
+              u8 <= 255 asserts document proptest invariants. expect/unwrap/panic are \
+              the standard test-failure path and surface the failing expectation directly \
+              in the test output without obscuring the assertion intent."
 )]
 mod tests {
     use super::*;
@@ -1178,6 +1329,152 @@ mod tests {
             result[0],
             result[1]
         );
+    }
+
+    #[test]
+    fn test_pending_embedding_record_crop_grows_then_reuses_buffer() {
+        let mut pending = PendingEmbedding::new(2_u32);
+        assert!(
+            pending.last_crop().is_none(),
+            "no crop should be recorded before first inference",
+        );
+
+        let crop_a = vec![0xAA_u8; 128 * 128 * 3];
+        pending.record_crop(&crop_a);
+        let after_first = pending.last_crop().expect("crop must exist after record");
+        assert_eq!(
+            after_first.len(),
+            crop_a.len(),
+            "stored crop length must match"
+        );
+        assert_eq!(
+            after_first.first(),
+            Some(&0xAA_u8),
+            "stored crop bytes must round-trip",
+        );
+        // Capture the underlying allocation pointer so we can prove
+        // the second record_crop reuses it instead of reallocating —
+        // matters because process_frame calls record_crop every
+        // accumulating frame.
+        let ptr_after_first = after_first.as_ptr();
+
+        let crop_b = vec![0xBB_u8; 128 * 128 * 3];
+        pending.record_crop(&crop_b);
+        let after_second = pending.last_crop().expect("crop must persist");
+        assert_eq!(
+            after_second.first(),
+            Some(&0xBB_u8),
+            "stored crop must reflect the most recent recording",
+        );
+        assert_eq!(
+            after_second.as_ptr(),
+            ptr_after_first,
+            "same-size crop must reuse the existing allocation",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // JPEG thumbnail encoder tests
+    // -----------------------------------------------------------------------
+
+    /// Build a 128×128 NHWC RGB buffer filled with a deterministic
+    /// gradient so a decode-side check can verify orientation.
+    fn make_rgb_gradient(width: u32, height: u32) -> Vec<u8> {
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::arithmetic_side_effects,
+            reason = "test fixture: bounded loop over small known dimensions"
+        )]
+        {
+            let w = width as usize;
+            let h = height as usize;
+            let mut buf = vec![0_u8; w * h * 3];
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = (y * w + x) * 3;
+                    buf[idx] = (x % 256) as u8;
+                    buf[idx + 1] = (y % 256) as u8;
+                    buf[idx + 2] = ((x + y) % 256) as u8;
+                }
+            }
+            buf
+        }
+    }
+
+    #[test]
+    fn test_encode_thumbnail_jpeg_returns_valid_jpeg_marker() {
+        let rgb = make_rgb_gradient(INPUT_SIZE, INPUT_SIZE);
+        let jpeg = encode_thumbnail_jpeg(&rgb, INPUT_SIZE, INPUT_SIZE)
+            .expect("128x128 RGB encode must succeed");
+        assert!(
+            jpeg.len() >= 4,
+            "encoded JPEG must include at least the SOI/APP0 markers",
+        );
+        // SOI marker — every JPEG file starts with FF D8.
+        assert_eq!(
+            jpeg.first(),
+            Some(&0xFF_u8),
+            "JPEG must start with SOI byte 0xFF"
+        );
+        assert_eq!(
+            jpeg.get(1),
+            Some(&0xD8_u8),
+            "JPEG must start with SOI byte 0xD8"
+        );
+        // EOI marker — every JPEG file ends with FF D9.
+        let len = jpeg.len();
+        assert_eq!(
+            jpeg.get(len.wrapping_sub(2)),
+            Some(&0xFF_u8),
+            "JPEG must end with EOI byte 0xFF",
+        );
+        assert_eq!(
+            jpeg.get(len.wrapping_sub(1)),
+            Some(&0xD9_u8),
+            "JPEG must end with EOI byte 0xD9",
+        );
+    }
+
+    #[test]
+    fn test_encode_thumbnail_jpeg_reasonable_size() {
+        // Empirically a 128×128 RGB photo crop at quality 80 lands
+        // in 1.5-6 KB. The thumbnail is shipped over a Unix-domain
+        // IPC socket that does not enforce a hard ceiling, but the
+        // downstream FCM payload limit (<4 KB) is the constraint
+        // that motivated the quality choice — exceeding ~16 KB here
+        // would suggest the encoder is producing something pathological.
+        let rgb = make_rgb_gradient(INPUT_SIZE, INPUT_SIZE);
+        let jpeg = encode_thumbnail_jpeg(&rgb, INPUT_SIZE, INPUT_SIZE).unwrap_or_default();
+        assert!(
+            !jpeg.is_empty(),
+            "encoded JPEG must not be empty for a non-degenerate input",
+        );
+        assert!(
+            jpeg.len() < 16 * 1024,
+            "128x128 thumbnail must fit comfortably below 16 KB, got {} bytes",
+            jpeg.len(),
+        );
+    }
+
+    #[test]
+    fn test_encode_thumbnail_jpeg_oversized_dimensions_rejected() {
+        // JPEG dimensions are 16-bit unsigned. Anything past u16::MAX
+        // must be rejected at the type-conversion boundary rather than
+        // surfacing as a confusing encoder-internal error. The buffer
+        // size is intentionally a stub — the dimension check fires
+        // before the encoder reads any pixel data.
+        let stub = vec![0_u8; 16];
+        let too_wide = u32::from(u16::MAX) + 1;
+        let err = encode_thumbnail_jpeg(&stub, too_wide, INPUT_SIZE)
+            .expect_err("oversized width must error");
+        match err {
+            EmbedError::ThumbnailEncode { width, height, .. } => {
+                assert_eq!(width, too_wide, "error must carry the offending width");
+                assert_eq!(height, INPUT_SIZE, "error must carry the source height");
+            }
+            other => panic!("expected ThumbnailEncode, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------

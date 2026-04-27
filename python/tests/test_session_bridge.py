@@ -511,14 +511,15 @@ class TestNewCatDetection:
                     track_id=42,
                     embedding=emb,
                     confidence=0.83,
-                    thumbnail=b"",  # vision daemon hasn't shipped a thumbnail
+                    thumbnail=b"",  # transient encoder failure on the Rust side
                 ),
             ),
         )
-        # The schema requires a non-empty thumbnail, so the pending
-        # row is skipped — but the push notification still fires so
-        # the owner knows a cat appeared even if naming requires a
-        # later embedding cycle once thumbnails are wired up.
+        # The schema requires a non-empty thumbnail. Vision normally
+        # ships one with every IdentityRequest, but a transient JPEG
+        # encode failure can leave it empty — defensive belt-and-braces
+        # behaviour: skip the pending_cats persist, still queue the
+        # notification so the owner is told the unknown cat appeared.
         row = db.conn.execute(
             "SELECT track_id_hint FROM pending_cats WHERE track_id_hint = ?",
             (42,),

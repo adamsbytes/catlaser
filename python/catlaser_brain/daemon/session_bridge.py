@@ -501,16 +501,18 @@ class SessionBridge:
         return OutboundMessages(identity_results=(result,))
 
     def _record_unknown_cat(self, req: det.IdentityRequest) -> None:
-        """Persist a pending-cat row when possible and queue a notification.
+        """Persist a pending-cat row and queue a notification.
 
         The iOS naming UX needs a ``pending_cats`` row keyed by
         ``track_id`` so the user's :class:`IdentifyNewCatRequest`
-        succeeds. The schema requires a non-empty thumbnail, so the
-        row is written only when the IPC carried one. The
-        notification is queued in either case — the push and the
-        data-channel event are independently useful (a push that
-        doesn't lead to a successful naming flow still tells the
-        owner a cat appeared).
+        succeeds. The vision daemon ships a JPEG-encoded thumbnail
+        with every :class:`IdentityRequest`, so the row write is the
+        normal path. An empty thumbnail is treated as a defensive
+        fall-back: the schema check would refuse the row, so we skip
+        the persist but still queue the notification — the user gets
+        the push, opens the app, and the missing pending row surfaces
+        as an explicit "couldn't find this cat — try again" rather
+        than a silent drop.
         """
         thumbnail: bytes = bytes(req.thumbnail)
         if thumbnail:

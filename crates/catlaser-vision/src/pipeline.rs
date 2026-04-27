@@ -678,6 +678,7 @@ pub(crate) fn build_identity_request_events(completed: &[CompletedEmbedding]) ->
                     track_id: c.track_id,
                     embedding: embed::embedding_to_bytes(&c.embedding),
                     confidence: c.confidence,
+                    thumbnail: c.thumbnail.clone(),
                     ..Default::default()
                 },
             ))),
@@ -3403,10 +3404,12 @@ mod tests {
     fn test_build_identity_request_events_produces_identity_request() {
         let mut embedding = [0.0_f32; 128];
         embedding[0] = 1.0_f32;
+        let thumbnail_bytes = vec![0xFF_u8, 0xD8_u8, 0xFF_u8, 0xE0_u8];
         let completed = [CompletedEmbedding {
             track_id: 42_u32,
             embedding,
             confidence: 0.85_f32,
+            thumbnail: thumbnail_bytes.clone(),
         }];
         let events = build_identity_request_events(&completed);
         assert_eq!(events.len(), 1, "one completed must produce one event");
@@ -3424,6 +3427,10 @@ mod tests {
                     (ir.confidence - 0.85_f32).abs() < 0.01_f32,
                     "confidence must match"
                 );
+                assert_eq!(
+                    ir.thumbnail, thumbnail_bytes,
+                    "thumbnail bytes must propagate verbatim"
+                );
             }
             other => panic!("expected IdentityRequest, got {other:?}"),
         }
@@ -3437,11 +3444,13 @@ mod tests {
                 track_id: 1_u32,
                 embedding: emb,
                 confidence: 0.9_f32,
+                thumbnail: Vec::new(),
             },
             CompletedEmbedding {
                 track_id: 2_u32,
                 embedding: emb,
                 confidence: 0.7_f32,
+                thumbnail: Vec::new(),
             },
         ];
         let events = build_identity_request_events(&completed);
@@ -3466,6 +3475,7 @@ mod tests {
             track_id: 7_u32,
             embedding,
             confidence: 0.95_f32,
+            thumbnail: Vec::new(),
         }];
         let events = build_identity_request_events(&completed);
         let event = events.first().expect("event must exist");
